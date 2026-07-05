@@ -1,6 +1,6 @@
 import { hexToRgb, rgbToHex } from "@/lib/canvas/color";
+import { maskFromImageData } from "@/lib/canvas/ink-mask";
 import { isPdfSource, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
-import { skeletonizeMask, subpixelStrokeStyle, visitSubpixelMaskPlan } from "@/lib/canvas/subpixel-mask";
 import {
   DEFAULT_GRID_LINE_COLOR,
   GRAPH_MAJOR_CELL_PIXELS,
@@ -35,7 +35,6 @@ type ContentBounds = {
 };
 
 const contentBoundsCache = new WeakMap<HTMLCanvasElement, ContentBounds>();
-const SUBPIXEL_PATH_BATCH_SIZE = 5000;
 
 function graphDimensions(settings: GraphSettings) {
   const graphWidth = Math.max(1, Math.round(settings.graphWidth || 1));
@@ -188,25 +187,6 @@ function findContentBounds(canvas: HTMLCanvasElement): ContentBounds {
   };
   contentBoundsCache.set(canvas, bounds);
   return bounds;
-}
-
-function maskFromImageData(imageData: ImageData) {
-  const mask = new Uint8Array(imageData.width * imageData.height);
-  const data = imageData.data;
-  let count = 0;
-
-  for (let index = 0, pixel = 0; index < data.length; index += 4, pixel += 1) {
-    const alpha = data[index + 3];
-    if (alpha < 16) continue;
-
-    const luma = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
-    if (luma < 238) {
-      mask[pixel] = 1;
-      count += 1;
-    }
-  }
-
-  return { mask, count };
 }
 
 function findOutside(edgeMask: Uint8Array, width: number, height: number) {
@@ -443,10 +423,7 @@ function buildArtworkMasks(imageData: ImageData, settings: GraphSettings) {
 
   const dimensions = graphDimensions(settings);
   const imageLineThickness = clampImageLineThickness(settings.imageLineThickness);
-  const outlineRadius =
-    imageLineThickness < 1
-      ? 0
-      : Math.max(0, Math.round(Math.min(dimensions.minorWidth, dimensions.minorHeight) * 0.045 * imageLineThickness));
+  const outlineRadius = Math.max(0, Math.round(Math.min(dimensions.minorWidth, dimensions.minorHeight) * 0.045 * imageLineThickness));
   outlineMask = dilateMask(outlineMask, width, height, outlineRadius);
 
   return { fillMask, outlineMask };
@@ -638,69 +615,6 @@ function drawMaskLayer(
   context.drawImage(softened, 0, 0);
 }
 
-function drawSubpixelMaskLayer(
-  context: CanvasRenderingContext2D,
-  mask: Uint8Array,
-  width: number,
-  height: number,
-  color: string,
-  lineWidth: number,
-) {
-  const drawableMask = skeletonizeMask(mask, width, height);
-  const { alpha, strokeWidth } = subpixelStrokeStyle(lineWidth);
-
-  context.save();
-  context.globalAlpha = alpha;
-  context.strokeStyle = color;
-  context.fillStyle = color;
-  context.lineWidth = strokeWidth;
-  context.lineCap = "round";
-  context.lineJoin = "round";
-
-  let segmentCount = 0;
-  context.beginPath();
-
-  function flushSegments() {
-    if (!segmentCount) return;
-    context.stroke();
-    context.beginPath();
-    segmentCount = 0;
-  }
-
-  visitSubpixelMaskPlan(drawableMask, width, height, {
-    segment: (segment) => {
-      context.moveTo(segment.x1, segment.y1);
-      context.lineTo(segment.x2, segment.y2);
-      segmentCount += 1;
-      if (segmentCount >= SUBPIXEL_PATH_BATCH_SIZE) flushSegments();
-    },
-  });
-
-  flushSegments();
-
-  let dotCount = 0;
-  context.beginPath();
-
-  function flushDots() {
-    if (!dotCount) return;
-    context.fill();
-    context.beginPath();
-    dotCount = 0;
-  }
-
-  visitSubpixelMaskPlan(drawableMask, width, height, {
-    dot: (dot) => {
-      context.moveTo(dot.x + strokeWidth / 2, dot.y);
-      context.arc(dot.x, dot.y, strokeWidth / 2, 0, Math.PI * 2);
-      dotCount += 1;
-      if (dotCount >= SUBPIXEL_PATH_BATCH_SIZE) flushDots();
-    },
-  });
-
-  flushDots();
-  context.restore();
-}
-
 function drawGraphPaperGrid(canvas: HTMLCanvasElement, settings: GraphSettings) {
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas is not available.");
@@ -765,11 +679,7 @@ export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSe
   drawFillRegions(outputContext, fillRegionMap, output.width, output.height, settings, 0.8);
   if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
   const imageLineThickness = clampImageLineThickness(settings.imageLineThickness);
-  if (imageLineThickness < 1) {
-    drawSubpixelMaskLayer(outputContext, outlineMask, output.width, output.height, settings.outlineColor || settings.lineColor, imageLineThickness);
-  } else {
-    drawMaskLayer(outputContext, outlineMask, output.width, output.height, settings.outlineColor || settings.lineColor, 255, 0.325 * imageLineThickness);
-  }
+  drawMaskLayer(outputContext, outlineMask, output.width, output.height, settings.outlineColor || settings.lineColor, 255, 0.325 * imageLineThickness);
 
   const outlineHex = rgbToHex(hexToRgb(settings.outlineColor || settings.lineColor));
   const outlineCount = outlineMask.reduce((sum, value) => sum + value, 0);

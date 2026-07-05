@@ -1,4 +1,4 @@
-const CACHE_VERSION = "graph-pixel-maker-v35";
+const CACHE_VERSION = "graph-pixel-maker-v36";
 const APP_SHELL = [
   "/",
   "/offline",

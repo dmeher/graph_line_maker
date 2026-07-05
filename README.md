@@ -1,36 +1,55 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Graph Pixel Maker
 
-## Getting Started
+Next.js App Router app for converting uploaded images into graph-paper pixel charts. The app uses a custom Brevo email OTP flow, signed httpOnly app-session cookies, and server-only Supabase service-role access.
 
-First, run the development server:
+## Local Setup
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The production build commands are intentionally not run by default in this repo workflow.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Environment
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Copy `.env.example` to `.env.local` and fill in the values:
 
-## Learn More
+```bash
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+SUPABASE_DB_SCHEMA=image_to_graph
+BREVO_API_KEY=
+BREVO_SENDER_EMAIL=
+BREVO_SENDER_NAME=Graph Pixel Maker
+EMAIL_OTP_SECRET=
+GRAPH_PIXEL_SESSION_SECRET=
+```
 
-To learn more about Next.js, take a look at the following resources:
+`SUPABASE_DB_SCHEMA` must be `image_to_graph`. The Supabase Data API also needs that schema exposed in the project API settings.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Database
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+The migration in `supabase/migrations` creates:
 
-## Deploy on Vercel
+- `image_to_graph.app_users`
+- `image_to_graph.email_otp_attempts`
+- `image_to_graph.projects`
+- `image_to_graph.project_palettes`
+- Private storage buckets for original and processed images
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The bootstrap admin is seeded as `dmeher1996@gmail.com`. Admins can add or revoke other allowed email users from `/settings`.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Auth Model
+
+This app does not use Supabase Auth OTP. It follows the sibling app pattern:
+
+- Generate a server-side 6-digit OTP.
+- Hash the OTP with `EMAIL_OTP_SECRET`.
+- Store the attempt in Supabase.
+- Send via Brevo transactional email.
+- Verify max attempts, expiry, consumed state, and active email allowlist.
+- Set a signed httpOnly `graph_pixel_session` cookie.
+
+All database and storage reads/writes go through server routes/actions with ownership checks.

@@ -1,0 +1,98 @@
+import type { GraphLineLayer, PrintHorizontalAlignment, PrintOrientation, PrintPaperSize, PrintVerticalAlignment } from "@/lib/graph-paper";
+
+export type AppRole = "admin" | "member";
+export type AppUserStatus = "active" | "inactive";
+
+export type AppUser = {
+  id: string;
+  email: string;
+  displayName: string | null;
+  role: AppRole;
+  status: AppUserStatus;
+  invitedByEmail: string | null;
+  lastLoginAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CurrentSession = {
+  userId: string;
+  email: string;
+  role: AppRole;
+  displayName: string | null;
+};
+
+export type PaletteColor = {
+  id?: string;
+  name: string;
+  hex: string;
+  locked: boolean;
+  cellCount: number;
+  sortOrder: number;
+};
+
+export type GraphSettings = {
+  graphWidth: number;
+  graphHeight: number;
+  cellWidth: number;
+  cellHeight: number;
+  cellSizeCm: number;
+  printPaperSize: PrintPaperSize;
+  printOrientation: PrintOrientation;
+  printHorizontalAlignment: PrintHorizontalAlignment;
+  printVerticalAlignment: PrintVerticalAlignment;
+  pixelSize: number;
+  gridCellSize: number;
+  outputWidth: number;
+  outputHeight: number;
+  backgroundColor: string;
+  lineColor: string;
+  outlineColor: string;
+  fillColor: string;
+  fillRegions: Record<string, string>;
+  imageLineThickness: number;
+  gridLineColor: string;
+  gridLineLayer: GraphLineLayer;
+  gridLineThickness: number;
+  showBorder: boolean;
+  transparentBackground: boolean;
+  showNumbers: boolean;
+  majorGridEvery: 5 | 10;
+  imagePadding: number;
+  imageOffsetX: number;
+  imageOffsetY: number;
+  spotPadding: number;
+  spotShape: "round" | "square";
+  pageMargin: number;
+  blackAndWhite: boolean;
+  limitedColorMode: boolean;
+  maxColors: 2 | 4 | 8 | 16;
+};
+
+export type Project = {
+  id: string;
+  userId: string;
+  title: string;
+  description: string | null;
+  originalImagePath: string | null;
+  processedImagePath: string | null;
+  settings: GraphSettings;
+  width: number;
+  height: number;
+  pixelSize: number;
+  gridCellSize: number;
+  colorCount: number;
+  createdAt: string;
+  updatedAt: string;
+  palettes: PaletteColor[];
+  originalImageUrl?: string | null;
+  processedImageUrl?: string | null;
+};
+
+export type ProjectSummary = Omit<Project, "settings" | "palettes"> & {
+  palettePreview: PaletteColor[];
+};
+
+export type ActionResult<T = undefined> = T extends undefined
+  ? { ok: true; message?: string } | { ok: false; message: string }
+  : { ok: true; data: T; message?: string } | { ok: false; message: string };

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Graph Pixel Maker icon">
+  <rect width="512" height="512" rx="96" fill="#0f766e"/>
+  <rect x="96" y="96" width="320" height="320" rx="34" fill="#ffffff"/>
+  <path d="M144 144h224M144 192h224M144 240h224M144 288h224M144 336h224M144 384h224M144 144v240M192 144v240M240 144v240M288 144v240M336 144v240M384 144v240" stroke="#cbd5e1" stroke-width="10"/>
+  <path d="M154 334c46-4 72-50 104-88 34-40 70-54 106-46" fill="none" stroke="#0f172a" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="150" y="150" width="42" height="42" fill="#14b8a6"/>
+  <rect x="318" y="318" width="46" height="46" fill="#f59e0b"/>
+</svg>

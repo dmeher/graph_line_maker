@@ -6,7 +6,11 @@ import { requireSession } from "@/lib/auth/session";
 import {
   DEFAULT_CELL_SIZE_CM,
   DEFAULT_GRAPH_LINE_LAYER,
+  DEFAULT_GRAPH_HEIGHT_CELLS,
+  DEFAULT_GRAPH_WIDTH_CELLS,
+  DEFAULT_IMAGE_HEIGHT_CELLS,
   DEFAULT_IMAGE_LINE_THICKNESS,
+  DEFAULT_IMAGE_WIDTH_CELLS,
   DEFAULT_GRID_LINE_COLOR,
   DEFAULT_OUTLINE_COLOR,
   DEFAULT_PRINT_HORIZONTAL_ALIGNMENT,
@@ -18,13 +22,13 @@ import {
   DEFAULT_STROKE_GAP_CLOSE_PIXELS,
   GRAPH_MAJOR_CELL_PIXELS,
   MAX_IMAGE_PADDING_PIXELS,
+  TRANSPARENT_FILL_COLOR,
   isGraphLineLayer,
   isFillColor,
   isPrintHorizontalAlignment,
   isPrintOrientation,
   isPrintPaperSize,
   isPrintVerticalAlignment,
-  lightenColor,
   isHexColor,
   clampImageLineThickness,
   clampSourceFillMinStrokePixels,
@@ -39,8 +43,8 @@ type StoredGraphSettings = Partial<GraphSettings> & {
 };
 
 export const defaultGraphSettings: GraphSettings = {
-  graphWidth: 12,
-  graphHeight: 12,
+  graphWidth: DEFAULT_GRAPH_WIDTH_CELLS,
+  graphHeight: DEFAULT_GRAPH_HEIGHT_CELLS,
   cellWidth: GRAPH_MAJOR_CELL_PIXELS,
   cellHeight: GRAPH_MAJOR_CELL_PIXELS,
   cellSizeCm: DEFAULT_CELL_SIZE_CM,
@@ -50,12 +54,12 @@ export const defaultGraphSettings: GraphSettings = {
   printVerticalAlignment: DEFAULT_PRINT_VERTICAL_ALIGNMENT,
   pixelSize: GRAPH_MAJOR_CELL_PIXELS,
   gridCellSize: GRAPH_MAJOR_CELL_PIXELS,
-  outputWidth: 1920,
-  outputHeight: 1920,
+  outputWidth: DEFAULT_GRAPH_WIDTH_CELLS * GRAPH_MAJOR_CELL_PIXELS,
+  outputHeight: DEFAULT_GRAPH_HEIGHT_CELLS * GRAPH_MAJOR_CELL_PIXELS,
   backgroundColor: "#ffffff",
   lineColor: DEFAULT_OUTLINE_COLOR,
   outlineColor: DEFAULT_OUTLINE_COLOR,
-  fillColor: lightenColor(DEFAULT_OUTLINE_COLOR),
+  fillColor: TRANSPARENT_FILL_COLOR,
   fillRegions: {},
   imageLineThickness: DEFAULT_IMAGE_LINE_THICKNESS,
   sourceFillThreshold: DEFAULT_SOURCE_FILL_THRESHOLD,
@@ -68,8 +72,8 @@ export const defaultGraphSettings: GraphSettings = {
   transparentBackground: false,
   showNumbers: false,
   majorGridEvery: 5,
-  imageWidth: 12,
-  imageHeight: 12,
+  imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
+  imageHeight: DEFAULT_IMAGE_HEIGHT_CELLS,
   imagePadding: 0,
   imageOffsetX: 0,
   imageOffsetY: 0,
@@ -151,8 +155,11 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const cellHeight = GRAPH_MAJOR_CELL_PIXELS;
   const graphWidthLimit = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / cellWidth));
   const graphHeightLimit = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / cellHeight));
-  const graphWidth = Math.max(1, Math.min(graphWidthLimit, Math.round(merged.graphWidth || Math.round((merged.outputWidth || defaultGraphSettings.outputWidth) / cellWidth))));
-  const graphHeight = Math.max(1, Math.min(graphHeightLimit, Math.round(merged.graphHeight || Math.round((merged.outputHeight || defaultGraphSettings.outputHeight) / cellHeight))));
+  const rawGraphWidth = Math.max(1, Math.min(graphWidthLimit, Math.round(merged.graphWidth || Math.round((merged.outputWidth || defaultGraphSettings.outputWidth) / cellWidth))));
+  const rawGraphHeight = Math.max(1, Math.min(graphHeightLimit, Math.round(merged.graphHeight || Math.round((merged.outputHeight || defaultGraphSettings.outputHeight) / cellHeight))));
+  const hasBrokenLegacyArtworkWidth = Number(cleanMerged.imageWidth) > 0 && Number(cleanMerged.imageWidth) <= 0.05;
+  const graphWidth = hasBrokenLegacyArtworkWidth ? defaultGraphSettings.graphWidth : rawGraphWidth;
+  const graphHeight = hasBrokenLegacyArtworkWidth ? defaultGraphSettings.graphHeight : rawGraphHeight;
   const imageAreaWidth = graphWidth * cellWidth;
   const imageAreaHeight = graphHeight * cellHeight;
   const maxImagePadding = Math.max(0, Math.min(MAX_IMAGE_PADDING_PIXELS, Math.floor((Math.min(imageAreaWidth, imageAreaHeight) - 1) / 2)));
@@ -166,22 +173,30 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     Number(cleanMerged.imageHeight) > graphHeight && Number(cleanMerged.imageHeight) <= imageAreaHeight
       ? Number(cleanMerged.imageHeight) / GRAPH_MAJOR_CELL_PIXELS
       : cleanMerged.imageHeight;
-  const imageWidth = clampImageCells(legacyPixelSizedImageWidth, graphWidth, Math.max(0.01, graphWidth - legacyPaddingCells * 2));
-  const imageHeight = clampImageCells(legacyPixelSizedImageHeight, graphHeight, Math.max(0.01, graphHeight - legacyPaddingCells * 2));
+  const imageWidth = hasBrokenLegacyArtworkWidth
+    ? clampImageCells(defaultGraphSettings.imageWidth, graphWidth, defaultGraphSettings.imageWidth)
+    : clampImageCells(legacyPixelSizedImageWidth, graphWidth, Math.max(0.01, graphWidth - legacyPaddingCells * 2));
+  const imageHeight = hasBrokenLegacyArtworkWidth
+    ? clampImageCells(defaultGraphSettings.imageHeight, graphHeight, defaultGraphSettings.imageHeight)
+    : clampImageCells(legacyPixelSizedImageHeight, graphHeight, Math.max(0.01, graphHeight - legacyPaddingCells * 2));
   const imagePadding = 0;
   const outputWidth = imageAreaWidth;
   const outputHeight = imageAreaHeight;
   const imageOffsetX = Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(merged.imageOffsetX ?? 0)));
   const imageOffsetY = Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(merged.imageOffsetY ?? 0)));
   const outlineColor = isHexColor(cleanMerged.outlineColor) ? cleanMerged.outlineColor : isHexColor(cleanMerged.lineColor) ? cleanMerged.lineColor : DEFAULT_OUTLINE_COLOR;
-  const fillColor = isFillColor(cleanMerged.fillColor) ? cleanMerged.fillColor : lightenColor(outlineColor);
+  const fillColor = isFillColor(cleanMerged.fillColor) ? cleanMerged.fillColor : TRANSPARENT_FILL_COLOR;
   const fillRegions = normalizeFillRegions(cleanMerged.fillRegions);
   const imageLineThickness = clampImageLineThickness(cleanMerged.imageLineThickness);
   const sourceFillThreshold = clampSourceFillThreshold(cleanMerged.sourceFillThreshold);
   const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(cleanMerged.sourceFillMinStrokePixels);
   const strokeGapClosePixels = clampStrokeGapClosePixels(cleanMerged.strokeGapClosePixels);
   const gridLineColor = isHexColor(cleanMerged.gridLineColor) && cleanMerged.gridLineColor.toLowerCase() !== "#cbd5e1" ? cleanMerged.gridLineColor : DEFAULT_GRID_LINE_COLOR;
-  const gridLineLayer = isGraphLineLayer(cleanMerged.gridLineLayer) ? cleanMerged.gridLineLayer : DEFAULT_GRAPH_LINE_LAYER;
+  const gridLineLayer = hasBrokenLegacyArtworkWidth
+    ? DEFAULT_GRAPH_LINE_LAYER
+    : isGraphLineLayer(cleanMerged.gridLineLayer)
+      ? cleanMerged.gridLineLayer
+      : DEFAULT_GRAPH_LINE_LAYER;
   const cellSizeCm = roundCm(Math.max(0.05, Math.min(100, Number(cleanMerged.cellSizeCm || legacyCellSizeInches || DEFAULT_CELL_SIZE_CM))));
   const printPaperSize = isPrintPaperSize(cleanMerged.printPaperSize) ? cleanMerged.printPaperSize : DEFAULT_PRINT_PAPER_SIZE;
   const printOrientation = isPrintOrientation(cleanMerged.printOrientation) ? cleanMerged.printOrientation : DEFAULT_PRINT_ORIENTATION;

@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import Link from "next/link";
 import {
   Check,
+  ChevronDown,
+  ChevronRight,
   Crop,
   Download,
   Eye,
@@ -14,6 +16,7 @@ import {
   ImageIcon,
   Loader2,
   Maximize2,
+  Pipette,
   Printer,
   RefreshCw,
   Save,
@@ -36,7 +39,11 @@ import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_UPLOAD_BYTES, isAllowedImageFile
 import {
   DEFAULT_CELL_SIZE_CM,
   DEFAULT_GRAPH_LINE_LAYER,
+  DEFAULT_GRAPH_HEIGHT_CELLS,
+  DEFAULT_GRAPH_WIDTH_CELLS,
+  DEFAULT_IMAGE_HEIGHT_CELLS,
   DEFAULT_IMAGE_LINE_THICKNESS,
+  DEFAULT_IMAGE_WIDTH_CELLS,
   DEFAULT_GRID_LINE_COLOR,
   DEFAULT_OUTLINE_COLOR,
   DEFAULT_PRINT_HORIZONTAL_ALIGNMENT,
@@ -76,13 +83,18 @@ import {
   isPrintPaperSize,
   isPrintVerticalAlignment,
   isTransparentFillColor,
-  lightenColor,
 } from "@/lib/graph-paper";
 import type { GraphSettings, PaletteColor, Project } from "@/lib/types";
 import { bytesToSize } from "@/lib/utils/format";
 
 type MobileTab = "source" | "canvas" | "controls";
 type Notice = { tone: "ok" | "error" | "info"; text: string };
+type CollapsibleKey = "parameters" | "outline" | "fill" | "selectedFill" | "graphLines";
+type FloatingPalette = { regionId: string; x: number; y: number } | null;
+type SettingsHistory = {
+  undo: GraphSettings[];
+  redo: GraphSettings[];
+};
 type DragState = {
   pointerId: number;
   startClientX: number;
@@ -93,9 +105,11 @@ type DragState = {
   canvasHeight: number;
   rectWidth: number;
   rectHeight: number;
+  historyRecorded: boolean;
 };
 
 const MAX_CANVAS_DIMENSION = 6000;
+const MAX_SETTINGS_HISTORY = 80;
 const PRINT_ORIENTATION_LABELS: Record<GraphSettings["printOrientation"], string> = {
   auto: "Auto",
   portrait: "Portrait",
@@ -299,13 +313,40 @@ function ColorPresetField({
   );
 }
 
+function CollapsibleSection({
+  title,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <section className="border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between gap-3 text-left text-sm font-semibold text-slate-950"
+        aria-expanded={open}
+      >
+        <span>{title}</span>
+        {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+      </button>
+      {open ? <div className="mt-3 space-y-3">{children}</div> : null}
+    </section>
+  );
+}
+
 function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const graphWidthLimit = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS));
   const graphHeightLimit = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS));
   const graphWidth = Math.max(1, Math.min(graphWidthLimit, Math.round(settings.graphWidth || 1)));
   const graphHeight = Math.max(1, Math.min(graphHeightLimit, Math.round(settings.graphHeight || 1)));
   const outlineColor = isHexColor(settings.outlineColor) ? settings.outlineColor : isHexColor(settings.lineColor) ? settings.lineColor : DEFAULT_OUTLINE_COLOR;
-  const fillColor = isFillColor(settings.fillColor) ? settings.fillColor : lightenColor(outlineColor);
+  const fillColor = isFillColor(settings.fillColor) ? settings.fillColor : TRANSPARENT_FILL_COLOR;
   const imageLineThickness = clampImageLineThickness(settings.imageLineThickness ?? DEFAULT_IMAGE_LINE_THICKNESS);
   const sourceFillThreshold = clampSourceFillThreshold(settings.sourceFillThreshold ?? DEFAULT_SOURCE_FILL_THRESHOLD);
   const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(settings.sourceFillMinStrokePixels ?? DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS);
@@ -366,6 +407,54 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   };
 }
 
+function editorDefaultGraphSettings(current: GraphSettings): GraphSettings {
+  return deriveGraphSettings({
+    ...current,
+    graphWidth: DEFAULT_GRAPH_WIDTH_CELLS,
+    graphHeight: DEFAULT_GRAPH_HEIGHT_CELLS,
+    cellSizeCm: DEFAULT_CELL_SIZE_CM,
+    printPaperSize: DEFAULT_PRINT_PAPER_SIZE,
+    printOrientation: DEFAULT_PRINT_ORIENTATION,
+    printHorizontalAlignment: DEFAULT_PRINT_HORIZONTAL_ALIGNMENT,
+    printVerticalAlignment: DEFAULT_PRINT_VERTICAL_ALIGNMENT,
+    lineColor: DEFAULT_OUTLINE_COLOR,
+    outlineColor: DEFAULT_OUTLINE_COLOR,
+    fillColor: TRANSPARENT_FILL_COLOR,
+    fillRegions: {},
+    imageLineThickness: DEFAULT_IMAGE_LINE_THICKNESS,
+    sourceFillThreshold: DEFAULT_SOURCE_FILL_THRESHOLD,
+    sourceFillMinStrokePixels: DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
+    strokeGapClosePixels: DEFAULT_STROKE_GAP_CLOSE_PIXELS,
+    gridLineColor: DEFAULT_GRID_LINE_COLOR,
+    gridLineLayer: DEFAULT_GRAPH_LINE_LAYER,
+    imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
+    imageHeight: DEFAULT_IMAGE_HEIGHT_CELLS,
+    imagePadding: 0,
+    imageOffsetX: 0,
+    imageOffsetY: 0,
+  });
+}
+
+function areSettingsEqual(a: GraphSettings, b: GraphSettings) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function isTextEditingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable || target.tagName === "TEXTAREA" || target.tagName === "SELECT") return true;
+  if (!(target instanceof HTMLInputElement)) return false;
+  return ["", "email", "password", "search", "tel", "text", "url"].includes(target.type);
+}
+
+function isFormControlTarget(target: EventTarget | null) {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
 export function EditorClient({ project }: { project: Project }) {
   const [title, setTitle] = useState(project.title);
   const [description, setDescription] = useState(project.description ?? "");
@@ -387,8 +476,18 @@ export function EditorClient({ project }: { project: Project }) {
   const [isDraggingGraph, setIsDraggingGraph] = useState(false);
   const [sourcePanelCollapsed, setSourcePanelCollapsed] = useState(false);
   const [settingsPanelCollapsed, setSettingsPanelCollapsed] = useState(false);
+  const [collapsedSections, setCollapsedSections] = useState<Record<CollapsibleKey, boolean>>({
+    parameters: false,
+    outline: false,
+    fill: false,
+    selectedFill: false,
+    graphLines: false,
+  });
+  const [floatingPalette, setFloatingPalette] = useState<FloatingPalette>(null);
+  const [copiedFillColor, setCopiedFillColor] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("canvas");
   const [isPending, startTransition] = useTransition();
+  const settingsRef = useRef(settings);
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const processedCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -396,25 +495,80 @@ export function EditorClient({ project }: { project: Project }) {
   const sourcePreviewObjectUrlRef = useRef<string | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
   const fillRegionMapRef = useRef<Uint16Array | null>(null);
+  const settingsHistoryRef = useRef<SettingsHistory>({ undo: [], redo: [] });
 
   const filename = useMemo(() => slug(title), [title]);
   const selectedFillRegion = useMemo(
     () => fillRegions.find((region) => region.id === selectedFillRegionId) ?? null,
     [fillRegions, selectedFillRegionId],
   );
+  const fillRegionsById = useMemo(() => new Map(fillRegions.map((region) => [region.id, region] as const)), [fillRegions]);
+  const pushUndoSettings = useCallback((snapshot: GraphSettings) => {
+    const history = settingsHistoryRef.current;
+    const previous = history.undo.at(-1);
+    if (previous && areSettingsEqual(previous, snapshot)) return;
+    settingsHistoryRef.current = {
+      undo: [...history.undo, snapshot].slice(-MAX_SETTINGS_HISTORY),
+      redo: [],
+    };
+  }, []);
+  const setSettingsWithHistory = useCallback(
+    (updater: GraphSettings | ((current: GraphSettings) => GraphSettings)) => {
+      const current = settingsRef.current;
+      const next = deriveGraphSettings(typeof updater === "function" ? updater(current) : updater);
+      if (areSettingsEqual(current, next)) return;
+      pushUndoSettings(current);
+      settingsRef.current = next;
+      setSettings(next);
+    },
+    [pushUndoSettings],
+  );
   const updateSetting = useCallback(<K extends keyof GraphSettings>(key: K, value: GraphSettings[K]) => {
-    setSettings((current) => deriveGraphSettings({ ...current, [key]: value }));
+    setSettingsWithHistory((current) => ({ ...current, [key]: value }));
+  }, [setSettingsWithHistory]);
+  const restoreSettingsHistory = useCallback((direction: "undo" | "redo") => {
+    const current = settingsRef.current;
+    const history = settingsHistoryRef.current;
+    const source = direction === "undo" ? history.undo : history.redo;
+    const restored = source.at(-1);
+    if (!restored) return;
+
+    if (direction === "undo") {
+      settingsHistoryRef.current = {
+        undo: history.undo.slice(0, -1),
+        redo: [...history.redo, current].slice(-MAX_SETTINGS_HISTORY),
+      };
+    } else {
+      settingsHistoryRef.current = {
+        undo: [...history.undo, current].slice(-MAX_SETTINGS_HISTORY),
+        redo: history.redo.slice(0, -1),
+      };
+    }
+    settingsRef.current = restored;
+    setSettings(restored);
+    setFloatingPalette(null);
+    setCopiedFillColor(null);
+  }, []);
+  const toggleSection = useCallback((section: CollapsibleKey) => {
+    setCollapsedSections((current) => ({ ...current, [section]: !current[section] }));
   }, []);
 
+  function defaultFillRegionColor(region: FillRegion, current: GraphSettings = settings) {
+    return region.kind === "source" ? current.outlineColor || current.lineColor : current.fillColor;
+  }
+
+  function currentFillRegionColor(region: FillRegion) {
+    return settings.fillRegions[region.id] ?? defaultFillRegionColor(region);
+  }
+
+  const selectedFillRegionColor = selectedFillRegion ? currentFillRegionColor(selectedFillRegion) : settings.fillColor;
+
   function updateOutlineColor(color: string) {
-    setSettings((current) =>
-      deriveGraphSettings({
-        ...current,
-        outlineColor: color,
-        lineColor: color,
-        fillColor: isTransparentFillColor(current.fillColor) ? current.fillColor : lightenColor(color),
-      }),
-    );
+    setSettingsWithHistory((current) => ({
+      ...current,
+      outlineColor: color,
+      lineColor: color,
+    }));
   }
 
   function updateOneCellWidth(value: number) {
@@ -435,19 +589,21 @@ export function EditorClient({ project }: { project: Project }) {
 
   function updateFillRegionColor(regionId: string, color: string) {
     if (!isFillColor(color)) return;
-    setSettings((current) => {
+    setSettingsWithHistory((current) => {
       const fillRegions = { ...current.fillRegions };
-      if (color.toLowerCase() === current.fillColor.toLowerCase()) delete fillRegions[regionId];
+      const region = fillRegionsById.get(regionId);
+      const defaultColor = region ? defaultFillRegionColor(region, current) : current.fillColor;
+      if (color.toLowerCase() === defaultColor.toLowerCase()) delete fillRegions[regionId];
       else fillRegions[regionId] = color;
-      return deriveGraphSettings({ ...current, fillRegions });
+      return { ...current, fillRegions };
     });
   }
 
   function resetFillRegionColor(regionId: string) {
-    setSettings((current) => {
+    setSettingsWithHistory((current) => {
       const fillRegions = { ...current.fillRegions };
       delete fillRegions[regionId];
-      return deriveGraphSettings({ ...current, fillRegions });
+      return { ...current, fillRegions };
     });
   }
 
@@ -467,16 +623,40 @@ export function EditorClient({ project }: { project: Project }) {
     return regionNumber ? String(regionNumber) : null;
   }
 
-  function selectFillRegionFromPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
+  function floatingPalettePosition(event: ReactPointerEvent<HTMLCanvasElement>) {
+    const width = 244;
+    const height = 216;
+    const margin = 12;
+    return {
+      x: Math.max(margin, Math.min(window.innerWidth - width - margin, event.clientX + margin)),
+      y: Math.max(margin, Math.min(window.innerHeight - height - margin, event.clientY + margin)),
+    };
+  }
+
+  function selectFillRegionFromPointer(event: ReactPointerEvent<HTMLCanvasElement>, showPalette = false) {
     const regionId = fillRegionIdAtPointer(event);
-    if (!regionId) return false;
+    if (!regionId) {
+      if (showPalette) setFloatingPalette(null);
+      return false;
+    }
     setSelectedFillRegionId(regionId);
+    if (copiedFillColor) {
+      updateFillRegionColor(regionId, copiedFillColor);
+      setCopiedFillColor(null);
+      setFloatingPalette(null);
+      setNotice({ tone: "ok", text: "Fill color applied." });
+      return true;
+    }
+    if (showPalette) {
+      const position = floatingPalettePosition(event);
+      setFloatingPalette({ regionId, ...position });
+    }
     return true;
   }
 
   function beginGraphDrag(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (showOriginal || event.button !== 0) return;
-    selectFillRegionFromPointer(event);
+    selectFillRegionFromPointer(event, true);
 
     const canvas = previewCanvasRef.current;
     if (!canvas) return;
@@ -495,6 +675,7 @@ export function EditorClient({ project }: { project: Project }) {
       canvasHeight: canvas.height,
       rectWidth: rect.width,
       rectHeight: rect.height,
+      historyRecorded: false,
     };
     setIsDraggingGraph(true);
   }
@@ -512,15 +693,20 @@ export function EditorClient({ project }: { project: Project }) {
     const imageOffsetX = clampImageOffset(dragState.startOffsetX + deltaX);
     const imageOffsetY = clampImageOffset(dragState.startOffsetY + deltaY);
 
-    setSettings((current) =>
-      current.imageOffsetX === imageOffsetX && current.imageOffsetY === imageOffsetY
-        ? current
-        : deriveGraphSettings({
-            ...current,
-            imageOffsetX,
-            imageOffsetY,
-          }),
-    );
+    setSettings((current) => {
+      if (current.imageOffsetX === imageOffsetX && current.imageOffsetY === imageOffsetY) return current;
+      if (!dragState.historyRecorded) {
+        pushUndoSettings(current);
+        dragState.historyRecorded = true;
+      }
+      const next = deriveGraphSettings({
+        ...current,
+        imageOffsetX,
+        imageOffsetY,
+      });
+      settingsRef.current = next;
+      return next;
+    });
   }
 
   function endGraphDrag(event: ReactPointerEvent<HTMLCanvasElement>) {
@@ -533,6 +719,10 @@ export function EditorClient({ project }: { project: Project }) {
     dragStateRef.current = null;
     setIsDraggingGraph(false);
   }
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   const drawPreview = useCallback((canvas: HTMLCanvasElement) => {
     const preview = previewCanvasRef.current;
@@ -554,6 +744,8 @@ export function EditorClient({ project }: { project: Project }) {
     setSourceCropArea(null);
     setFillRegions([]);
     setSelectedFillRegionId(null);
+    setFloatingPalette(null);
+    setCopiedFillColor(null);
     fillRegionMapRef.current = null;
     if (sourcePreviewObjectUrlRef.current) {
       URL.revokeObjectURL(sourcePreviewObjectUrlRef.current);
@@ -573,7 +765,12 @@ export function EditorClient({ project }: { project: Project }) {
         sourcePreviewObjectUrlRef.current = previewUrl;
         sourceCanvasRef.current = canvas;
         setSourcePreviewUrl(previewUrl);
-        setSettings((current) => deriveGraphSettings(current));
+        settingsHistoryRef.current = { undo: [], redo: [] };
+        setSettings((current) => {
+          const next = deriveGraphSettings(current);
+          settingsRef.current = next;
+          return next;
+        });
         setSourceReady(true);
         setNotice(null);
       })
@@ -600,6 +797,7 @@ export function EditorClient({ project }: { project: Project }) {
           drawPreview(result.canvas);
           setFillRegions(result.fillRegions);
           setSelectedFillRegionId((current) => (current && result.fillRegions.some((region) => region.id === current) ? current : null));
+          setFloatingPalette((current) => (current && result.fillRegions.some((region) => region.id === current.regionId) ? current : null));
           setPalette(result.palette);
           setProcessing(false);
         })
@@ -616,6 +814,27 @@ export function EditorClient({ project }: { project: Project }) {
       window.clearTimeout(timer);
     };
   }, [drawPreview, settings, sourceReady]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if ((key === "z" || key === "y") && !isTextEditingTarget(event.target)) {
+        event.preventDefault();
+        restoreSettingsHistory(key === "y" || event.shiftKey ? "redo" : "undo");
+        return;
+      }
+      if (key !== "c" || !selectedFillRegion || isFormControlTarget(event.target)) return;
+
+      event.preventDefault();
+      setCopiedFillColor(selectedFillRegionColor);
+      setFloatingPalette(null);
+      setNotice({ tone: "info", text: "Fill color copied." });
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [restoreSettingsHistory, selectedFillRegion, selectedFillRegionColor]);
 
   useEffect(() => {
     return () => {
@@ -651,14 +870,17 @@ export function EditorClient({ project }: { project: Project }) {
     objectUrlRef.current = URL.createObjectURL(file);
     setSourceUrl(objectUrlRef.current);
     setSourceName(file.name);
-    setSettings((current) =>
-      deriveGraphSettings({
+    settingsHistoryRef.current = { undo: [], redo: [] };
+    setSettings((current) => {
+      const next = deriveGraphSettings({
         ...current,
         fillRegions: {},
         imageOffsetX: 0,
         imageOffsetY: 0,
-      }),
-    );
+      });
+      settingsRef.current = next;
+      return next;
+    });
     setNotice({ tone: "ok", text: successText });
     return true;
   }
@@ -873,9 +1095,6 @@ export function EditorClient({ project }: { project: Project }) {
     </aside>
   );
 
-  const selectedFillRegionColor = selectedFillRegion
-    ? settings.fillRegions[selectedFillRegion.id] ?? settings.fillColor
-    : settings.fillColor;
   const imageWidthCm = roundCm(settings.graphWidth * settings.cellSizeCm);
   const imageHeightCm = roundCm(settings.graphHeight * settings.cellSizeCm);
   const printWidthCm = imageWidthCm;
@@ -888,6 +1107,69 @@ export function EditorClient({ project }: { project: Project }) {
         : settingsPanelCollapsed
           ? "lg:grid-cols-[320px_minmax(0,1fr)]"
           : "lg:grid-cols-[320px_minmax(0,1fr)_360px]";
+  const floatingFillRegion = floatingPalette ? fillRegionsById.get(floatingPalette.regionId) ?? null : null;
+  const floatingFillRegionColor = floatingFillRegion ? currentFillRegionColor(floatingFillRegion) : settings.fillColor;
+  const floatingPaletteNode =
+    floatingPalette && floatingFillRegion ? (
+      <div
+        className="fixed z-50 w-[244px] rounded-md border border-[var(--line)] bg-white p-3 shadow-lg"
+        style={{ left: floatingPalette.x, top: floatingPalette.y }}
+      >
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <span className="inline-flex min-w-0 items-center gap-2 text-xs font-semibold text-slate-600">
+            <Pipette size={14} aria-hidden="true" />
+            Fill {floatingFillRegion.id}
+          </span>
+          <button
+            type="button"
+            onClick={() => setFloatingPalette(null)}
+            className="grid h-7 w-7 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
+            title="Close"
+          >
+            <X size={13} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="grid grid-cols-7 gap-1.5">
+          {PRESET_GRAPH_COLORS.map((color) => {
+            const selected = color.hex.toLowerCase() === floatingFillRegionColor.toLowerCase();
+            return (
+              <button
+                key={`floating-${color.hex}`}
+                type="button"
+                onClick={() => {
+                  updateFillRegionColor(floatingFillRegion.id, color.hex);
+                  setFloatingPalette(null);
+                }}
+                className={`h-7 rounded-sm border ${selected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
+                style={{ backgroundColor: color.hex }}
+                title={color.name}
+                aria-label={`Apply ${color.name}`}
+              />
+            );
+          })}
+          <button
+            type="button"
+            onClick={() => {
+              updateFillRegionColor(floatingFillRegion.id, TRANSPARENT_FILL_COLOR);
+              setFloatingPalette(null);
+            }}
+            className={`h-7 rounded-sm border bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:10px_10px] bg-[position:0_0,0_5px,5px_-5px,-5px_0] ${isTransparentFillColor(floatingFillRegionColor) ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
+            title="Transparent"
+            aria-label="Apply transparent"
+          />
+        </div>
+        <label className="mt-3 flex h-9 items-center gap-2 rounded-md border border-[var(--line)] bg-white px-2 text-xs font-semibold text-slate-600">
+          <input
+            type="color"
+            value={isHexColor(floatingFillRegionColor) ? floatingFillRegionColor : "#ffffff"}
+            onChange={(event) => updateFillRegionColor(floatingFillRegion.id, event.target.value)}
+            className="h-6 w-8 cursor-pointer rounded border border-slate-200 bg-white p-0"
+            aria-label="Custom fill color"
+          />
+          <span>Custom</span>
+        </label>
+      </div>
+    ) : null;
 
   const settingsPanel = (
     <aside className="space-y-4 rounded-md border border-[var(--line)] bg-white p-4 shadow-sm">
@@ -898,7 +1180,12 @@ export function EditorClient({ project }: { project: Project }) {
         </h2>
         <button
           type="button"
-          onClick={() => setSettings(deriveGraphSettings(project.settings))}
+          onClick={() => {
+            setSettingsWithHistory((current) => editorDefaultGraphSettings(current));
+            setSelectedFillRegionId(null);
+            setFloatingPalette(null);
+            setCopiedFillColor(null);
+          }}
           className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
           title="Reset settings"
         >
@@ -906,124 +1193,137 @@ export function EditorClient({ project }: { project: Project }) {
         </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <NumberField label="Width (cells)" value={settings.graphWidth} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphWidth", value)} />
-        <NumberField label="Height (cells)" value={settings.graphHeight} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphHeight", value)} />
-        <NumberField label="1 cell width (cm)" value={settings.cellSizeCm} min={0.05} max={100} step={0.01} onChange={updateOneCellWidth} />
-        <NumberField label="10 cells width (cm)" value={roundCm(settings.cellSizeCm * 10)} min={0.5} max={1000} step={0.01} onChange={updateTenCellWidth} />
-        <NumberField label="Image width (cells)" value={settings.imageWidth} min={0.01} max={settings.graphWidth} step={0.1} onChange={updateImageWidthCells} />
-        <NumberField label="Image height (cells)" value={settings.imageHeight} min={0.01} max={settings.graphHeight} step={0.1} onChange={updateImageHeightCells} />
-        <NumberField label="Image line size" value={settings.imageLineThickness} min={MIN_IMAGE_LINE_THICKNESS} max={MAX_IMAGE_LINE_THICKNESS} step={0.01} onChange={(value) => updateSetting("imageLineThickness", value)} />
-        <NumberField label="Fill detection" value={settings.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} onChange={(value) => updateSetting("sourceFillThreshold", value)} />
-        <NumberField label="Fill width" value={settings.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSetting("sourceFillMinStrokePixels", value)} />
-        <NumberField label="Gap closing" value={settings.strokeGapClosePixels} min={MIN_STROKE_GAP_CLOSE_PIXELS} max={MAX_STROKE_GAP_CLOSE_PIXELS} onChange={(value) => updateSetting("strokeGapClosePixels", value)} />
-        <label className="grid gap-1.5">
-          <span className="text-xs font-semibold text-slate-500">Print paper</span>
-          <select
-            value={settings.printPaperSize}
-            onChange={(event) => updateSetting("printPaperSize", event.target.value as GraphSettings["printPaperSize"])}
-            className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-          >
-            {PRINT_PAPER_SIZE_KEYS.map((key) => (
-              <option key={key} value={key}>
-                {PRINT_PAPER_SIZES[key].label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-semibold text-slate-500">Orientation</span>
-          <select
-            value={settings.printOrientation}
-            onChange={(event) => updateSetting("printOrientation", event.target.value as GraphSettings["printOrientation"])}
-            className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-          >
-            {PRINT_ORIENTATION_KEYS.map((key) => (
-              <option key={key} value={key}>
-                {PRINT_ORIENTATION_LABELS[key]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-semibold text-slate-500">Horizontal align</span>
-          <select
-            value={settings.printHorizontalAlignment}
-            onChange={(event) => updateSetting("printHorizontalAlignment", event.target.value as GraphSettings["printHorizontalAlignment"])}
-            className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-          >
-            {PRINT_HORIZONTAL_ALIGNMENT_KEYS.map((key) => (
-              <option key={key} value={key}>
-                {PRINT_HORIZONTAL_ALIGNMENT_LABELS[key]}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-semibold text-slate-500">Vertical align</span>
-          <select
-            value={settings.printVerticalAlignment}
-            onChange={(event) => updateSetting("printVerticalAlignment", event.target.value as GraphSettings["printVerticalAlignment"])}
-            className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-          >
-            {PRINT_VERTICAL_ALIGNMENT_KEYS.map((key) => (
-              <option key={key} value={key}>
-                {PRINT_VERTICAL_ALIGNMENT_LABELS[key]}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
-        <p className="font-mono text-xs text-slate-600">
-          Image {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / 10 cells {roundCm(settings.cellSizeCm * 10)} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / line {settings.imageLineThickness}x / fill {settings.sourceFillThreshold} / fill width {settings.sourceFillMinStrokePixels}px / gap {settings.strokeGapClosePixels}px / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
-        </p>
-      </div>
-
-      <ColorPresetField label="Outline" value={settings.outlineColor} onChange={updateOutlineColor} />
-      <ColorPresetField label="Fill" value={settings.fillColor} onChange={(value) => updateSetting("fillColor", value)} allowTransparent />
-      {selectedFillRegion ? (
-        <div className="grid gap-3 rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-xs font-semibold text-slate-500">Selected fill {selectedFillRegion.id}</span>
-            <button
-              type="button"
-              onClick={() => resetFillRegionColor(selectedFillRegion.id)}
-              className="grid h-8 w-8 place-items-center rounded-md border border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50"
-              title="Use default fill"
-            >
-              <RefreshCw size={14} aria-hidden="true" />
-            </button>
+      <div className="space-y-4">
+        <CollapsibleSection title="Parameters" open={!collapsedSections.parameters} onToggle={() => toggleSection("parameters")}>
+          <div className="grid grid-cols-2 gap-3">
+            <NumberField label="Width (cells)" value={settings.graphWidth} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphWidth", value)} />
+            <NumberField label="Height (cells)" value={settings.graphHeight} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphHeight", value)} />
+            <NumberField label="1 cell width (cm)" value={settings.cellSizeCm} min={0.05} max={100} step={0.01} onChange={updateOneCellWidth} />
+            <NumberField label="10 cells width (cm)" value={roundCm(settings.cellSizeCm * 10)} min={0.5} max={1000} step={0.01} onChange={updateTenCellWidth} />
+            <NumberField label="Image width (cells)" value={settings.imageWidth} min={0.01} max={settings.graphWidth} step={0.1} onChange={updateImageWidthCells} />
+            <NumberField label="Image height (cells)" value={settings.imageHeight} min={0.01} max={settings.graphHeight} step={0.1} onChange={updateImageHeightCells} />
+            <NumberField label="Image line size" value={settings.imageLineThickness} min={MIN_IMAGE_LINE_THICKNESS} max={MAX_IMAGE_LINE_THICKNESS} step={0.01} onChange={(value) => updateSetting("imageLineThickness", value)} />
+            <NumberField label="Fill detection" value={settings.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} onChange={(value) => updateSetting("sourceFillThreshold", value)} />
+            <NumberField label="Fill width" value={settings.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSetting("sourceFillMinStrokePixels", value)} />
+            <NumberField label="Gap closing" value={settings.strokeGapClosePixels} min={MIN_STROKE_GAP_CLOSE_PIXELS} max={MAX_STROKE_GAP_CLOSE_PIXELS} onChange={(value) => updateSetting("strokeGapClosePixels", value)} />
+            <label className="grid gap-1.5">
+              <span className="text-xs font-semibold text-slate-500">Print paper</span>
+              <select
+                value={settings.printPaperSize}
+                onChange={(event) => updateSetting("printPaperSize", event.target.value as GraphSettings["printPaperSize"])}
+                className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+              >
+                {PRINT_PAPER_SIZE_KEYS.map((key) => (
+                  <option key={key} value={key}>
+                    {PRINT_PAPER_SIZES[key].label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-semibold text-slate-500">Orientation</span>
+              <select
+                value={settings.printOrientation}
+                onChange={(event) => updateSetting("printOrientation", event.target.value as GraphSettings["printOrientation"])}
+                className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+              >
+                {PRINT_ORIENTATION_KEYS.map((key) => (
+                  <option key={key} value={key}>
+                    {PRINT_ORIENTATION_LABELS[key]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-semibold text-slate-500">Horizontal align</span>
+              <select
+                value={settings.printHorizontalAlignment}
+                onChange={(event) => updateSetting("printHorizontalAlignment", event.target.value as GraphSettings["printHorizontalAlignment"])}
+                className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+              >
+                {PRINT_HORIZONTAL_ALIGNMENT_KEYS.map((key) => (
+                  <option key={key} value={key}>
+                    {PRINT_HORIZONTAL_ALIGNMENT_LABELS[key]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-1.5">
+              <span className="text-xs font-semibold text-slate-500">Vertical align</span>
+              <select
+                value={settings.printVerticalAlignment}
+                onChange={(event) => updateSetting("printVerticalAlignment", event.target.value as GraphSettings["printVerticalAlignment"])}
+                className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+              >
+                {PRINT_VERTICAL_ALIGNMENT_KEYS.map((key) => (
+                  <option key={key} value={key}>
+                    {PRINT_VERTICAL_ALIGNMENT_LABELS[key]}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
+
+          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
+            <p className="font-mono text-xs text-slate-600">
+              Image {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / 10 cells {roundCm(settings.cellSizeCm * 10)} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / line {settings.imageLineThickness}x / fill {settings.sourceFillThreshold} / fill width {settings.sourceFillMinStrokePixels}px / gap {settings.strokeGapClosePixels}px / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
+            </p>
+          </div>
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Outline" open={!collapsedSections.outline} onToggle={() => toggleSection("outline")}>
+          <ColorPresetField label="Outline" value={settings.outlineColor} onChange={updateOutlineColor} />
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Default fill" open={!collapsedSections.fill} onToggle={() => toggleSection("fill")}>
+          <ColorPresetField label="Default fill" value={settings.fillColor} onChange={(value) => updateSetting("fillColor", value)} allowTransparent />
+        </CollapsibleSection>
+
+        {selectedFillRegion ? (
+          <CollapsibleSection title={`Selected fill ${selectedFillRegion.id}`} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")}>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs font-semibold text-slate-500">{selectedFillRegion.kind === "source" ? "Source fill" : "Manual fill"}</span>
+              <button
+                type="button"
+                onClick={() => resetFillRegionColor(selectedFillRegion.id)}
+                className="grid h-8 w-8 place-items-center rounded-md border border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50"
+                title="Use default fill"
+              >
+                <RefreshCw size={14} aria-hidden="true" />
+              </button>
+            </div>
+            <ColorPresetField
+              label="Section fill"
+              value={selectedFillRegionColor}
+              onChange={(value) => updateFillRegionColor(selectedFillRegion.id, value)}
+              allowTransparent
+            />
+          </CollapsibleSection>
+        ) : null}
+
+        <CollapsibleSection title="Graph lines" open={!collapsedSections.graphLines} onToggle={() => toggleSection("graphLines")}>
           <ColorPresetField
-            label="Section fill"
-            value={selectedFillRegionColor}
-            onChange={(value) => updateFillRegionColor(selectedFillRegion.id, value)}
-            allowTransparent
+            label="Graph lines"
+            value={settings.gridLineColor}
+            colors={PRESET_GRAPH_LINE_COLORS}
+            onChange={(value) => updateSetting("gridLineColor", value)}
           />
-        </div>
-      ) : null}
-      <ColorPresetField
-        label="Graph lines"
-        value={settings.gridLineColor}
-        colors={PRESET_GRAPH_LINE_COLORS}
-        onChange={(value) => updateSetting("gridLineColor", value)}
-      />
-      <label className="grid gap-1.5">
-        <span className="text-xs font-semibold text-slate-500">Graph lines layer</span>
-        <select
-          value={settings.gridLineLayer}
-          onChange={(event) => updateSetting("gridLineLayer", event.target.value as GraphSettings["gridLineLayer"])}
-          className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-        >
-          {GRAPH_LINE_LAYER_KEYS.map((key) => (
-            <option key={key} value={key}>
-              {GRAPH_LINE_LAYER_LABELS[key]}
-            </option>
-          ))}
-        </select>
-      </label>
+          <label className="grid gap-1.5">
+            <span className="text-xs font-semibold text-slate-500">Graph lines layer</span>
+            <select
+              value={settings.gridLineLayer}
+              onChange={(event) => updateSetting("gridLineLayer", event.target.value as GraphSettings["gridLineLayer"])}
+              className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+            >
+              {GRAPH_LINE_LAYER_KEYS.map((key) => (
+                <option key={key} value={key}>
+                  {GRAPH_LINE_LAYER_LABELS[key]}
+                </option>
+              ))}
+            </select>
+          </label>
+        </CollapsibleSection>
+      </div>
     </aside>
   );
 
@@ -1101,7 +1401,7 @@ export function EditorClient({ project }: { project: Project }) {
               title="Drag to move graph"
               className="max-h-full max-w-full rounded bg-white shadow-sm"
               style={{
-                cursor: isDraggingGraph ? "grabbing" : "grab",
+                cursor: isDraggingGraph ? "move" : copiedFillColor ? "copy" : "crosshair",
                 imageRendering: "auto",
                 transform: `scale(${zoom})`,
                 transformOrigin: "center",
@@ -1172,6 +1472,7 @@ export function EditorClient({ project }: { project: Project }) {
         <div className={mobileTab === "canvas" ? "block" : "hidden lg:block"}>{canvasPanel}</div>
         <div className={`${mobileTab === "controls" ? "block" : "hidden"} ${settingsPanelCollapsed ? "lg:hidden" : "lg:block"}`}>{settingsPanel}</div>
       </div>
+      {floatingPaletteNode}
     </div>
   );
 }

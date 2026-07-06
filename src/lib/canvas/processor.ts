@@ -25,6 +25,7 @@ export type FillRegion = {
   cellCount: number;
   centerX: number;
   centerY: number;
+  kind: FillRegionKind;
 };
 
 type ContentBounds = {
@@ -32,6 +33,13 @@ type ContentBounds = {
   y: number;
   width: number;
   height: number;
+};
+
+export type FillRegionKind = "source" | "enclosed";
+
+type FillMaskLayer = {
+  mask: Uint8Array;
+  kind: FillRegionKind;
 };
 
 const contentBoundsCache = new WeakMap<HTMLCanvasElement, ContentBounds>();
@@ -206,18 +214,22 @@ function buildArtworkMasks(imageData: ImageData, settings: GraphSettings) {
   };
 }
 
-function fillColorForRegion(settings: GraphSettings, regionId: string) {
-  const customColor = settings.fillRegions?.[regionId];
-  return customColor && isFillColor(customColor) ? customColor : settings.fillColor;
+function defaultFillColorForRegion(settings: GraphSettings, kind: FillRegionKind) {
+  return kind === "source" ? settings.outlineColor || settings.lineColor : settings.fillColor;
 }
 
-function labelFillRegions(fillMasks: Uint8Array[], width: number, height: number, settings: GraphSettings) {
+function fillColorForRegion(settings: GraphSettings, regionId: string, kind: FillRegionKind) {
+  const customColor = settings.fillRegions?.[regionId];
+  return customColor && isFillColor(customColor) ? customColor : defaultFillColorForRegion(settings, kind);
+}
+
+function labelFillRegions(fillLayers: FillMaskLayer[], width: number, height: number, settings: GraphSettings) {
   const fillRegionMap = new Uint16Array(width * height);
   const queue = new Int32Array(fillRegionMap.length);
   const regions: FillRegion[] = [];
   let nextRegionId = 0;
 
-  for (const fillMask of fillMasks) {
+  for (const { mask: fillMask, kind } of fillLayers) {
     const visited = new Uint8Array(fillMask.length);
 
     for (let start = 0; start < fillMask.length; start += 1) {
@@ -262,10 +274,11 @@ function labelFillRegions(fillMasks: Uint8Array[], width: number, height: number
 
       regions.push({
         id: regionId,
-        color: fillColorForRegion(settings, regionId),
+        color: fillColorForRegion(settings, regionId, kind),
         cellCount: count,
         centerX: count ? Math.round(sumX / count) : 0,
         centerY: count ? Math.round(sumY / count) : 0,
+        kind,
       });
     }
   }
@@ -303,6 +316,7 @@ function createMaskLayer(
 function drawFillRegions(
   context: CanvasRenderingContext2D,
   fillRegionMap: Uint16Array,
+  regions: FillRegion[],
   width: number,
   height: number,
   settings: GraphSettings,
@@ -315,6 +329,7 @@ function drawFillRegions(
   if (!layerContext) throw new Error("Canvas is not available.");
 
   const colorCache = new Map<string, ReturnType<typeof hexToRgb>>();
+  const regionByNumber = new Map(regions.map((region) => [Number(region.id), region] as const));
   const imageData = layerContext.createImageData(width, height);
   const data = imageData.data;
 
@@ -322,8 +337,9 @@ function drawFillRegions(
     const regionNumber = fillRegionMap[pixel];
     if (!regionNumber) continue;
 
-    const regionId = String(regionNumber);
-    const hex = fillColorForRegion(settings, regionId);
+    const region = regionByNumber.get(regionNumber);
+    if (!region) continue;
+    const hex = fillColorForRegion(settings, region.id, region.kind);
     if (isTransparentFillColor(hex)) continue;
     let rgb = colorCache.get(hex);
     if (!rgb) {
@@ -427,7 +443,15 @@ export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSe
 
   const sourceData = fittedContext.getImageData(0, 0, fitted.width, fitted.height);
   const { enclosedFillMask, outlineMask, sourceFillMask } = buildArtworkMasks(sourceData, settings);
-  const { fillRegionMap, regions } = labelFillRegions([sourceFillMask, enclosedFillMask], fitted.width, fitted.height, settings);
+  const { fillRegionMap, regions } = labelFillRegions(
+    [
+      { mask: sourceFillMask, kind: "source" },
+      { mask: enclosedFillMask, kind: "enclosed" },
+    ],
+    fitted.width,
+    fitted.height,
+    settings,
+  );
 
   const output = document.createElement("canvas");
   output.width = fitted.width;
@@ -438,7 +462,7 @@ export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSe
   outputContext.fillStyle = settings.backgroundColor || "#ffffff";
   outputContext.fillRect(0, 0, output.width, output.height);
   if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
-  drawFillRegions(outputContext, fillRegionMap, output.width, output.height, settings, 0.8);
+  drawFillRegions(outputContext, fillRegionMap, regions, output.width, output.height, settings, 0.8);
   if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
   const imageLineThickness = clampImageLineThickness(settings.imageLineThickness);
   drawMaskLayer(outputContext, outlineMask, output.width, output.height, settings.outlineColor || settings.lineColor, 255, 0.12 * imageLineThickness);

@@ -22,41 +22,18 @@ function getExtension(file: File) {
   return "jpg";
 }
 
-function settingsForImage(width: number, height: number) {
+function settingsForImage() {
   const cellWidth = defaultGraphSettings.cellWidth;
   const cellHeight = defaultGraphSettings.cellHeight;
-  const safeWidth = Number.isFinite(width) && width > 0 ? width : defaultGraphSettings.outputWidth;
-  const safeHeight = Number.isFinite(height) && height > 0 ? height : defaultGraphSettings.outputHeight;
-  const targetAspect = safeWidth / safeHeight;
-  const maxCells = Math.max(1, Math.floor(6000 / cellWidth));
-  const naturalLongSide = Math.max(safeWidth / cellWidth, safeHeight / cellHeight);
-  const aspectLongSide = Math.max(targetAspect, 1 / targetAspect) * 2;
-  const targetLongSide = Math.max(1, Math.min(maxCells, Math.round(Math.max(12, naturalLongSide, aspectLongSide))));
-  let graphWidth = 1;
-  let graphHeight = 1;
-  let bestScore = Number.POSITIVE_INFINITY;
-  let bestArea = 0;
-
-  for (let candidateWidth = 1; candidateWidth <= targetLongSide; candidateWidth += 1) {
-    for (let candidateHeight = 1; candidateHeight <= targetLongSide; candidateHeight += 1) {
-      if (Math.max(candidateWidth, candidateHeight) > targetLongSide) continue;
-      const aspectScore = Math.abs(Math.log((candidateWidth / candidateHeight) / targetAspect));
-      const area = candidateWidth * candidateHeight;
-      if (aspectScore < bestScore - 0.000001 || (Math.abs(aspectScore - bestScore) <= 0.000001 && area > bestArea)) {
-        graphWidth = candidateWidth;
-        graphHeight = candidateHeight;
-        bestScore = aspectScore;
-        bestArea = area;
-      }
-    }
-  }
+  const graphWidth = defaultGraphSettings.graphWidth;
+  const graphHeight = defaultGraphSettings.graphHeight;
 
   return normalizeGraphSettings({
     ...defaultGraphSettings,
     graphWidth,
     graphHeight,
-    imageWidth: graphWidth,
-    imageHeight: graphHeight,
+    imageWidth: defaultGraphSettings.imageWidth,
+    imageHeight: defaultGraphSettings.imageHeight,
     imagePadding: 0,
     cellWidth,
     cellHeight,
@@ -74,8 +51,6 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData();
     const title = String(formData.get("title") || "").trim();
     const description = String(formData.get("description") || "").trim();
-    const width = Number(formData.get("width") || defaultGraphSettings.outputWidth);
-    const height = Number(formData.get("height") || defaultGraphSettings.outputHeight);
     const file = formData.get("file");
 
     if (!title) return NextResponse.json({ message: "Project title is required." }, { status: 400 });
@@ -88,7 +63,7 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = getSupabaseAdmin();
-    const settings = settingsForImage(width, height);
+    const settings = settingsForImage();
     const { data: project, error } = await supabase
       .from("projects")
       .insert({

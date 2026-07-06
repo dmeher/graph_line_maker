@@ -42,8 +42,10 @@ export default function DevEditorTestPage() {
   if (process.env.NODE_ENV === "production") notFound();
 
   const settings = normalizeGraphSettings({
-    graphWidth: 8,
+    graphWidth: 10,
     graphHeight: 12,
+    imageWidth: 8,
+    imageHeight: 10,
     imageLineThickness: 0,
     strokeGapClosePixels: 0,
     sourceFillMinStrokePixels: 7,

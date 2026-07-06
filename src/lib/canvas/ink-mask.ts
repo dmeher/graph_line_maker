@@ -5,9 +5,10 @@ export type ImageDataLike = {
 };
 
 const MIN_ALPHA_FOR_INK = 16;
-const BACKGROUND_CONTRAST_GAP = 42;
+const BACKGROUND_CONTRAST_GAP = 72;
 const COLOR_DISTANCE_THRESHOLD = 58;
-const MAX_INK_LUMA_THRESHOLD = 218;
+const MIN_COLORED_INK_CHANNEL_SPREAD = 18;
+const MAX_INK_LUMA_THRESHOLD = 190;
 const MIN_INK_LUMA_THRESHOLD = 48;
 
 function clamp(value: number, min: number, max: number) {
@@ -147,9 +148,12 @@ export function maskFromImageData(imageData: ImageDataLike) {
     const green = data[index + 1];
     const blue = data[index + 2];
     const luma = lumaForRgb(red, green, blue);
+    const channelSpread = Math.max(red, green, blue) - Math.min(red, green, blue);
     const isDarkInk = luma <= analysis.inkThreshold;
     const isColoredInk =
-      luma <= analysis.brightLuma - 12 && colorDistance(red, green, blue, analysis.background) >= COLOR_DISTANCE_THRESHOLD;
+      channelSpread >= MIN_COLORED_INK_CHANNEL_SPREAD &&
+      luma <= analysis.brightLuma - 12 &&
+      colorDistance(red, green, blue, analysis.background) >= COLOR_DISTANCE_THRESHOLD;
 
     if (!isDarkInk && !isColoredInk) continue;
     mask[pixel] = 1;

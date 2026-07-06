@@ -51,6 +51,9 @@ export type GraphSettings = {
   fillColor: string;
   fillRegions: Record<string, string>;
   imageLineThickness: number;
+  sourceFillThreshold: number;
+  sourceFillMinStrokePixels: number;
+  strokeGapClosePixels: number;
   gridLineColor: string;
   gridLineLayer: GraphLineLayer;
   gridLineThickness: number;

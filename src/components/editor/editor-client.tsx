@@ -44,12 +44,21 @@ import {
   DEFAULT_PRINT_ORIENTATION,
   DEFAULT_PRINT_PAPER_SIZE,
   DEFAULT_PRINT_VERTICAL_ALIGNMENT,
+  DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
+  DEFAULT_SOURCE_FILL_THRESHOLD,
+  DEFAULT_STROKE_GAP_CLOSE_PIXELS,
   GRAPH_LINE_LAYER_KEYS,
   GRAPH_MAJOR_CELL_PIXELS,
   GRAPH_MINOR_PIXEL_SIZE,
   MAX_IMAGE_PADDING_PIXELS,
   MAX_IMAGE_LINE_THICKNESS,
+  MAX_SOURCE_FILL_MIN_STROKE_PIXELS,
+  MAX_SOURCE_FILL_THRESHOLD,
+  MAX_STROKE_GAP_CLOSE_PIXELS,
   MIN_IMAGE_LINE_THICKNESS,
+  MIN_SOURCE_FILL_MIN_STROKE_PIXELS,
+  MIN_SOURCE_FILL_THRESHOLD,
+  MIN_STROKE_GAP_CLOSE_PIXELS,
   PRESET_GRAPH_COLORS,
   PRESET_GRAPH_LINE_COLORS,
   PRINT_HORIZONTAL_ALIGNMENT_KEYS,
@@ -59,6 +68,9 @@ import {
   PRINT_VERTICAL_ALIGNMENT_KEYS,
   TRANSPARENT_FILL_COLOR,
   clampImageLineThickness,
+  clampSourceFillMinStrokePixels,
+  clampSourceFillThreshold,
+  clampStrokeGapClosePixels,
   isGraphLineLayer,
   isFillColor,
   isHexColor,
@@ -159,6 +171,7 @@ function NumberField({
   min,
   max,
   step = 1,
+  disabled = false,
   onChange,
 }: {
   label: string;
@@ -166,6 +179,7 @@ function NumberField({
   min: number;
   max: number;
   step?: number;
+  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   const [draftValue, setDraftValue] = useState(() => String(value));
@@ -189,6 +203,11 @@ function NumberField({
       return;
     }
 
+    if (disabled) {
+      setDraftValue(String(value));
+      return;
+    }
+
     const clamped = Math.max(min, Math.min(max, parsed));
     onChange(clamped);
     setDraftValue(String(clamped));
@@ -203,6 +222,7 @@ function NumberField({
         min={min}
         max={max}
         step={step}
+        disabled={disabled}
         value={draftValue}
         onFocus={() => setIsFocused(true)}
         onBlur={() => {
@@ -213,10 +233,11 @@ function NumberField({
           const nextValue = event.target.value;
           const parsed = parseDraft(nextValue);
           setDraftValue(nextValue);
+          if (disabled) return;
           if (parsed === null || parsed < min || parsed > max) return;
           onChange(parsed);
         }}
-        className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+        className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
       />
     </label>
   );
@@ -288,6 +309,9 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const outlineColor = isHexColor(settings.outlineColor) ? settings.outlineColor : isHexColor(settings.lineColor) ? settings.lineColor : DEFAULT_OUTLINE_COLOR;
   const fillColor = isFillColor(settings.fillColor) ? settings.fillColor : lightenColor(outlineColor);
   const imageLineThickness = clampImageLineThickness(settings.imageLineThickness ?? DEFAULT_IMAGE_LINE_THICKNESS);
+  const sourceFillThreshold = clampSourceFillThreshold(settings.sourceFillThreshold ?? DEFAULT_SOURCE_FILL_THRESHOLD);
+  const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(settings.sourceFillMinStrokePixels ?? DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS);
+  const strokeGapClosePixels = clampStrokeGapClosePixels(settings.strokeGapClosePixels ?? DEFAULT_STROKE_GAP_CLOSE_PIXELS);
   const gridLineColor = isHexColor(settings.gridLineColor) && settings.gridLineColor.toLowerCase() !== "#cbd5e1" ? settings.gridLineColor : DEFAULT_GRID_LINE_COLOR;
   const gridLineLayer = isGraphLineLayer(settings.gridLineLayer) ? settings.gridLineLayer : DEFAULT_GRAPH_LINE_LAYER;
   const cellSizeCm = Math.max(0.05, Math.min(100, Number(settings.cellSizeCm || DEFAULT_CELL_SIZE_CM)));
@@ -324,6 +348,9 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
     fillColor,
     fillRegions,
     imageLineThickness,
+    sourceFillThreshold,
+    sourceFillMinStrokePixels,
+    strokeGapClosePixels,
     gridLineColor,
     gridLineLayer,
     imagePadding,
@@ -888,6 +915,9 @@ export function EditorClient({ project }: { project: Project }) {
         <NumberField label="10 cells width (cm)" value={roundCm(settings.cellSizeCm * 10)} min={0.5} max={1000} step={0.01} onChange={updateTenCellWidth} />
         <NumberField label="Image padding (cells)" value={paddingCellsFromPixels(settings.imagePadding)} min={0} max={maxImagePaddingCells} onChange={updateImagePaddingCells} />
         <NumberField label="Image line size" value={settings.imageLineThickness} min={MIN_IMAGE_LINE_THICKNESS} max={MAX_IMAGE_LINE_THICKNESS} step={0.01} onChange={(value) => updateSetting("imageLineThickness", value)} />
+        <NumberField label="Fill detection" value={settings.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} onChange={(value) => updateSetting("sourceFillThreshold", value)} />
+        <NumberField label="Fill width" value={settings.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSetting("sourceFillMinStrokePixels", value)} />
+        <NumberField label="Gap closing" value={settings.strokeGapClosePixels} min={MIN_STROKE_GAP_CLOSE_PIXELS} max={MAX_STROKE_GAP_CLOSE_PIXELS} onChange={(value) => updateSetting("strokeGapClosePixels", value)} />
         <label className="grid gap-1.5">
           <span className="text-xs font-semibold text-slate-500">Print paper</span>
           <select
@@ -948,7 +978,7 @@ export function EditorClient({ project }: { project: Project }) {
 
       <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
         <p className="font-mono text-xs text-slate-600">
-          Image {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / 10 cells {roundCm(settings.cellSizeCm * 10)} cm / padding {paddingCellsFromPixels(settings.imagePadding)} cells / line {settings.imageLineThickness}x / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
+          Image {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / 10 cells {roundCm(settings.cellSizeCm * 10)} cm / padding {paddingCellsFromPixels(settings.imagePadding)} cells / line {settings.imageLineThickness}x / fill {settings.sourceFillThreshold} / fill width {settings.sourceFillMinStrokePixels}px / gap {settings.strokeGapClosePixels}px / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
         </p>
       </div>
 

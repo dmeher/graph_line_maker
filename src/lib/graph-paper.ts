@@ -5,9 +5,18 @@ export const MAX_IMAGE_PADDING_PIXELS = 1200;
 export const DEFAULT_IMAGE_PADDING_CELLS = 2;
 export const DEFAULT_IMAGE_PADDING_PIXELS = DEFAULT_IMAGE_PADDING_CELLS * GRAPH_MINOR_PIXEL_SIZE;
 export const DEFAULT_CELL_SIZE_CM = 1;
-export const DEFAULT_IMAGE_LINE_THICKNESS = 1;
-export const MIN_IMAGE_LINE_THICKNESS = 1;
-export const MAX_IMAGE_LINE_THICKNESS = 8;
+export const DEFAULT_IMAGE_LINE_THICKNESS = 0;
+export const MIN_IMAGE_LINE_THICKNESS = 0;
+export const MAX_IMAGE_LINE_THICKNESS = 6;
+export const DEFAULT_SOURCE_FILL_THRESHOLD = 0.58;
+export const MIN_SOURCE_FILL_THRESHOLD = 0.35;
+export const MAX_SOURCE_FILL_THRESHOLD = 0.9;
+export const DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS = 7;
+export const MIN_SOURCE_FILL_MIN_STROKE_PIXELS = 2;
+export const MAX_SOURCE_FILL_MIN_STROKE_PIXELS = 48;
+export const DEFAULT_STROKE_GAP_CLOSE_PIXELS = 0;
+export const MIN_STROKE_GAP_CLOSE_PIXELS = 0;
+export const MAX_STROKE_GAP_CLOSE_PIXELS = 2;
 export const DEFAULT_OUTLINE_COLOR = "#111827";
 export const DEFAULT_GRID_LINE_COLOR = "#dc2626";
 export const TRANSPARENT_FILL_COLOR = "transparent";
@@ -120,6 +129,24 @@ export function clampImageLineThickness(value: unknown) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return DEFAULT_IMAGE_LINE_THICKNESS;
   return Math.round(Math.max(MIN_IMAGE_LINE_THICKNESS, Math.min(MAX_IMAGE_LINE_THICKNESS, numeric)) * 1000) / 1000;
+}
+
+export function clampSourceFillThreshold(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_SOURCE_FILL_THRESHOLD;
+  return Math.round(Math.max(MIN_SOURCE_FILL_THRESHOLD, Math.min(MAX_SOURCE_FILL_THRESHOLD, numeric)) * 1000) / 1000;
+}
+
+export function clampSourceFillMinStrokePixels(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS;
+  return Math.round(Math.max(MIN_SOURCE_FILL_MIN_STROKE_PIXELS, Math.min(MAX_SOURCE_FILL_MIN_STROKE_PIXELS, numeric)));
+}
+
+export function clampStrokeGapClosePixels(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_STROKE_GAP_CLOSE_PIXELS;
+  return Math.round(Math.max(MIN_STROKE_GAP_CLOSE_PIXELS, Math.min(MAX_STROKE_GAP_CLOSE_PIXELS, numeric)));
 }
 
 export function lightenColor(hex: string, amount = 0.72) {

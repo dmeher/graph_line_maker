@@ -14,6 +14,9 @@ import {
   DEFAULT_PRINT_ORIENTATION,
   DEFAULT_PRINT_PAPER_SIZE,
   DEFAULT_PRINT_VERTICAL_ALIGNMENT,
+  DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
+  DEFAULT_SOURCE_FILL_THRESHOLD,
+  DEFAULT_STROKE_GAP_CLOSE_PIXELS,
   GRAPH_MAJOR_CELL_PIXELS,
   MAX_IMAGE_PADDING_PIXELS,
   isGraphLineLayer,
@@ -25,6 +28,9 @@ import {
   lightenColor,
   isHexColor,
   clampImageLineThickness,
+  clampSourceFillMinStrokePixels,
+  clampSourceFillThreshold,
+  clampStrokeGapClosePixels,
 } from "@/lib/graph-paper";
 import type { GraphSettings, PaletteColor, Project, ProjectSummary } from "@/lib/types";
 
@@ -53,6 +59,9 @@ export const defaultGraphSettings: GraphSettings = {
   fillColor: lightenColor(DEFAULT_OUTLINE_COLOR),
   fillRegions: {},
   imageLineThickness: DEFAULT_IMAGE_LINE_THICKNESS,
+  sourceFillThreshold: DEFAULT_SOURCE_FILL_THRESHOLD,
+  sourceFillMinStrokePixels: DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
+  strokeGapClosePixels: DEFAULT_STROKE_GAP_CLOSE_PIXELS,
   gridLineColor: DEFAULT_GRID_LINE_COLOR,
   gridLineLayer: DEFAULT_GRAPH_LINE_LAYER,
   gridLineThickness: 1,
@@ -144,6 +153,9 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const fillColor = isFillColor(cleanMerged.fillColor) ? cleanMerged.fillColor : lightenColor(outlineColor);
   const fillRegions = normalizeFillRegions(cleanMerged.fillRegions);
   const imageLineThickness = clampImageLineThickness(cleanMerged.imageLineThickness);
+  const sourceFillThreshold = clampSourceFillThreshold(cleanMerged.sourceFillThreshold);
+  const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(cleanMerged.sourceFillMinStrokePixels);
+  const strokeGapClosePixels = clampStrokeGapClosePixels(cleanMerged.strokeGapClosePixels);
   const gridLineColor = isHexColor(cleanMerged.gridLineColor) && cleanMerged.gridLineColor.toLowerCase() !== "#cbd5e1" ? cleanMerged.gridLineColor : DEFAULT_GRID_LINE_COLOR;
   const gridLineLayer = isGraphLineLayer(cleanMerged.gridLineLayer) ? cleanMerged.gridLineLayer : DEFAULT_GRAPH_LINE_LAYER;
   const cellSizeCm = roundCm(Math.max(0.05, Math.min(100, Number(cleanMerged.cellSizeCm || legacyCellSizeInches || DEFAULT_CELL_SIZE_CM))));
@@ -176,6 +188,9 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     fillColor,
     fillRegions,
     imageLineThickness,
+    sourceFillThreshold,
+    sourceFillMinStrokePixels,
+    strokeGapClosePixels,
     gridLineColor,
     gridLineLayer,
     imagePadding,

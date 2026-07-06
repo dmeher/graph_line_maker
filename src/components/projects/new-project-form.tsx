@@ -1,13 +1,21 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, Crop, ImageUp, Loader2, Maximize2 } from "lucide-react";
-import { ManualCropper } from "@/components/projects/manual-cropper";
-import { cropImageUrlToFile, type CropPixels } from "@/lib/canvas/crop";
+import type { CropPixels } from "@/lib/canvas/crop";
 import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
-import { readPdfFirstPageSize, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
 import { bytesToSize } from "@/lib/utils/format";
+
+const ManualCropper = dynamic(() => import("@/components/projects/manual-cropper").then((module) => module.ManualCropper), {
+  ssr: false,
+  loading: () => (
+    <div className="grid h-full min-h-[340px] place-items-center text-sm font-semibold text-slate-500">
+      Preparing crop
+    </div>
+  ),
+});
 
 function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -60,6 +68,7 @@ function canvasToPngUrl(canvas: HTMLCanvasElement) {
 }
 
 async function pdfPreviewUrl(file: File) {
+  const { renderPdfFirstPageToCanvas } = await import("@/lib/canvas/pdf");
   const { canvas } = await renderPdfFirstPageToCanvas(file);
   return canvasToPngUrl(canvas);
 }
@@ -67,11 +76,13 @@ async function pdfPreviewUrl(file: File) {
 async function cropFile(file: File, imageUrl: string, cropPixels: CropPixels | null) {
   if (!cropPixels) return file;
   const outputType = file.type === "image/svg+xml" || isPdfFile(file) ? "image/png" : file.type || "image/png";
+  const { cropImageUrlToFile } = await import("@/lib/canvas/crop");
   return cropImageUrlToFile(imageUrl, cropPixels, file.name, outputType);
 }
 
 async function readImageSize(file: File) {
   if (isPdfFile(file)) {
+    const { readPdfFirstPageSize } = await import("@/lib/canvas/pdf");
     const pdfSize = await readPdfFirstPageSize(file);
     return { width: pdfSize.width, height: pdfSize.height };
   }

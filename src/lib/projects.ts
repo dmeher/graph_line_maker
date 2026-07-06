@@ -41,6 +41,7 @@ const MAX_CANVAS_DIMENSION = 6000;
 type StoredGraphSettings = Partial<GraphSettings> & {
   cellSizeInches?: number;
 };
+type SignedImageUrlMode = "all" | "original" | "none";
 
 export const defaultGraphSettings: GraphSettings = {
   graphWidth: DEFAULT_GRAPH_WIDTH_CELLS,
@@ -250,8 +251,12 @@ async function signedImageUrl(bucket: string, path?: string | null) {
   return data.signedUrl;
 }
 
-async function mapProject(row: DbProject, palettes: DbPalette[] = []): Promise<Project> {
+async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImageUrlMode: SignedImageUrlMode = "all"): Promise<Project> {
   const settings = normalizeGraphSettings(row.settings);
+  const [originalImageUrl, processedImageUrl] = await Promise.all([
+    signedImageUrlMode === "none" ? Promise.resolve(null) : signedImageUrl(ORIGINAL_IMAGES_BUCKET, row.original_image_path),
+    signedImageUrlMode === "all" ? signedImageUrl(PROCESSED_IMAGES_BUCKET, row.processed_image_path) : Promise.resolve(null),
+  ]);
 
   return {
     id: row.id,
@@ -269,8 +274,8 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = []): Promise<P
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     palettes: palettes.map(mapPalette).sort((a, b) => a.sortOrder - b.sortOrder),
-    originalImageUrl: await signedImageUrl(ORIGINAL_IMAGES_BUCKET, row.original_image_path),
-    processedImageUrl: await signedImageUrl(PROCESSED_IMAGES_BUCKET, row.processed_image_path),
+    originalImageUrl,
+    processedImageUrl,
   };
 }
 
@@ -316,7 +321,7 @@ export async function getProjectSummaries(query?: string): Promise<ProjectSummar
 
   return Promise.all(
     rows.map(async (row) => {
-      const project = await mapProject(row, paletteByProject.get(row.id) ?? []);
+      const project = await mapProject(row, paletteByProject.get(row.id) ?? [], "none");
       const { settings: _settings, palettes, ...summary } = project;
       void _settings;
       return {
@@ -331,26 +336,29 @@ export async function getProjectForCurrentUser(projectId: string) {
   const session = await requireSession();
   const supabase = getSupabaseAdmin();
 
-  const { data: project, error } = await supabase
-    .from("projects")
-    .select(
-      "id, user_id, title, description, original_image_path, processed_image_path, settings, width, height, pixel_size, grid_cell_size, color_count, created_at, updated_at",
-    )
-    .eq("id", projectId)
-    .eq("user_id", session.userId)
-    .maybeSingle();
+  const [projectResult, paletteResult] = await Promise.all([
+    supabase
+      .from("projects")
+      .select(
+        "id, user_id, title, description, original_image_path, processed_image_path, settings, width, height, pixel_size, grid_cell_size, color_count, created_at, updated_at",
+      )
+      .eq("id", projectId)
+      .eq("user_id", session.userId)
+      .maybeSingle(),
+    supabase
+      .from("project_palettes")
+      .select("id, color_name, hex_code, locked, cell_count, sort_order")
+      .eq("project_id", projectId)
+      .order("sort_order", { ascending: true }),
+  ]);
 
+  const { data: project, error } = projectResult;
   if (error) throw new Error(error.message);
   if (!project) return null;
 
-  const { data: palettes, error: paletteError } = await supabase
-    .from("project_palettes")
-    .select("id, color_name, hex_code, locked, cell_count, sort_order")
-    .eq("project_id", projectId)
-    .order("sort_order", { ascending: true });
-
+  const { data: palettes, error: paletteError } = paletteResult;
   if (paletteError) throw new Error(paletteError.message);
-  return mapProject(project as DbProject, (palettes ?? []) as DbPalette[]);
+  return mapProject(project as DbProject, (palettes ?? []) as DbPalette[], "original");
 }
 
 export async function assertProjectOwner(projectId: string) {

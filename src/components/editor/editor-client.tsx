@@ -1331,8 +1331,39 @@ export function EditorClient({ project }: { project: Project }) {
     </aside>
   );
 
+  const exportPanel = (
+    <div className="rounded-md border border-[var(--line)] bg-white p-3 shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950">
+          <Download size={16} aria-hidden="true" />
+          Export
+        </h2>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={exportPNG} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
+            <ImageDown size={16} aria-hidden="true" />
+            PNG
+          </button>
+          <button type="button" onClick={exportPDF} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
+            <FileText size={16} aria-hidden="true" />
+            PDF
+          </button>
+          <button type="button" onClick={printGraph} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
+            <Printer size={16} aria-hidden="true" />
+            Print
+          </button>
+          <button type="button" onClick={exportJSON} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
+            <FileJson size={16} aria-hidden="true" />
+            JSON
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   const canvasPanel = (
     <section className="min-w-0 space-y-4">
+      {exportPanel}
+
       <div className="rounded-md border border-[var(--line)] bg-white p-3 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] pb-3">
           <div className="min-w-0">
@@ -1416,32 +1447,6 @@ export function EditorClient({ project }: { project: Project }) {
         </div>
       </div>
 
-      <div className="rounded-md border border-[var(--line)] bg-white p-3 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950">
-            <Download size={16} aria-hidden="true" />
-            Export
-          </h2>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={exportPNG} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-              <ImageDown size={16} aria-hidden="true" />
-              PNG
-            </button>
-            <button type="button" onClick={exportPDF} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-              <FileText size={16} aria-hidden="true" />
-              PDF
-            </button>
-            <button type="button" onClick={printGraph} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-              <Printer size={16} aria-hidden="true" />
-              Print
-            </button>
-            <button type="button" onClick={exportJSON} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-              <FileJson size={16} aria-hidden="true" />
-              JSON
-            </button>
-          </div>
-        </div>
-      </div>
     </section>
   );
 

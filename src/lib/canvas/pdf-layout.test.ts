@@ -67,7 +67,7 @@ test("single-page PDF export centers graph on paper", () => {
   assert.equal(plan.tiles[0].destinationHeightMm, 50);
 });
 
-test("PDF export adds image padding outside the requested graph width", () => {
+test("PDF export ignores legacy image padding for requested graph width", () => {
   const settings = {
     graphWidth: 8,
     graphHeight: 8,
@@ -76,8 +76,8 @@ test("PDF export adds image padding outside the requested graph width", () => {
   };
 
   const graphSize = getGraphPrintSizeMm(settings);
-  assert.equal(graphSize.widthMm / 10, 10);
-  assert.equal(graphSize.heightMm / 10, 10);
+  assert.equal(graphSize.widthMm / 10, 8);
+  assert.equal(graphSize.heightMm / 10, 8);
 
   const plan = createPdfExportPlan({
     settings,
@@ -87,8 +87,8 @@ test("PDF export adds image padding outside the requested graph width", () => {
   });
 
   assert.equal(plan.totalPages, 1);
-  assert.equal(plan.tiles[0].destinationWidthMm, 100);
-  assert.equal(plan.tiles[0].destinationHeightMm, 100);
+  assert.equal(plan.tiles[0].destinationWidthMm, 80);
+  assert.equal(plan.tiles[0].destinationHeightMm, 80);
 });
 
 test("single-page PDF export supports left top alignment", () => {

@@ -62,11 +62,10 @@ export function getGraphPrintSizeMm(settings: PdfExportSettings) {
   const graphWidth = Math.max(1, Math.round(safePositive(settings.graphWidth, 1)));
   const graphHeight = Math.max(1, Math.round(safePositive(settings.graphHeight, 1)));
   const cellSizeCm = Math.max(0.05, safePositive(settings.cellSizeCm, 1));
-  const paddingCells = Math.max(0, safePositive(settings.imagePadding ?? 0, 0) / GRAPH_MAJOR_CELL_PIXELS);
 
   return {
-    widthMm: cmToMm((graphWidth + paddingCells * 2) * cellSizeCm),
-    heightMm: cmToMm((graphHeight + paddingCells * 2) * cellSizeCm),
+    widthMm: cmToMm(graphWidth * cellSizeCm),
+    heightMm: cmToMm(graphHeight * cellSizeCm),
   };
 }
 

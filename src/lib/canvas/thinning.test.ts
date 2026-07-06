@@ -171,7 +171,7 @@ test("solid filled rectangle remains filled with a thin boundary", () => {
   assert.equal(result.fillMask[6 * width + 6], 1);
 });
 
-test("hollow thick rectangle does not fill its interior", () => {
+test("hollow thick rectangle fills its closed interior only", () => {
   const width = 16;
   const height = 16;
   const mask = createMask(width, height);
@@ -182,11 +182,70 @@ test("hollow thick rectangle does not fill its interior", () => {
 
   const result = createThinArtworkMasks(mask, width, height, { strokeGapClosePixels: 0 });
 
-  assert.equal(count(result.fillMask), 0);
-  assert.equal(result.fillMask[7 * width + 7], 0);
-  assert.equal(result.outlineMask[7 * width + 7], 0);
+  assert.equal(count(result.fillMask), 16);
+  assert.equal(result.fillMask[7 * width + 7], 1);
+  assert.equal(result.fillMask[1 * width + 1], 0);
   assert.ok(count(result.strokeMask) < count(mask));
   assert.equal(componentCount(result.strokeMask, width, height), 1);
+});
+
+test("open outline does not create a fillable section", () => {
+  const width = 16;
+  const height = 16;
+  const mask = createMask(width, height);
+  fillRect(mask, width, 3, 10, 10, 1);
+  fillRect(mask, width, 3, 3, 1, 8);
+  fillRect(mask, width, 12, 3, 1, 8);
+
+  const result = createThinArtworkMasks(mask, width, height, { strokeGapClosePixels: 0 });
+
+  assert.equal(count(result.fillMask), 0);
+  assert.equal(result.strokeMask[10 * width + 8], 1);
+});
+
+test("separate closed sections become separate fillable regions", () => {
+  const width = 20;
+  const height = 14;
+  const mask = createMask(width, height);
+  fillRect(mask, width, 2, 2, 5, 1);
+  fillRect(mask, width, 2, 6, 5, 1);
+  fillRect(mask, width, 2, 2, 1, 5);
+  fillRect(mask, width, 6, 2, 1, 5);
+  fillRect(mask, width, 10, 3, 5, 1);
+  fillRect(mask, width, 10, 7, 5, 1);
+  fillRect(mask, width, 10, 3, 1, 5);
+  fillRect(mask, width, 14, 3, 1, 5);
+
+  const result = createThinArtworkMasks(mask, width, height, { strokeGapClosePixels: 0 });
+
+  assert.equal(count(result.fillMask), 18);
+  assert.equal(componentCount(result.fillMask, width, height), 2);
+  assert.equal(result.fillMask[4 * width + 4], 1);
+  assert.equal(result.fillMask[5 * width + 12], 1);
+  assert.equal(result.fillMask[1 * width + 1], 0);
+});
+
+test("source fill and adjacent closed pocket stay in separate fill layers", () => {
+  const width = 18;
+  const height = 14;
+  const mask = createMask(width, height);
+  fillRect(mask, width, 3, 3, 7, 8);
+  fillRect(mask, width, 9, 3, 6, 1);
+  fillRect(mask, width, 9, 10, 6, 1);
+  fillRect(mask, width, 14, 3, 1, 8);
+
+  const result = createThinArtworkMasks(mask, width, height, {
+    sourceFillMinStrokePixels: 7,
+    sourceFillThreshold: 0.58,
+    strokeGapClosePixels: 0,
+  });
+
+  assert.equal(result.sourceFillMask[6 * width + 6], 1);
+  assert.equal(result.enclosedFillMask[6 * width + 12], 1);
+  assert.equal(result.sourceFillMask[6 * width + 12], 0);
+  assert.equal(result.enclosedFillMask[6 * width + 6], 0);
+  assert.equal(componentCount(result.sourceFillMask, width, height), 1);
+  assert.equal(componentCount(result.enclosedFillMask, width, height), 1);
 });
 
 test("mixed filled shape plus thick line produces one fill and one faithful stroke", () => {

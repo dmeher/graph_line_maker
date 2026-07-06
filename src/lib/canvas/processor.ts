@@ -6,7 +6,6 @@ import {
   DEFAULT_GRID_LINE_COLOR,
   GRAPH_MAJOR_CELL_PIXELS,
   GRAPH_SUBDIVISIONS,
-  MAX_IMAGE_PADDING_PIXELS,
   clampImageLineThickness,
   isFillColor,
   isTransparentFillColor,
@@ -44,17 +43,18 @@ function graphDimensions(settings: GraphSettings) {
   const cellHeight = GRAPH_MAJOR_CELL_PIXELS;
   const imageAreaWidth = graphWidth * cellWidth;
   const imageAreaHeight = graphHeight * cellHeight;
-  const maxPadding = Math.max(0, Math.min(MAX_IMAGE_PADDING_PIXELS, Math.floor((6000 - imageAreaWidth) / 2), Math.floor((6000 - imageAreaHeight) / 2)));
-  const imagePadding = Math.max(0, Math.min(maxPadding, Math.round(settings.imagePadding ?? 0)));
-  const outputWidth = imageAreaWidth + imagePadding * 2;
-  const outputHeight = imageAreaHeight + imagePadding * 2;
+  const imageWidth = Math.max(1, Math.min(imageAreaWidth, Math.round(Number(settings.imageWidth || graphWidth) * cellWidth)));
+  const imageHeight = Math.max(1, Math.min(imageAreaHeight, Math.round(Number(settings.imageHeight || graphHeight) * cellHeight)));
+  const outputWidth = imageAreaWidth;
+  const outputHeight = imageAreaHeight;
 
   return {
     cellWidth,
     cellHeight,
     graphWidth,
     graphHeight,
-    imagePadding,
+    imageWidth,
+    imageHeight,
     imageAreaWidth,
     imageAreaHeight,
     minorWidth: cellWidth / GRAPH_SUBDIVISIONS,
@@ -120,14 +120,10 @@ function fitCanvas(canvas: HTMLCanvasElement, settings: GraphSettings) {
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
 
-  const padding = dimensions.imagePadding;
-  const innerWidth = dimensions.imageAreaWidth;
-  const innerHeight = dimensions.imageAreaHeight;
-  const ratio = Math.min(innerWidth / contentBounds.width, innerHeight / contentBounds.height);
-  const drawWidth = Math.max(1, Math.round(contentBounds.width * ratio));
-  const drawHeight = Math.max(1, Math.round(contentBounds.height * ratio));
-  const x = padding + Math.round((innerWidth - drawWidth) / 2) + Math.round(settings.imageOffsetX ?? 0);
-  const y = padding + Math.round((innerHeight - drawHeight) / 2) + Math.round(settings.imageOffsetY ?? 0);
+  const drawWidth = dimensions.imageWidth;
+  const drawHeight = dimensions.imageHeight;
+  const x = Math.round((dimensions.imageAreaWidth - drawWidth) / 2) + Math.round(settings.imageOffsetX ?? 0);
+  const y = Math.round((dimensions.imageAreaHeight - drawHeight) / 2) + Math.round(settings.imageOffsetY ?? 0);
   context.drawImage(
     canvas,
     contentBounds.x,
@@ -203,8 +199,10 @@ function buildArtworkMasks(imageData: ImageData, settings: GraphSettings) {
   const outlineMask = expandMaskForLineSize(masks.outlineMask, width, height, imageLineThickness);
 
   return {
+    enclosedFillMask: masks.enclosedFillMask,
     fillMask: masks.fillMask,
     outlineMask,
+    sourceFillMask: masks.sourceFillMask,
   };
 }
 
@@ -213,78 +211,63 @@ function fillColorForRegion(settings: GraphSettings, regionId: string) {
   return customColor && isFillColor(customColor) ? customColor : settings.fillColor;
 }
 
-function labelFillRegions(fillMask: Uint8Array, width: number, height: number, settings: GraphSettings) {
-  const fillRegionMap = new Uint16Array(fillMask.length);
-  const queue = new Int32Array(fillMask.length);
+function labelFillRegions(fillMasks: Uint8Array[], width: number, height: number, settings: GraphSettings) {
+  const fillRegionMap = new Uint16Array(width * height);
+  const queue = new Int32Array(fillRegionMap.length);
   const regions: FillRegion[] = [];
   let nextRegionId = 0;
 
-  for (let start = 0; start < fillMask.length; start += 1) {
-    if (!fillMask[start] || fillRegionMap[start] || nextRegionId >= 65535) continue;
+  for (const fillMask of fillMasks) {
+    const visited = new Uint8Array(fillMask.length);
 
-    nextRegionId += 1;
-    let head = 0;
-    let tail = 0;
-    let count = 0;
-    let sumX = 0;
-    let sumY = 0;
-    const regionId = String(nextRegionId);
+    for (let start = 0; start < fillMask.length; start += 1) {
+      if (!fillMask[start] || visited[start] || fillRegionMap[start] || nextRegionId >= 65535) continue;
 
-    fillRegionMap[start] = nextRegionId;
-    queue[tail] = start;
-    tail += 1;
+      nextRegionId += 1;
+      let head = 0;
+      let tail = 0;
+      let count = 0;
+      let sumX = 0;
+      let sumY = 0;
+      const regionId = String(nextRegionId);
 
-    while (head < tail) {
-      const index = queue[head];
-      head += 1;
-      count += 1;
+      visited[start] = 1;
+      fillRegionMap[start] = nextRegionId;
+      queue[tail] = start;
+      tail += 1;
 
-      const x = index % width;
-      const y = Math.floor(index / width);
-      sumX += x;
-      sumY += y;
+      while (head < tail) {
+        const index = queue[head];
+        head += 1;
+        count += 1;
 
-      if (x > 0) {
-        const next = index - 1;
-        if (fillMask[next] && !fillRegionMap[next]) {
+        const x = index % width;
+        const y = Math.floor(index / width);
+        sumX += x;
+        sumY += y;
+
+        function enqueue(next: number) {
+          if (!fillMask[next] || visited[next] || fillRegionMap[next]) return;
+          visited[next] = 1;
           fillRegionMap[next] = nextRegionId;
           queue[tail] = next;
           tail += 1;
         }
+
+        if (x > 0) enqueue(index - 1);
+        if (x < width - 1) enqueue(index + 1);
+        if (y > 0) enqueue(index - width);
+        if (y < height - 1) enqueue(index + width);
       }
-      if (x < width - 1) {
-        const next = index + 1;
-        if (fillMask[next] && !fillRegionMap[next]) {
-          fillRegionMap[next] = nextRegionId;
-          queue[tail] = next;
-          tail += 1;
-        }
-      }
-      if (y > 0) {
-        const next = index - width;
-        if (fillMask[next] && !fillRegionMap[next]) {
-          fillRegionMap[next] = nextRegionId;
-          queue[tail] = next;
-          tail += 1;
-        }
-      }
-      if (y < height - 1) {
-        const next = index + width;
-        if (fillMask[next] && !fillRegionMap[next]) {
-          fillRegionMap[next] = nextRegionId;
-          queue[tail] = next;
-          tail += 1;
-        }
-      }
+
+      regions.push({
+        id: regionId,
+        color: fillColorForRegion(settings, regionId),
+        cellCount: count,
+        centerX: count ? Math.round(sumX / count) : 0,
+        centerY: count ? Math.round(sumY / count) : 0,
+      });
     }
-
-    regions.push({
-      id: regionId,
-      color: fillColorForRegion(settings, regionId),
-      cellCount: count,
-      centerX: count ? Math.round(sumX / count) : 0,
-      centerY: count ? Math.round(sumY / count) : 0,
-    });
   }
 
   return { fillRegionMap, regions };
@@ -443,8 +426,8 @@ export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSe
   if (!fittedContext) throw new Error("Canvas is not available.");
 
   const sourceData = fittedContext.getImageData(0, 0, fitted.width, fitted.height);
-  const { fillMask, outlineMask } = buildArtworkMasks(sourceData, settings);
-  const { fillRegionMap, regions } = labelFillRegions(fillMask, fitted.width, fitted.height, settings);
+  const { enclosedFillMask, outlineMask, sourceFillMask } = buildArtworkMasks(sourceData, settings);
+  const { fillRegionMap, regions } = labelFillRegions([sourceFillMask, enclosedFillMask], fitted.width, fitted.height, settings);
 
   const output = document.createElement("canvas");
   output.width = fitted.width;

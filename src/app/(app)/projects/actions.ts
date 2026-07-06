@@ -60,6 +60,8 @@ const graphSettingsSchema = z.object({
   transparentBackground: z.boolean(),
   showNumbers: z.boolean(),
   majorGridEvery: z.union([z.literal(5), z.literal(10)]),
+  imageWidth: z.number().min(0.01).max(1000),
+  imageHeight: z.number().min(0.01).max(1000),
   imagePadding: z.number().int().min(0).max(MAX_IMAGE_PADDING_PIXELS),
   imageOffsetX: z.number().int().min(-6000).max(6000),
   imageOffsetY: z.number().int().min(-6000).max(6000),
@@ -99,8 +101,8 @@ export async function saveProjectState(input: z.infer<typeof saveProjectSchema>)
     lineColor: payload.settings.outlineColor,
     pixelSize: payload.settings.cellWidth,
     gridCellSize: payload.settings.cellWidth,
-    outputWidth: payload.settings.graphWidth * payload.settings.cellWidth + payload.settings.imagePadding * 2,
-    outputHeight: payload.settings.graphHeight * payload.settings.cellHeight + payload.settings.imagePadding * 2,
+    outputWidth: payload.settings.graphWidth * payload.settings.cellWidth,
+    outputHeight: payload.settings.graphHeight * payload.settings.cellHeight,
     spotShape: "round",
   });
 

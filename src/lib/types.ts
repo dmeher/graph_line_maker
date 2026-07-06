@@ -61,6 +61,8 @@ export type GraphSettings = {
   transparentBackground: boolean;
   showNumbers: boolean;
   majorGridEvery: 5 | 10;
+  imageWidth: number;
+  imageHeight: number;
   imagePadding: number;
   imageOffsetX: number;
   imageOffsetY: number;

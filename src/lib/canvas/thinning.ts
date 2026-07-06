@@ -5,8 +5,10 @@ export type ThinArtworkOptions = {
 };
 
 export type ThinArtworkMasks = {
+  enclosedFillMask: Uint8Array;
   fillMask: Uint8Array;
   outlineMask: Uint8Array;
+  sourceFillMask: Uint8Array;
   strokeMask: Uint8Array;
 };
 
@@ -529,6 +531,48 @@ function paintComponent(
   }
 }
 
+function enclosedRegionMask(barrierMask: Uint8Array, width: number, height: number) {
+  const outside = new Uint8Array(barrierMask.length);
+  const enclosed = new Uint8Array(barrierMask.length);
+  const queue = new Int32Array(barrierMask.length);
+  let head = 0;
+  let tail = 0;
+
+  function enqueue(index: number) {
+    if (outside[index] || barrierMask[index]) return;
+    outside[index] = 1;
+    queue[tail] = index;
+    tail += 1;
+  }
+
+  for (let x = 0; x < width; x += 1) {
+    enqueue(x);
+    enqueue((height - 1) * width + x);
+  }
+  for (let y = 1; y < height - 1; y += 1) {
+    enqueue(y * width);
+    enqueue(y * width + width - 1);
+  }
+
+  while (head < tail) {
+    const index = queue[head];
+    head += 1;
+    const x = index % width;
+    const y = Math.floor(index / width);
+
+    if (x > 0) enqueue(index - 1);
+    if (x < width - 1) enqueue(index + 1);
+    if (y > 0) enqueue(index - width);
+    if (y < height - 1) enqueue(index + width);
+  }
+
+  for (let index = 0; index < barrierMask.length; index += 1) {
+    if (!barrierMask[index] && !outside[index]) enclosed[index] = 1;
+  }
+
+  return enclosed;
+}
+
 export function createThinArtworkMasks(inkMask: Uint8Array, width: number, height: number, options: ThinArtworkOptions = {}): ThinArtworkMasks {
   const sourceFillThreshold = normalizeFillThreshold(options.sourceFillThreshold);
   const sourceFillMinStrokePixels = normalizeFillMinStrokePixels(options.sourceFillMinStrokePixels);
@@ -536,7 +580,7 @@ export function createThinArtworkMasks(inkMask: Uint8Array, width: number, heigh
   const sourceMask = removeScanlineArtifacts(closeMask(inkMask, width, height, strokeGapClosePixels), width, height);
   const visited = new Uint8Array(sourceMask.length);
   const queue = new Int32Array(sourceMask.length);
-  const fillMask = new Uint8Array(sourceMask.length);
+  const sourceFillMask = new Uint8Array(sourceMask.length);
   const strokeMask = new Uint8Array(sourceMask.length);
 
   function enqueue(index: number, tail: number) {
@@ -583,7 +627,7 @@ export function createThinArtworkMasks(inkMask: Uint8Array, width: number, heigh
     if (isScanlineComponent(width, height, bounds)) continue;
 
     if (isSolidFillComponent(width, queue, tail, bounds, sourceFillThreshold)) {
-      paintComponent(width, queue, tail, bounds, createLocalComponentMask(width, queue, tail, bounds), fillMask, strokeMask);
+      paintComponent(width, queue, tail, bounds, createLocalComponentMask(width, queue, tail, bounds), sourceFillMask, strokeMask);
       continue;
     }
 
@@ -593,21 +637,29 @@ export function createThinArtworkMasks(inkMask: Uint8Array, width: number, heigh
       tail,
       bounds,
       fillMaskForWideStrokes(width, queue, tail, bounds, sourceFillThreshold, sourceFillMinStrokePixels),
-      fillMask,
+      sourceFillMask,
       strokeMask,
     );
   }
 
   const thinnedStrokeMask = thinMask(strokeMask, width, height);
-  const fillBoundaryMask = boundaryMask(fillMask, width, height);
+  const fillMask = new Uint8Array(sourceMask.length);
+  const enclosedFillMask = enclosedRegionMask(sourceMask, width, height);
+  for (let index = 0; index < fillMask.length; index += 1) {
+    fillMask[index] = sourceFillMask[index] || enclosedFillMask[index] ? 1 : 0;
+  }
+
+  const fillBoundaryMask = boundaryMask(sourceFillMask, width, height);
   const outlineMask = new Uint8Array(sourceMask.length);
   for (let index = 0; index < outlineMask.length; index += 1) {
     outlineMask[index] = thinnedStrokeMask[index] || fillBoundaryMask[index] ? 1 : 0;
   }
 
   return {
+    enclosedFillMask,
     fillMask,
     outlineMask,
+    sourceFillMask,
     strokeMask: thinnedStrokeMask,
   };
 }

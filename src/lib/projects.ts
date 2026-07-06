@@ -8,7 +8,6 @@ import {
   DEFAULT_GRAPH_LINE_LAYER,
   DEFAULT_IMAGE_LINE_THICKNESS,
   DEFAULT_GRID_LINE_COLOR,
-  DEFAULT_IMAGE_PADDING_PIXELS,
   DEFAULT_OUTLINE_COLOR,
   DEFAULT_PRINT_HORIZONTAL_ALIGNMENT,
   DEFAULT_PRINT_ORIENTATION,
@@ -69,7 +68,9 @@ export const defaultGraphSettings: GraphSettings = {
   transparentBackground: false,
   showNumbers: false,
   majorGridEvery: 5,
-  imagePadding: DEFAULT_IMAGE_PADDING_PIXELS,
+  imageWidth: 12,
+  imageHeight: 12,
+  imagePadding: 0,
   imageOffsetX: 0,
   imageOffsetY: 0,
   spotPadding: 0,
@@ -121,6 +122,17 @@ function roundCm(value: number) {
   return Math.round(value * 1000) / 1000;
 }
 
+function roundCells(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function clampImageCells(value: unknown, maxCells: number, fallback: number) {
+  const numeric = Number(value);
+  const safeFallback = Math.max(0.01, Math.min(maxCells, fallback));
+  if (!Number.isFinite(numeric)) return roundCells(safeFallback);
+  return roundCells(Math.max(0.01, Math.min(maxCells, numeric)));
+}
+
 function normalizeFillRegions(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const entries = Object.entries(value)
@@ -143,10 +155,22 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const graphHeight = Math.max(1, Math.min(graphHeightLimit, Math.round(merged.graphHeight || Math.round((merged.outputHeight || defaultGraphSettings.outputHeight) / cellHeight))));
   const imageAreaWidth = graphWidth * cellWidth;
   const imageAreaHeight = graphHeight * cellHeight;
-  const maxImagePadding = Math.max(0, Math.min(MAX_IMAGE_PADDING_PIXELS, Math.floor((MAX_CANVAS_DIMENSION - imageAreaWidth) / 2), Math.floor((MAX_CANVAS_DIMENSION - imageAreaHeight) / 2)));
-  const imagePadding = Math.max(0, Math.min(MAX_IMAGE_PADDING_PIXELS, maxImagePadding, Math.round(merged.imagePadding ?? 0)));
-  const outputWidth = imageAreaWidth + imagePadding * 2;
-  const outputHeight = imageAreaHeight + imagePadding * 2;
+  const maxImagePadding = Math.max(0, Math.min(MAX_IMAGE_PADDING_PIXELS, Math.floor((Math.min(imageAreaWidth, imageAreaHeight) - 1) / 2)));
+  const legacyImagePadding = Math.max(0, Math.min(MAX_IMAGE_PADDING_PIXELS, maxImagePadding, Math.round(cleanMerged.imagePadding ?? 0)));
+  const legacyPaddingCells = legacyImagePadding / GRAPH_MAJOR_CELL_PIXELS;
+  const legacyPixelSizedImageWidth =
+    Number(cleanMerged.imageWidth) > graphWidth && Number(cleanMerged.imageWidth) <= imageAreaWidth
+      ? Number(cleanMerged.imageWidth) / GRAPH_MAJOR_CELL_PIXELS
+      : cleanMerged.imageWidth;
+  const legacyPixelSizedImageHeight =
+    Number(cleanMerged.imageHeight) > graphHeight && Number(cleanMerged.imageHeight) <= imageAreaHeight
+      ? Number(cleanMerged.imageHeight) / GRAPH_MAJOR_CELL_PIXELS
+      : cleanMerged.imageHeight;
+  const imageWidth = clampImageCells(legacyPixelSizedImageWidth, graphWidth, Math.max(0.01, graphWidth - legacyPaddingCells * 2));
+  const imageHeight = clampImageCells(legacyPixelSizedImageHeight, graphHeight, Math.max(0.01, graphHeight - legacyPaddingCells * 2));
+  const imagePadding = 0;
+  const outputWidth = imageAreaWidth;
+  const outputHeight = imageAreaHeight;
   const imageOffsetX = Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(merged.imageOffsetX ?? 0)));
   const imageOffsetY = Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(merged.imageOffsetY ?? 0)));
   const outlineColor = isHexColor(cleanMerged.outlineColor) ? cleanMerged.outlineColor : isHexColor(cleanMerged.lineColor) ? cleanMerged.lineColor : DEFAULT_OUTLINE_COLOR;
@@ -193,6 +217,8 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     strokeGapClosePixels,
     gridLineColor,
     gridLineLayer,
+    imageWidth,
+    imageHeight,
     imagePadding,
     imageOffsetX,
     imageOffsetY,

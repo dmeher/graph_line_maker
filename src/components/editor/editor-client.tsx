@@ -38,7 +38,6 @@ import {
   DEFAULT_GRAPH_LINE_LAYER,
   DEFAULT_IMAGE_LINE_THICKNESS,
   DEFAULT_GRID_LINE_COLOR,
-  DEFAULT_IMAGE_PADDING_PIXELS,
   DEFAULT_OUTLINE_COLOR,
   DEFAULT_PRINT_HORIZONTAL_ALIGNMENT,
   DEFAULT_PRINT_ORIENTATION,
@@ -49,8 +48,6 @@ import {
   DEFAULT_STROKE_GAP_CLOSE_PIXELS,
   GRAPH_LINE_LAYER_KEYS,
   GRAPH_MAJOR_CELL_PIXELS,
-  GRAPH_MINOR_PIXEL_SIZE,
-  MAX_IMAGE_PADDING_PIXELS,
   MAX_IMAGE_LINE_THICKNESS,
   MAX_SOURCE_FILL_MIN_STROKE_PIXELS,
   MAX_SOURCE_FILL_THRESHOLD,
@@ -150,14 +147,15 @@ function roundCm(value: number) {
   return Math.round(value * 1000) / 1000;
 }
 
-function maxImagePaddingPixels(graphWidth: number, graphHeight: number) {
-  const imageAreaWidth = Math.max(1, Math.round(graphWidth || 1)) * GRAPH_MAJOR_CELL_PIXELS;
-  const imageAreaHeight = Math.max(1, Math.round(graphHeight || 1)) * GRAPH_MAJOR_CELL_PIXELS;
-  return Math.max(0, Math.min(MAX_IMAGE_PADDING_PIXELS, Math.floor((MAX_CANVAS_DIMENSION - imageAreaWidth) / 2), Math.floor((MAX_CANVAS_DIMENSION - imageAreaHeight) / 2)));
+function roundCells(value: number) {
+  return Math.round(value * 100) / 100;
 }
 
-function paddingCellsFromPixels(value: number) {
-  return Math.round(Math.max(0, value || 0) / GRAPH_MINOR_PIXEL_SIZE);
+function clampImageCells(value: unknown, maxCells: number, fallback: number) {
+  const numeric = Number(value);
+  const safeFallback = Math.max(0.01, Math.min(maxCells, fallback));
+  if (!Number.isFinite(numeric)) return roundCells(safeFallback);
+  return roundCells(Math.max(0.01, Math.min(maxCells, numeric)));
 }
 
 function normalizeFillRegions(value: GraphSettings["fillRegions"] | undefined) {
@@ -323,9 +321,12 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const printVerticalAlignment = isPrintVerticalAlignment(settings.printVerticalAlignment)
     ? settings.printVerticalAlignment
     : DEFAULT_PRINT_VERTICAL_ALIGNMENT;
-  const imagePadding = Math.max(0, Math.min(maxImagePaddingPixels(graphWidth, graphHeight), Math.round(settings.imagePadding ?? DEFAULT_IMAGE_PADDING_PIXELS)));
-  const outputWidth = graphWidth * GRAPH_MAJOR_CELL_PIXELS + imagePadding * 2;
-  const outputHeight = graphHeight * GRAPH_MAJOR_CELL_PIXELS + imagePadding * 2;
+  const legacyPaddingCells = Math.max(0, Number(settings.imagePadding ?? 0) / GRAPH_MAJOR_CELL_PIXELS);
+  const imageWidth = clampImageCells(settings.imageWidth, graphWidth, Math.max(0.01, graphWidth - legacyPaddingCells * 2));
+  const imageHeight = clampImageCells(settings.imageHeight, graphHeight, Math.max(0.01, graphHeight - legacyPaddingCells * 2));
+  const imagePadding = 0;
+  const outputWidth = graphWidth * GRAPH_MAJOR_CELL_PIXELS;
+  const outputHeight = graphHeight * GRAPH_MAJOR_CELL_PIXELS;
   const fillRegions = normalizeFillRegions(settings.fillRegions);
 
   return {
@@ -353,6 +354,8 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
     strokeGapClosePixels,
     gridLineColor,
     gridLineLayer,
+    imageWidth,
+    imageHeight,
     imagePadding,
     imageOffsetX: clampImageOffset(settings.imageOffsetX ?? 0),
     imageOffsetY: clampImageOffset(settings.imageOffsetY ?? 0),
@@ -395,10 +398,6 @@ export function EditorClient({ project }: { project: Project }) {
   const fillRegionMapRef = useRef<Uint16Array | null>(null);
 
   const filename = useMemo(() => slug(title), [title]);
-  const maxImagePaddingCells = useMemo(
-    () => Math.floor(maxImagePaddingPixels(settings.graphWidth, settings.graphHeight) / GRAPH_MINOR_PIXEL_SIZE),
-    [settings.graphWidth, settings.graphHeight],
-  );
   const selectedFillRegion = useMemo(
     () => fillRegions.find((region) => region.id === selectedFillRegionId) ?? null,
     [fillRegions, selectedFillRegionId],
@@ -426,9 +425,12 @@ export function EditorClient({ project }: { project: Project }) {
     updateSetting("cellSizeCm", roundCm(value / 10));
   }
 
-  function updateImagePaddingCells(value: number) {
-    const paddingCells = Math.max(0, Math.round(Number.isFinite(value) ? value : 0));
-    updateSetting("imagePadding", paddingCells * GRAPH_MINOR_PIXEL_SIZE);
+  function updateImageWidthCells(value: number) {
+    updateSetting("imageWidth", value);
+  }
+
+  function updateImageHeightCells(value: number) {
+    updateSetting("imageHeight", value);
   }
 
   function updateFillRegionColor(regionId: string, color: string) {
@@ -474,10 +476,7 @@ export function EditorClient({ project }: { project: Project }) {
 
   function beginGraphDrag(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (showOriginal || event.button !== 0) return;
-    if (selectFillRegionFromPointer(event)) {
-      event.preventDefault();
-      return;
-    }
+    selectFillRegionFromPointer(event);
 
     const canvas = previewCanvasRef.current;
     if (!canvas) return;
@@ -879,9 +878,8 @@ export function EditorClient({ project }: { project: Project }) {
     : settings.fillColor;
   const imageWidthCm = roundCm(settings.graphWidth * settings.cellSizeCm);
   const imageHeightCm = roundCm(settings.graphHeight * settings.cellSizeCm);
-  const paddingCm = roundCm((settings.imagePadding / GRAPH_MAJOR_CELL_PIXELS) * settings.cellSizeCm);
-  const printWidthCm = roundCm(imageWidthCm + paddingCm * 2);
-  const printHeightCm = roundCm(imageHeightCm + paddingCm * 2);
+  const printWidthCm = imageWidthCm;
+  const printHeightCm = imageHeightCm;
   const desktopGridColumns =
     sourcePanelCollapsed && settingsPanelCollapsed
       ? "lg:grid-cols-[minmax(0,1fr)]"
@@ -913,7 +911,8 @@ export function EditorClient({ project }: { project: Project }) {
         <NumberField label="Height (cells)" value={settings.graphHeight} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphHeight", value)} />
         <NumberField label="1 cell width (cm)" value={settings.cellSizeCm} min={0.05} max={100} step={0.01} onChange={updateOneCellWidth} />
         <NumberField label="10 cells width (cm)" value={roundCm(settings.cellSizeCm * 10)} min={0.5} max={1000} step={0.01} onChange={updateTenCellWidth} />
-        <NumberField label="Image padding (cells)" value={paddingCellsFromPixels(settings.imagePadding)} min={0} max={maxImagePaddingCells} onChange={updateImagePaddingCells} />
+        <NumberField label="Image width (cells)" value={settings.imageWidth} min={0.01} max={settings.graphWidth} step={0.1} onChange={updateImageWidthCells} />
+        <NumberField label="Image height (cells)" value={settings.imageHeight} min={0.01} max={settings.graphHeight} step={0.1} onChange={updateImageHeightCells} />
         <NumberField label="Image line size" value={settings.imageLineThickness} min={MIN_IMAGE_LINE_THICKNESS} max={MAX_IMAGE_LINE_THICKNESS} step={0.01} onChange={(value) => updateSetting("imageLineThickness", value)} />
         <NumberField label="Fill detection" value={settings.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} onChange={(value) => updateSetting("sourceFillThreshold", value)} />
         <NumberField label="Fill width" value={settings.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSetting("sourceFillMinStrokePixels", value)} />
@@ -978,7 +977,7 @@ export function EditorClient({ project }: { project: Project }) {
 
       <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
         <p className="font-mono text-xs text-slate-600">
-          Image {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / 10 cells {roundCm(settings.cellSizeCm * 10)} cm / padding {paddingCellsFromPixels(settings.imagePadding)} cells / line {settings.imageLineThickness}x / fill {settings.sourceFillThreshold} / fill width {settings.sourceFillMinStrokePixels}px / gap {settings.strokeGapClosePixels}px / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
+          Image {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / 10 cells {roundCm(settings.cellSizeCm * 10)} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / line {settings.imageLineThickness}x / fill {settings.sourceFillThreshold} / fill width {settings.sourceFillMinStrokePixels}px / gap {settings.strokeGapClosePixels}px / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
         </p>
       </div>
 

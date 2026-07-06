@@ -183,6 +183,8 @@ function NumberField({
   min,
   max,
   step = 1,
+  inputMin,
+  allowDecimalInput = false,
   disabled = false,
   onChange,
 }: {
@@ -191,6 +193,8 @@ function NumberField({
   min: number;
   max: number;
   step?: number;
+  inputMin?: number;
+  allowDecimalInput?: boolean;
   disabled?: boolean;
   onChange: (value: number) => void;
 }) {
@@ -230,8 +234,8 @@ function NumberField({
       <span className="text-xs font-semibold text-slate-500">{label}</span>
       <input
         type="number"
-        inputMode={step < 1 ? "decimal" : "numeric"}
-        min={min}
+        inputMode={allowDecimalInput || step < 1 ? "decimal" : "numeric"}
+        min={inputMin ?? min}
         max={max}
         step={step}
         disabled={disabled}
@@ -1200,8 +1204,8 @@ export function EditorClient({ project }: { project: Project }) {
             <NumberField label="Height (cells)" value={settings.graphHeight} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphHeight", value)} />
             <NumberField label="1 cell width (cm)" value={settings.cellSizeCm} min={0.05} max={100} step={0.01} onChange={updateOneCellWidth} />
             <NumberField label="10 cells width (cm)" value={roundCm(settings.cellSizeCm * 10)} min={0.5} max={1000} step={0.01} onChange={updateTenCellWidth} />
-            <NumberField label="Image width (cells)" value={settings.imageWidth} min={0.01} max={settings.graphWidth} step={0.1} onChange={updateImageWidthCells} />
-            <NumberField label="Image height (cells)" value={settings.imageHeight} min={0.01} max={settings.graphHeight} step={0.1} onChange={updateImageHeightCells} />
+            <NumberField label="Image width (cells)" value={settings.imageWidth} min={0.01} inputMin={0} max={settings.graphWidth} step={1} allowDecimalInput onChange={updateImageWidthCells} />
+            <NumberField label="Image height (cells)" value={settings.imageHeight} min={0.01} inputMin={0} max={settings.graphHeight} step={1} allowDecimalInput onChange={updateImageHeightCells} />
             <NumberField label="Image line size" value={settings.imageLineThickness} min={MIN_IMAGE_LINE_THICKNESS} max={MAX_IMAGE_LINE_THICKNESS} step={0.01} onChange={(value) => updateSetting("imageLineThickness", value)} />
             <NumberField label="Fill detection" value={settings.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} onChange={(value) => updateSetting("sourceFillThreshold", value)} />
             <NumberField label="Fill width" value={settings.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSetting("sourceFillMinStrokePixels", value)} />

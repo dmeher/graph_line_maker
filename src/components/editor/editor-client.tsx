@@ -183,9 +183,7 @@ function NumberField({
   min,
   max,
   step = 1,
-  inputMin,
   allowDecimalInput = false,
-  disabled = false,
   onChange,
 }: {
   label: string;
@@ -193,9 +191,7 @@ function NumberField({
   min: number;
   max: number;
   step?: number;
-  inputMin?: number;
   allowDecimalInput?: boolean;
-  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   const [draftValue, setDraftValue] = useState(() => String(value));
@@ -219,26 +215,18 @@ function NumberField({
       return;
     }
 
-    if (disabled) {
-      setDraftValue(String(value));
-      return;
-    }
-
     const clamped = Math.max(min, Math.min(max, parsed));
     onChange(clamped);
     setDraftValue(String(clamped));
   }
 
   return (
-    <label className="grid gap-1.5">
+    <label className="grid min-w-0 gap-1.5">
       <span className="text-xs font-semibold text-slate-500">{label}</span>
       <input
         type="number"
         inputMode={allowDecimalInput || step < 1 ? "decimal" : "numeric"}
-        min={inputMin ?? min}
-        max={max}
         step={step}
-        disabled={disabled}
         value={draftValue}
         onFocus={() => setIsFocused(true)}
         onBlur={() => {
@@ -249,11 +237,10 @@ function NumberField({
           const nextValue = event.target.value;
           const parsed = parseDraft(nextValue);
           setDraftValue(nextValue);
-          if (disabled) return;
           if (parsed === null || parsed < min || parsed > max) return;
           onChange(parsed);
         }}
-        className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+        className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
       />
     </label>
   );
@@ -276,9 +263,9 @@ function ColorPresetField({
   const transparentSelected = isTransparentFillColor(value);
 
   return (
-    <div className="grid gap-2">
+    <div className="grid min-w-0 gap-2">
       <span className="text-xs font-semibold text-slate-500">{label}</span>
-      <div className={`grid gap-1.5 ${colors.length <= 7 ? "grid-cols-7" : "grid-cols-10"}`}>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(1.75rem,1fr))] gap-1.5">
         {colors.map((color) => {
           const selected = color.hex.toLowerCase() === value.toLowerCase();
           return (
@@ -1199,23 +1186,23 @@ export function EditorClient({ project }: { project: Project }) {
 
       <div className="space-y-4">
         <CollapsibleSection title="Parameters" open={!collapsedSections.parameters} onToggle={() => toggleSection("parameters")}>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid min-w-0 grid-cols-2 gap-3">
             <NumberField label="Width (cells)" value={settings.graphWidth} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphWidth", value)} />
             <NumberField label="Height (cells)" value={settings.graphHeight} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphHeight", value)} />
             <NumberField label="1 cell width (cm)" value={settings.cellSizeCm} min={0.05} max={100} step={0.01} onChange={updateOneCellWidth} />
             <NumberField label="10 cells width (cm)" value={roundCm(settings.cellSizeCm * 10)} min={0.5} max={1000} step={0.01} onChange={updateTenCellWidth} />
-            <NumberField label="Image width (cells)" value={settings.imageWidth} min={0.01} inputMin={0} max={settings.graphWidth} step={1} allowDecimalInput onChange={updateImageWidthCells} />
-            <NumberField label="Image height (cells)" value={settings.imageHeight} min={0.01} inputMin={0} max={settings.graphHeight} step={1} allowDecimalInput onChange={updateImageHeightCells} />
+            <NumberField label="Image width (cells)" value={settings.imageWidth} min={0.01} max={settings.graphWidth} step={1} allowDecimalInput onChange={updateImageWidthCells} />
+            <NumberField label="Image height (cells)" value={settings.imageHeight} min={0.01} max={settings.graphHeight} step={1} allowDecimalInput onChange={updateImageHeightCells} />
             <NumberField label="Image line size" value={settings.imageLineThickness} min={MIN_IMAGE_LINE_THICKNESS} max={MAX_IMAGE_LINE_THICKNESS} step={0.01} onChange={(value) => updateSetting("imageLineThickness", value)} />
             <NumberField label="Fill detection" value={settings.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} onChange={(value) => updateSetting("sourceFillThreshold", value)} />
             <NumberField label="Fill width" value={settings.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSetting("sourceFillMinStrokePixels", value)} />
             <NumberField label="Gap closing" value={settings.strokeGapClosePixels} min={MIN_STROKE_GAP_CLOSE_PIXELS} max={MAX_STROKE_GAP_CLOSE_PIXELS} onChange={(value) => updateSetting("strokeGapClosePixels", value)} />
-            <label className="grid gap-1.5">
+            <label className="grid min-w-0 gap-1.5">
               <span className="text-xs font-semibold text-slate-500">Print paper</span>
               <select
                 value={settings.printPaperSize}
                 onChange={(event) => updateSetting("printPaperSize", event.target.value as GraphSettings["printPaperSize"])}
-                className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
               >
                 {PRINT_PAPER_SIZE_KEYS.map((key) => (
                   <option key={key} value={key}>
@@ -1224,12 +1211,12 @@ export function EditorClient({ project }: { project: Project }) {
                 ))}
               </select>
             </label>
-            <label className="grid gap-1.5">
+            <label className="grid min-w-0 gap-1.5">
               <span className="text-xs font-semibold text-slate-500">Orientation</span>
               <select
                 value={settings.printOrientation}
                 onChange={(event) => updateSetting("printOrientation", event.target.value as GraphSettings["printOrientation"])}
-                className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
               >
                 {PRINT_ORIENTATION_KEYS.map((key) => (
                   <option key={key} value={key}>
@@ -1238,12 +1225,12 @@ export function EditorClient({ project }: { project: Project }) {
                 ))}
               </select>
             </label>
-            <label className="grid gap-1.5">
+            <label className="grid min-w-0 gap-1.5">
               <span className="text-xs font-semibold text-slate-500">Horizontal align</span>
               <select
                 value={settings.printHorizontalAlignment}
                 onChange={(event) => updateSetting("printHorizontalAlignment", event.target.value as GraphSettings["printHorizontalAlignment"])}
-                className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
               >
                 {PRINT_HORIZONTAL_ALIGNMENT_KEYS.map((key) => (
                   <option key={key} value={key}>
@@ -1252,12 +1239,12 @@ export function EditorClient({ project }: { project: Project }) {
                 ))}
               </select>
             </label>
-            <label className="grid gap-1.5">
+            <label className="grid min-w-0 gap-1.5">
               <span className="text-xs font-semibold text-slate-500">Vertical align</span>
               <select
                 value={settings.printVerticalAlignment}
                 onChange={(event) => updateSetting("printVerticalAlignment", event.target.value as GraphSettings["printVerticalAlignment"])}
-                className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
               >
                 {PRINT_VERTICAL_ALIGNMENT_KEYS.map((key) => (
                   <option key={key} value={key}>
@@ -1268,8 +1255,8 @@ export function EditorClient({ project }: { project: Project }) {
             </label>
           </div>
 
-          <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
-            <p className="font-mono text-xs text-slate-600">
+          <div className="min-w-0 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
+            <p className="break-words font-mono text-xs text-slate-600">
               Image {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / 10 cells {roundCm(settings.cellSizeCm * 10)} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / line {settings.imageLineThickness}x / fill {settings.sourceFillThreshold} / fill width {settings.sourceFillMinStrokePixels}px / gap {settings.strokeGapClosePixels}px / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
             </p>
           </div>
@@ -1312,12 +1299,12 @@ export function EditorClient({ project }: { project: Project }) {
             colors={PRESET_GRAPH_LINE_COLORS}
             onChange={(value) => updateSetting("gridLineColor", value)}
           />
-          <label className="grid gap-1.5">
+          <label className="grid min-w-0 gap-1.5">
             <span className="text-xs font-semibold text-slate-500">Graph lines layer</span>
             <select
               value={settings.gridLineLayer}
               onChange={(event) => updateSetting("gridLineLayer", event.target.value as GraphSettings["gridLineLayer"])}
-              className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+              className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
             >
               {GRAPH_LINE_LAYER_KEYS.map((key) => (
                 <option key={key} value={key}>

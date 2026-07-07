@@ -39,6 +39,7 @@ import type { GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSum
 
 const MAX_CANVAS_DIMENSION = 24000;
 const MAX_SOURCE_IMAGES = 12;
+const CELL_LINE_SIDE_KEYS = ["top", "right", "bottom", "left"] as const;
 const MOCK_EDITOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900"><rect width="900" height="900" fill="white"/><path d="M431 95c-62 58-78 131-45 218m30-204c45 71 73 133 56 225m-73-150c-62-42-120-50-173-24 36 91 96 145 178 164m66-7c83-93 161-127 236-91-41 92-113 137-218 134M417 354c-14 111-14 227 0 348m46-348c18 116 22 229 10 341M260 716c-72-66-120-143-143-231 112 11 196 75 251 193m122 5c64-123 149-185 255-188-42 93-111 166-208 219M223 724h382l-33 95H249z" fill="none" stroke="#111" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 type StoredGraphSettings = Partial<GraphSettings> & {
   cellSizeInches?: number;
@@ -323,6 +324,15 @@ function normalizeGraphShapes(value: unknown) {
       const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
       const strokeWidthValue = Number(record.strokeWidth);
       const strokeWidth = Math.max(1, Math.min(24, Number.isFinite(strokeWidthValue) ? Math.round(strokeWidthValue) : 3));
+      const rawSides = Array.isArray(record.sides) ? record.sides : [...CELL_LINE_SIDE_KEYS];
+      const sides = Array.from(
+        new Set(
+          rawSides.filter(
+            (side): side is (typeof CELL_LINE_SIDE_KEYS)[number] =>
+              typeof side === "string" && (CELL_LINE_SIDE_KEYS as readonly string[]).includes(side),
+          ),
+        ),
+      );
       return [
         {
           id: typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 80) : `shape-${index + 1}`,
@@ -335,6 +345,7 @@ function normalizeGraphShapes(value: unknown) {
           strokeColor,
           fillColor,
           strokeWidth,
+          sides: sides.length ? sides : [...CELL_LINE_SIDE_KEYS],
           locked: Boolean(record.locked),
           rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
           flipX: Boolean(record.flipX),

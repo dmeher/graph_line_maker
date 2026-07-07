@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -124,6 +124,23 @@ type CollapsibleKey = "parameters" | "drawing" | "outline" | "fill" | "selectedF
 type FloatingPalette = { regionId: string; x: number; y: number } | null;
 type DrawingTool = "image" | "cell" | "shape";
 type DrawingLayerKey = `cell:${string}` | `shape:${string}`;
+type GeneratedShapeKind = Extract<GraphShapeKind, "square" | "rectangle" | "circle" | "oval">;
+type ShapeFillMode = "outline" | "filled";
+type LayerChoice = {
+  key: string;
+  type: "source" | "shape";
+  id: string;
+  name: string;
+  detail: string;
+};
+type LayerChooser = {
+  x: number;
+  y: number;
+  choices: LayerChoice[];
+} | null;
+type LayerHit =
+  | (LayerChoice & { type: "source"; layout: SourceLayout })
+  | (LayerChoice & { type: "shape"; shape: GraphShapeDrawing });
 type SourceStatus = {
   ready: boolean;
   previewUrl: string | null;
@@ -141,8 +158,13 @@ type PanelResizeState = {
 };
 const SOURCE_RESIZE_HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
 type SourceResizeHandle = (typeof SOURCE_RESIZE_HANDLES)[number];
+const GENERATED_SHAPE_KIND_KEYS: GeneratedShapeKind[] = ["square", "rectangle", "circle", "oval"];
+const GENERATED_SHAPE_FILL_MODE_LABELS: Record<ShapeFillMode, string> = {
+  outline: "Outline",
+  filled: "Filled",
+};
 type DragState = {
-  kind: "viewport" | "source" | "resize-source" | "cell-paint" | "shape-draw";
+  kind: "viewport" | "source" | "shape" | "resize-source" | "cell-paint" | "shape-draw";
   pointerId: number;
   startClientX: number;
   startClientY: number;
@@ -167,6 +189,8 @@ type DragState = {
   startGraphX?: number;
   startGraphY?: number;
   shapeId?: string;
+  startShapeX?: number;
+  startShapeY?: number;
 };
 type UploadedSourceImage = {
   id: string;
@@ -461,6 +485,7 @@ function normalizeGraphShapes(value: GraphSettings["graphShapes"] | undefined): 
     .flatMap((shape, index) => {
       if (!shape || typeof shape !== "object") return [];
       const kind = GRAPH_SHAPE_KIND_KEYS.includes(shape.kind as GraphShapeKind) ? shape.kind : "rectangle";
+      const sides = Array.from(new Set((Array.isArray(shape.sides) ? shape.sides : CELL_LINE_SIDE_KEYS).filter((side): side is GraphCellLineSide => CELL_LINE_SIDE_KEYS.includes(side as GraphCellLineSide))));
       return [
         {
           id: shape.id || `shape-${index + 1}`,
@@ -473,6 +498,7 @@ function normalizeGraphShapes(value: GraphSettings["graphShapes"] | undefined): 
           strokeColor: isHexColor(shape.strokeColor) ? shape.strokeColor : DEFAULT_OUTLINE_COLOR,
           fillColor: isFillColor(shape.fillColor) ? shape.fillColor : TRANSPARENT_FILL_COLOR,
           strokeWidth: Math.max(1, Math.min(24, Math.round(Number(shape.strokeWidth) || 3))),
+          sides: sides.length ? sides : [...CELL_LINE_SIDE_KEYS],
           locked: Boolean(shape.locked),
           rotationDegrees: normalizeRotationDegrees(shape.rotationDegrees),
           flipX: Boolean(shape.flipX),
@@ -594,47 +620,64 @@ function ColorPresetField({
   colors?: typeof PRESET_GRAPH_COLORS;
   allowTransparent?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
   const colorPickerValue = isHexColor(value) ? value : "#ffffff";
   const transparentSelected = isTransparentFillColor(value);
 
   return (
-    <div className="grid min-w-0 gap-2">
-      <span className="text-xs font-semibold text-slate-500">{label}</span>
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(1.75rem,1fr))] gap-1.5">
-        {colors.map((color) => {
-          const selected = color.hex.toLowerCase() === value.toLowerCase();
-          return (
-            <button
-              key={`${label}-${color.hex}`}
-              type="button"
-              onClick={() => onChange(color.hex)}
-              className={`h-7 rounded-sm border ${selected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
-              style={{ backgroundColor: color.hex }}
-              title={color.name}
-              aria-label={`${label}: ${color.name}`}
+    <div className="min-w-0 rounded-md border border-[#d7dde5] bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex h-10 w-full min-w-0 items-center justify-between gap-2 px-2.5 text-left"
+        aria-expanded={open}
+      >
+        <span className="min-w-0 truncate text-xs font-semibold text-slate-500">{label}</span>
+        <span className="ml-auto inline-flex min-w-0 items-center gap-2">
+          <ColorSummary value={value} />
+          <span className="max-w-24 truncate font-mono text-[11px] font-semibold text-[#475467]">{transparentSelected ? "Transparent" : value.toUpperCase()}</span>
+          {open ? <ChevronDown size={14} className="shrink-0 text-[#667085]" aria-hidden="true" /> : <ChevronRight size={14} className="shrink-0 text-[#667085]" aria-hidden="true" />}
+        </span>
+      </button>
+      {open ? (
+        <div className="grid min-w-0 gap-2 border-t border-[#e8edf2] p-2">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(1.75rem,1fr))] gap-1.5">
+            {colors.map((color) => {
+              const selected = color.hex.toLowerCase() === value.toLowerCase();
+              return (
+                <button
+                  key={`${label}-${color.hex}`}
+                  type="button"
+                  onClick={() => onChange(color.hex)}
+                  className={`h-7 rounded-sm border ${selected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
+                  style={{ backgroundColor: color.hex }}
+                  title={color.name}
+                  aria-label={`${label}: ${color.name}`}
+                />
+              );
+            })}
+            {allowTransparent ? (
+              <button
+                type="button"
+                onClick={() => onChange(TRANSPARENT_FILL_COLOR)}
+                className={`h-7 rounded-sm border bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:10px_10px] bg-[position:0_0,0_5px,5px_-5px,-5px_0] ${transparentSelected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
+                title="Transparent"
+                aria-label={`${label}: Transparent`}
+              />
+            ) : null}
+          </div>
+          <label className="flex h-10 items-center gap-2 rounded-md border border-[var(--line)] bg-white px-2 text-sm font-semibold text-slate-600">
+            <input
+              type="color"
+              value={colorPickerValue}
+              onChange={(event) => onChange(event.target.value)}
+              className="h-7 w-9 cursor-pointer rounded border border-slate-200 bg-white p-0"
+              aria-label={`${label}: custom color`}
             />
-          );
-        })}
-        {allowTransparent ? (
-          <button
-            type="button"
-            onClick={() => onChange(TRANSPARENT_FILL_COLOR)}
-            className={`h-7 rounded-sm border bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:10px_10px] bg-[position:0_0,0_5px,5px_-5px,-5px_0] ${transparentSelected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
-            title="Transparent"
-            aria-label={`${label}: Transparent`}
-          />
-        ) : null}
-      </div>
-      <label className="flex h-10 items-center gap-2 rounded-md border border-[var(--line)] bg-white px-2 text-sm font-semibold text-slate-600">
-        <input
-          type="color"
-          value={colorPickerValue}
-          onChange={(event) => onChange(event.target.value)}
-          className="h-7 w-9 cursor-pointer rounded border border-slate-200 bg-white p-0"
-          aria-label={`${label}: custom color`}
-        />
-        <span>Custom</span>
-      </label>
+            <span>Custom</span>
+          </label>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -685,6 +728,71 @@ function ColorSummary({ value }: { value: string }) {
       style={transparent ? undefined : { backgroundColor: value }}
       aria-hidden="true"
     />
+  );
+}
+
+function ShapePreviewSvg({
+  kind,
+  sides,
+  fillColor,
+  strokeColor,
+  strokeWidth,
+  widthCells,
+  heightCells,
+  className = "h-full w-full",
+}: {
+  kind: GraphShapeKind;
+  sides: GraphCellLineSide[];
+  fillColor: string;
+  strokeColor: string;
+  strokeWidth: number;
+  widthCells?: number;
+  heightCells?: number;
+  className?: string;
+}) {
+  const rectLike = kind === "square" || kind === "rectangle";
+  const circleLike = kind === "circle" || kind === "oval";
+  const normalizedSides = isTransparentFillColor(fillColor) ? (sides.length ? sides : CELL_LINE_SIDE_KEYS) : CELL_LINE_SIDE_KEYS;
+  const stroke = isHexColor(strokeColor) ? strokeColor : DEFAULT_OUTLINE_COLOR;
+  const fill = isTransparentFillColor(fillColor) ? "none" : fillColor;
+  const previewStrokeWidth = Math.max(2, Math.min(10, strokeWidth * 1.5));
+  const rawWidth = Math.max(0.01, Number(widthCells) || (kind === "square" || kind === "circle" ? 1 : 1.65));
+  const rawHeight = kind === "square" || kind === "circle" ? rawWidth : Math.max(0.01, Number(heightCells) || 1);
+  const maxPreviewWidth = 92;
+  const maxPreviewHeight = 62;
+  const scale = Math.min(maxPreviewWidth / rawWidth, maxPreviewHeight / rawHeight);
+  const width = Math.max(8, rawWidth * scale);
+  const height = Math.max(8, rawHeight * scale);
+  const left = 60 - width / 2;
+  const top = 45 - height / 2;
+  const right = left + width;
+  const bottom = top + height;
+
+  return (
+    <svg viewBox="0 0 120 90" className={className} role="img" aria-label={GRAPH_SHAPE_KIND_LABELS[kind] ?? "Shape preview"}>
+      <rect x="1" y="1" width="118" height="88" rx="5" fill="#ffffff" stroke="#e8edf2" />
+      {circleLike ? (
+        <ellipse
+          cx={left + width / 2}
+          cy={top + height / 2}
+          rx={width / 2}
+          ry={height / 2}
+          fill={fill}
+          stroke={stroke}
+          strokeWidth={previewStrokeWidth}
+        />
+      ) : rectLike ? (
+        <>
+          <rect x={left} y={top} width={width} height={height} fill={fill} stroke="none" />
+          {normalizedSides.includes("top") ? <line x1={left} y1={top} x2={right} y2={top} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
+          {normalizedSides.includes("right") ? <line x1={right} y1={top} x2={right} y2={bottom} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
+          {normalizedSides.includes("bottom") ? <line x1={right} y1={bottom} x2={left} y2={bottom} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
+          {normalizedSides.includes("left") ? <line x1={left} y1={bottom} x2={left} y2={top} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
+        </>
+      ) : (
+        <line x1="18" y1="68" x2="102" y2="22" stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" />
+      )}
+    </svg>
   );
 }
 
@@ -785,7 +893,7 @@ function InspectorSegmented({
   onChange: (value: string) => void;
 }) {
   return (
-    <div className="grid grid-cols-3 rounded-md border border-[#d7dde5] bg-[#f8fafc] p-0.5" role="group" aria-label={label}>
+    <div className="grid rounded-md border border-[#d7dde5] bg-[#f8fafc] p-0.5" style={{ gridTemplateColumns: `repeat(${Math.max(1, options.length)}, minmax(0, 1fr))` }} role="group" aria-label={label}>
       {options.map((option) => (
         <button
           key={option.value}
@@ -1116,6 +1224,17 @@ export function EditorClient({ project }: { project: Project }) {
   const [cellPaintFillEnabled, setCellPaintFillEnabled] = useState(false);
   const [cellPaintLineEnabled, setCellPaintLineEnabled] = useState(true);
   const [shapeKind, setShapeKind] = useState<GraphShapeKind>("rectangle");
+  const [draftShapeKind, setDraftShapeKind] = useState<GeneratedShapeKind>("rectangle");
+  const [draftShapeWidthCm, setDraftShapeWidthCm] = useState(4);
+  const [draftShapeHeightCm, setDraftShapeHeightCm] = useState(3);
+  const [draftShapeFillMode, setDraftShapeFillMode] = useState<ShapeFillMode>("outline");
+  const [draftShapeSides, setDraftShapeSides] = useState<GraphCellLineSide[]>(CELL_LINE_SIDE_KEYS);
+  const [draftShapeStrokeWidth, setDraftShapeStrokeWidth] = useState(3);
+  const [draftShapeStrokeColor, setDraftShapeStrokeColor] = useState(DEFAULT_OUTLINE_COLOR);
+  const [draftShapeFillColor, setDraftShapeFillColor] = useState("#ccfbf1");
+  const [placingGeneratedShape, setPlacingGeneratedShape] = useState(false);
+  const [generatedImagesCollapsed, setGeneratedImagesCollapsed] = useState(true);
+  const [layerChooser, setLayerChooser] = useState<LayerChooser>(null);
   const [canvasViewportGuide, setCanvasViewportGuide] = useState({ left: 0, top: 0, width: 1, height: 1 });
   const [leftPanelWidth, setLeftPanelWidth] = useState(320);
   const [rightPanelWidth, setRightPanelWidth] = useState(360);
@@ -1123,6 +1242,7 @@ export function EditorClient({ project }: { project: Project }) {
   const [uploadingSources, setUploadingSources] = useState(false);
   const [replacingSourceId, setReplacingSourceId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
+  const [sourcesSectionCollapsed, setSourcesSectionCollapsed] = useState(true);
   const [sourcePanelCollapsed, setSourcePanelCollapsed] = useState(false);
   const [settingsPanelCollapsed, setSettingsPanelCollapsed] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Record<CollapsibleKey, boolean>>({
@@ -1285,6 +1405,8 @@ export function EditorClient({ project }: { project: Project }) {
   const sourceName = primarySource?.name ?? "Source image";
   const sourcePreviewUrl = primarySource ? sourceStatus[primarySource.id]?.previewUrl ?? primarySource.url ?? null : null;
   const selectedSource = selectedSourceId ? settings.sourceImages.find((source) => source.id === selectedSourceId) ?? null : null;
+  const cropSource = selectedSource ?? primarySource;
+  const cropSourcePreviewUrl = cropSource ? sourceStatus[cropSource.id]?.previewUrl ?? cropSource.url ?? null : null;
   const selectedSourceLayout = selectedSourceId ? sourceLayouts(settings.sourceImages).find((layout) => layout.source.id === selectedSourceId) ?? null : null;
   const sourceLoadKey = useMemo(
     () => settings.sourceImages.map((source) => `${source.id}:${source.name}:${source.url ?? source.path ?? ""}`).join("|"),
@@ -1423,6 +1545,34 @@ export function EditorClient({ project }: { project: Project }) {
     return roundMeasure(source.width * settings.cellSizeCm);
   }
 
+  function shapePhysicalWidthCm(shape: GraphShapeDrawing) {
+    return roundMeasure(shape.width * settings.cellSizeCm);
+  }
+
+  function shapePhysicalHeightCm(shape: GraphShapeDrawing) {
+    return roundMeasure(shape.height * settings.cellSizeCm);
+  }
+
+  function shapeUsesSingleSize(kind: GraphShapeKind) {
+    return kind === "square" || kind === "circle";
+  }
+
+  function shapeSupportsSides(kind: GraphShapeKind) {
+    return kind === "square" || kind === "rectangle";
+  }
+
+  function shapeFillMode(shape: GraphShapeDrawing): ShapeFillMode {
+    return isTransparentFillColor(shape.fillColor) ? "outline" : "filled";
+  }
+
+  function draftShapeDimensionsCells(cellSizeCm = settings.cellSizeCm) {
+    const width = clampSourceSizeCells(draftShapeWidthCm / Math.max(0.05, cellSizeCm), 4);
+    const height = shapeUsesSingleSize(draftShapeKind)
+      ? width
+      : clampSourceSizeCells(draftShapeHeightCm / Math.max(0.05, cellSizeCm), 3);
+    return { width, height };
+  }
+
   function sourceRightPadding(source: GraphSourceImage) {
     return roundCells(settings.graphWidth - source.width - source.x);
   }
@@ -1473,6 +1623,7 @@ export function EditorClient({ project }: { project: Project }) {
       graphShapes: current.graphShapes.map((shape) => {
         if (shape.id !== shapeId || shape.locked) return shape;
         const kind = patch.kind && GRAPH_SHAPE_KIND_KEYS.includes(patch.kind) ? patch.kind : shape.kind;
+        const sides = patch.sides === undefined ? shape.sides : Array.from(new Set(patch.sides.filter((side) => CELL_LINE_SIDE_KEYS.includes(side))));
         return {
           ...shape,
           ...patch,
@@ -1484,10 +1635,25 @@ export function EditorClient({ project }: { project: Project }) {
           strokeColor: patch.strokeColor && isHexColor(patch.strokeColor) ? patch.strokeColor : shape.strokeColor,
           fillColor: patch.fillColor && isFillColor(patch.fillColor) ? patch.fillColor : shape.fillColor,
           strokeWidth: patch.strokeWidth === undefined ? shape.strokeWidth : Math.max(1, Math.min(24, Math.round(patch.strokeWidth))),
+          sides: sides.length ? sides : shape.sides,
           rotationDegrees: patch.rotationDegrees === undefined ? shape.rotationDegrees : normalizeRotationDegrees(patch.rotationDegrees),
         };
       }),
     }));
+  }
+
+  function updateGraphShapePhysicalWidthCm(shapeId: string, value: number) {
+    const shape = settingsRef.current.graphShapes.find((item) => item.id === shapeId);
+    if (!shape) return;
+    const width = value / Math.max(0.05, settingsRef.current.cellSizeCm);
+    updateGraphShape(shapeId, shapeUsesSingleSize(shape.kind) ? { width, height: width } : { width });
+  }
+
+  function updateGraphShapePhysicalHeightCm(shapeId: string, value: number) {
+    const shape = settingsRef.current.graphShapes.find((item) => item.id === shapeId);
+    if (!shape) return;
+    const height = value / Math.max(0.05, settingsRef.current.cellSizeCm);
+    updateGraphShape(shapeId, shapeUsesSingleSize(shape.kind) ? { width: height, height } : { height });
   }
 
   function updateSourceImagePhysicalWidthCm(sourceId: string, value: number) {
@@ -1723,6 +1889,8 @@ export function EditorClient({ project }: { project: Project }) {
 
   function clearGraphShapes() {
     setSettingsWithHistory((current) => ({ ...current, graphShapes: [] }));
+    setSelectedDrawingLayerId((current) => (current?.startsWith("shape:") ? null : current));
+    setLayerChooser(null);
   }
 
   function toggleSourceCard(sourceId: string) {
@@ -1779,41 +1947,165 @@ export function EditorClient({ project }: { project: Project }) {
     });
   }
 
-  function sourceLayoutAtPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
-    const canvas = event.currentTarget;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0 || !canvas.width || !canvas.height) return null;
-
-    const canvasX = ((event.clientX - rect.left) * canvas.width) / rect.width;
-    const canvasY = ((event.clientY - rect.top) * canvas.height) / rect.height;
-    const graphX = (canvasX - settings.imageOffsetX) / GRAPH_MAJOR_CELL_PIXELS;
-    const graphY = (canvasY - settings.imageOffsetY) / GRAPH_MAJOR_CELL_PIXELS;
-    const layouts = sourceLayouts(settings.sourceImages);
-
-    for (let index = layouts.length - 1; index >= 0; index -= 1) {
-      const layout = layouts[index];
-      if (graphX < layout.x || graphX > layout.x + layout.width || graphY < layout.y || graphY > layout.y + layout.height) continue;
-      return layout;
-    }
-
-    return null;
-  }
-
-  function graphPointAtPointer(event: ReactPointerEvent<HTMLElement>) {
+  function graphPointAtClientPosition(clientX: number, clientY: number) {
     const canvas = previewCanvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0 || !canvas.width || !canvas.height) return null;
-    const canvasX = ((event.clientX - rect.left) * canvas.width) / rect.width;
-    const canvasY = ((event.clientY - rect.top) * canvas.height) / rect.height;
+
+    const canvasX = ((clientX - rect.left) * canvas.width) / rect.width;
+    const canvasY = ((clientY - rect.top) * canvas.height) / rect.height;
     return {
       x: canvasX / GRAPH_MAJOR_CELL_PIXELS,
       y: canvasY / GRAPH_MAJOR_CELL_PIXELS,
     };
   }
 
+  function layerHitsAtPoint(graphX: number, graphY: number): LayerHit[] {
+    const hits: LayerHit[] = [];
+
+    for (let index = settings.graphShapes.length - 1; index >= 0; index -= 1) {
+      const shape = settings.graphShapes[index];
+      if (!shape) continue;
+      const width = Math.max(0.01, Math.abs(shape.width));
+      const height = Math.max(0.01, Math.abs(shape.height));
+      const left = Math.min(shape.x, shape.x + shape.width);
+      const top = Math.min(shape.y, shape.y + shape.height);
+      if (graphX < left || graphX > left + width || graphY < top || graphY > top + height) continue;
+      hits.push({
+        key: drawingLayerKey("shape", shape.id),
+        type: "shape",
+        id: shape.id,
+        name: shape.name,
+        detail: `Generated ${GRAPH_SHAPE_KIND_LABELS[shape.kind]?.toLowerCase() ?? "shape"}`,
+        shape,
+      });
+    }
+
+    const layouts = sourceLayouts(settings.sourceImages);
+    const sourceGraphX = graphX - settings.imageOffsetX / GRAPH_MAJOR_CELL_PIXELS;
+    const sourceGraphY = graphY - settings.imageOffsetY / GRAPH_MAJOR_CELL_PIXELS;
+    for (let index = layouts.length - 1; index >= 0; index -= 1) {
+      const layout = layouts[index];
+      if (!layout) continue;
+      if (sourceGraphX < layout.x || sourceGraphX > layout.x + layout.width || sourceGraphY < layout.y || sourceGraphY > layout.y + layout.height) continue;
+      hits.push({
+        key: `source:${layout.source.id}`,
+        type: "source",
+        id: layout.source.id,
+        name: layout.source.name,
+        detail: "Source image",
+        layout,
+      });
+    }
+
+    return hits;
+  }
+
+  function graphPointAtPointer(event: ReactPointerEvent<HTMLElement>) {
+    return graphPointAtClientPosition(event.clientX, event.clientY);
+  }
+
   function drawingId(prefix: string) {
     return `${prefix}-${typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Date.now().toString(36)}`;
+  }
+
+  function selectGeneratedShape(shapeId: string, expandParameters = true) {
+    const key = drawingLayerKey("shape", shapeId);
+    setSelectedSourceId(null);
+    setSelectedDrawingLayerId(key);
+    setGeneratedImagesCollapsed(false);
+    if (expandParameters) {
+      setExpandedDrawingLayerIds((current) => ({ ...current, [key]: true }));
+    }
+    setInspectorTab("draw");
+  }
+
+  function selectLayerChoice(choice: LayerChoice) {
+    if (choice.type === "source") {
+      setSelectedSourceId(choice.id);
+      setSelectedDrawingLayerId(null);
+      setInspectorTab("source");
+    } else {
+      selectGeneratedShape(choice.id);
+    }
+    setLayerChooser(null);
+    setFloatingPalette(null);
+  }
+
+  function setDraftShapeSide(side: GraphCellLineSide, checked: boolean) {
+    setDraftShapeSides((current) => {
+      const next = checked ? Array.from(new Set([...current, side])) : current.filter((item) => item !== side);
+      return next.length ? next : current;
+    });
+  }
+
+  function addGeneratedShapeAtPoint(point: { x: number; y: number }) {
+    const id = drawingId("shape");
+    const { width, height } = draftShapeDimensionsCells(settingsRef.current.cellSizeCm);
+    const kind = draftShapeKind;
+    const x = clampFreeCellCoordinate(snapCellToGrid(point.x - width / 2), 0);
+    const y = clampFreeCellCoordinate(snapCellToGrid(point.y - height / 2), 0);
+    const fillColor = draftShapeFillMode === "filled" ? draftShapeFillColor : TRANSPARENT_FILL_COLOR;
+    const sides = shapeSupportsSides(kind) ? [...draftShapeSides] : [...CELL_LINE_SIDE_KEYS];
+    setSettingsWithHistory((current) => ({
+      ...current,
+      graphShapes: [
+        ...current.graphShapes,
+        {
+          id,
+          name: `${GRAPH_SHAPE_KIND_LABELS[kind]} ${current.graphShapes.length + 1}`,
+          kind,
+          x,
+          y,
+          width,
+          height,
+          strokeColor: draftShapeStrokeColor,
+          fillColor,
+          strokeWidth: Math.max(1, Math.min(24, Math.round(draftShapeStrokeWidth))),
+          sides,
+          locked: false,
+          rotationDegrees: 0,
+          flipX: false,
+          flipY: false,
+        },
+      ],
+    }));
+    selectGeneratedShape(id);
+    setLayerChooser(null);
+    setFloatingPalette(null);
+    return id;
+  }
+
+  function placeGeneratedShapeFromClientPoint(clientX: number, clientY: number) {
+    const point = graphPointAtClientPosition(clientX, clientY);
+    if (!point) return false;
+    addGeneratedShapeAtPoint(point);
+    setPlacingGeneratedShape(false);
+    return true;
+  }
+
+  function handleGeneratedShapeDragStart(event: ReactDragEvent<HTMLElement>) {
+    event.dataTransfer.effectAllowed = "copy";
+    event.dataTransfer.setData("application/x-graph-generated-shape", draftShapeKind);
+    setPlacingGeneratedShape(true);
+  }
+
+  function hasGeneratedShapeTransfer(types: readonly string[] | DOMStringList) {
+    return Array.from(types as ArrayLike<string>).includes("application/x-graph-generated-shape");
+  }
+
+  function handleGeneratedShapeDrop(event: ReactDragEvent<HTMLElement>) {
+    if (!placingGeneratedShape && !hasGeneratedShapeTransfer(event.dataTransfer.types)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    placeGeneratedShapeFromClientPoint(event.clientX, event.clientY);
+  }
+
+  function handleGeneratedShapeDragOver(event: ReactDragEvent<HTMLElement>) {
+    if (!placingGeneratedShape && !hasGeneratedShapeTransfer(event.dataTransfer.types)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
   }
 
   function paintCellAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
@@ -1904,6 +2196,7 @@ export function EditorClient({ project }: { project: Project }) {
             strokeColor: current.outlineColor,
             fillColor: cellPaintFillEnabled ? current.fillColor : TRANSPARENT_FILL_COLOR,
             strokeWidth: Math.max(1, Math.round(current.imageLineThickness || 3)),
+            sides: [...CELL_LINE_SIDE_KEYS],
             locked: false,
             rotationDegrees: 0,
             flipX: false,
@@ -2008,6 +2301,13 @@ export function EditorClient({ project }: { project: Project }) {
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
     const viewportDrag = event.ctrlKey || spacePressedRef.current;
+
+    if (!viewportDrag && placingGeneratedShape) {
+      event.preventDefault();
+      placeGeneratedShapeFromClientPoint(event.clientX, event.clientY);
+      return;
+    }
+
     if (!viewportDrag && drawingTool !== "image") {
       event.preventDefault();
       setSelectedSourceId(null);
@@ -2036,31 +2336,64 @@ export function EditorClient({ project }: { project: Project }) {
       return;
     }
 
-    const sourceHit = sourceLayoutAtPointer(event);
-    if (sourceHit) {
-      setSelectedSourceId(sourceHit.source.id);
-      setSelectedDrawingLayerId(null);
+    const point = graphPointAtPointer(event);
+    const layerHits = point ? layerHitsAtPoint(point.x, point.y) : [];
+    const selectedHit = layerHits.find((hit) =>
+      hit.type === "source"
+        ? selectedSourceId === hit.id
+        : selectedDrawingLayerId === drawingLayerKey("shape", hit.id),
+    );
+    const activeHit = selectedHit ?? (layerHits.length === 1 ? layerHits[0] : null);
+
+    if (!viewportDrag && layerHits.length > 1 && !selectedHit) {
+      event.preventDefault();
+      setLayerChooser({
+        x: event.clientX,
+        y: event.clientY,
+        choices: layerHits.map((hit) => ({
+          key: hit.key,
+          type: hit.type,
+          id: hit.id,
+          name: hit.name,
+          detail: hit.detail,
+        })),
+      });
+      setFloatingPalette(null);
+      return;
     }
-    if (!sourceHit && !viewportDrag) {
+
+    if (activeHit?.type === "source") {
+      setSelectedSourceId(activeHit.layout.source.id);
+      setSelectedDrawingLayerId(null);
+      setLayerChooser(null);
+    } else if (activeHit?.type === "shape") {
+      selectGeneratedShape(activeHit.shape.id);
+      setLayerChooser(null);
+    }
+    if (!activeHit && !viewportDrag) {
       setSelectedSourceId(null);
       setSelectedDrawingLayerId(null);
+      setLayerChooser(null);
       selectFillRegionFromPointer(event, true);
     }
 
     event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
     dragStateRef.current = {
-      kind: viewportDrag || !sourceHit ? "viewport" : "source",
+      kind: viewportDrag || !activeHit ? "viewport" : activeHit.type,
       pointerId: event.pointerId,
       startClientX: event.clientX,
       startClientY: event.clientY,
       startOffsetX: settings.imageOffsetX,
       startOffsetY: settings.imageOffsetY,
-      sourceId: sourceHit?.source.id,
-      startSourceX: sourceHit?.source.x,
-      startSourceY: sourceHit?.y,
-      startSourceWidth: sourceHit?.source.width,
-      startSourceHeight: sourceHit?.source.height,
+      sourceId: activeHit?.type === "source" ? activeHit.layout.source.id : undefined,
+      startSourceX: activeHit?.type === "source" ? activeHit.layout.source.x : undefined,
+      startSourceY: activeHit?.type === "source" ? activeHit.layout.y : undefined,
+      startSourceWidth: activeHit?.type === "source" ? activeHit.layout.source.width : undefined,
+      startSourceHeight: activeHit?.type === "source" ? activeHit.layout.source.height : undefined,
+      shapeId: activeHit?.type === "shape" ? activeHit.shape.id : undefined,
+      startShapeX: activeHit?.type === "shape" ? activeHit.shape.x : undefined,
+      startShapeY: activeHit?.type === "shape" ? activeHit.shape.y : undefined,
       startScrollLeft: canvasScrollRef.current?.scrollLeft ?? 0,
       startScrollTop: canvasScrollRef.current?.scrollTop ?? 0,
       canvasWidth: canvas.width,
@@ -2141,6 +2474,29 @@ export function EditorClient({ project }: { project: Project }) {
 
     if (dragState.kind === "shape-draw") {
       updateShapeAtPointer(event, dragState);
+      return;
+    }
+
+    if (dragState.kind === "shape" && dragState.shapeId && dragState.startShapeX !== undefined && dragState.startShapeY !== undefined) {
+      const deltaCellsX = deltaX / GRAPH_MAJOR_CELL_PIXELS;
+      const deltaCellsY = deltaY / GRAPH_MAJOR_CELL_PIXELS;
+      setSettings((current) => {
+        const shape = current.graphShapes.find((item) => item.id === dragState.shapeId);
+        if (!shape || shape.locked) return current;
+        const x = clampFreeCellCoordinate(snapCellToGrid(dragState.startShapeX! + deltaCellsX), shape.x);
+        const y = clampFreeCellCoordinate(snapCellToGrid(dragState.startShapeY! + deltaCellsY), shape.y);
+        if (shape.x === x && shape.y === y) return current;
+        if (!dragState.historyRecorded) {
+          pushUndoSettings(current);
+          dragState.historyRecorded = true;
+        }
+        const next = deriveGraphSettings({
+          ...current,
+          graphShapes: current.graphShapes.map((item) => (item.id === dragState.shapeId ? { ...item, x, y } : item)),
+        });
+        settingsRef.current = next;
+        return next;
+      });
       return;
     }
 
@@ -2648,20 +3004,30 @@ export function EditorClient({ project }: { project: Project }) {
     return true;
   }
 
-  function selectFullSourceCrop() {
-    const sourceCanvas = sourceCanvasRef.current;
+  function selectFullSourceCrop(sourceId = cropSource?.id) {
+    const sourceCanvas = sourceId ? sourceCanvasesRef.current.get(sourceId) ?? null : sourceCanvasRef.current;
     if (!sourceCanvas) return;
     setSourceCropArea(fullCrop(sourceCanvas.width, sourceCanvas.height));
   }
 
+  function openSourceCrop(sourceId = cropSource?.id) {
+    if (!sourceId) return;
+    setSelectedSourceId(sourceId);
+    setSelectedDrawingLayerId(null);
+    setSourceCropMode(true);
+    setSourcesSectionCollapsed(true);
+    selectFullSourceCrop(sourceId);
+  }
+
   async function applySourceCrop() {
-    const sourceCanvas = sourceCanvasRef.current;
-    if (!sourceCanvas || !sourceCropArea) return;
+    if (!cropSource || !sourceCropArea) return;
+    const sourceCanvas = sourceCanvasesRef.current.get(cropSource.id) ?? null;
+    if (!sourceCanvas) return;
 
     setSourceCropPending(true);
     try {
-      const croppedFile = await cropCanvasToFile(sourceCanvas, sourceCropArea, sourceName, "image/png");
-      const ok = primarySource ? await uploadSourceImages([croppedFile], "Source crop applied.", primarySource.id) : false;
+      const croppedFile = await cropCanvasToFile(sourceCanvas, sourceCropArea, cropSource.name, "image/png");
+      const ok = await uploadSourceImages([croppedFile], "Source crop applied.", cropSource.id);
       if (ok) {
         setSourceCropMode(false);
         setSourceCropArea(null);
@@ -2816,6 +3182,7 @@ export function EditorClient({ project }: { project: Project }) {
   const visibleLayerCount = settings.sourceImages.length + settings.cellPaints.length + settings.graphShapes.length;
   const statusLabel = sourceErrorCount ? "Source needs attention" : processing ? "Processing graph" : sourceReady || !settings.sourceImages.length ? "Processing complete" : "Loading source files";
   const statusMeta = sourceErrorCount ? `${sourceErrorCount} issue${sourceErrorCount === 1 ? "" : "s"}` : processing ? "Working" : sourceReady || !settings.sourceImages.length ? "Ready" : "Loading";
+  const draftShapePreviewDimensions = draftShapeDimensionsCells();
 
   function formatCount(value: number) {
     return Math.max(0, Math.round(value)).toLocaleString("en-US");
@@ -2876,8 +3243,8 @@ export function EditorClient({ project }: { project: Project }) {
 
   function renderShapeThumbnail(shape: GraphShapeDrawing, className = "h-12 w-12") {
     return (
-      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#d7dde5] bg-white p-1 text-[#667085]`}>
-        <Maximize2 size={18} aria-hidden="true" />
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#d7dde5] bg-white p-1`}>
+        <ShapePreviewSvg kind={shape.kind} sides={shape.sides} fillColor={shape.fillColor} strokeColor={shape.strokeColor} strokeWidth={shape.strokeWidth} widthCells={shape.width} heightCells={shape.height} />
         <span className="sr-only">{GRAPH_SHAPE_KIND_LABELS[shape.kind]}</span>
       </span>
     );
@@ -2944,23 +3311,64 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   function renderShapeAdvanced(shape: GraphShapeDrawing) {
+    const fillMode = shapeFillMode(shape);
+    const supportsSides = shapeSupportsSides(shape.kind);
     return (
       <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[#e8edf2] bg-[#f8fafc] p-3">
         <label className="grid min-w-0 gap-1.5">
           <span className="text-xs font-semibold text-slate-500">Shape</span>
           <select value={shape.kind} disabled={shape.locked} onChange={(event) => updateGraphShape(shape.id, { kind: event.target.value as GraphShapeKind })} className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60">
-            {GRAPH_SHAPE_KIND_KEYS.map((kind) => <option key={kind} value={kind}>{GRAPH_SHAPE_KIND_LABELS[kind]}</option>)}
+            {GENERATED_SHAPE_KIND_KEYS.includes(shape.kind as GeneratedShapeKind) ? null : <option value={shape.kind}>Legacy {GRAPH_SHAPE_KIND_LABELS[shape.kind]}</option>}
+            {GENERATED_SHAPE_KIND_KEYS.map((kind) => <option key={kind} value={kind}>{GRAPH_SHAPE_KIND_LABELS[kind]}</option>)}
           </select>
         </label>
-        <NumberField label="Line size" value={shape.strokeWidth} min={1} max={24} disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { strokeWidth: value })} />
-        <NumberField label="Width (cells)" value={shape.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { width: value })} />
-        <NumberField label="Height (cells)" value={shape.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { height: value })} />
+        <label className="grid min-w-0 gap-1.5">
+          <span className="text-xs font-semibold text-slate-500">Type</span>
+          <select
+            value={fillMode}
+            disabled={shape.locked}
+            onChange={(event) =>
+              updateGraphShape(
+                shape.id,
+                event.target.value === "filled"
+                  ? { fillColor: draftShapeFillColor, sides: [...CELL_LINE_SIDE_KEYS] }
+                  : { fillColor: TRANSPARENT_FILL_COLOR },
+              )
+            }
+            className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60"
+          >
+            <option value="outline">Outline</option>
+            <option value="filled">Filled</option>
+          </select>
+        </label>
+        <NumberField label={shapeUsesSingleSize(shape.kind) ? "Size (CM)" : "Width (CM)"} value={shapePhysicalWidthCm(shape)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={shape.locked} onChange={(value) => updateGraphShapePhysicalWidthCm(shape.id, value)} />
+        <NumberField label={shapeUsesSingleSize(shape.kind) ? "Size (CM)" : "Height (CM)"} value={shapePhysicalHeightCm(shape)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={shape.locked} onChange={(value) => updateGraphShapePhysicalHeightCm(shape.id, value)} />
+        <NumberField label="Stroke width" value={shape.strokeWidth} min={1} max={24} disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { strokeWidth: value })} />
         <NumberField label="Left padding (cells)" value={shape.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: value })} />
         <NumberField label="Right padding (cells)" value={drawingRightPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: settings.graphWidth - shape.width - value })} />
         <NumberField label="Top padding (cells)" value={shape.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: value })} />
         <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: settings.graphHeight - shape.height - value })} />
         <ColorPresetField label="Line" value={shape.strokeColor} onChange={(value) => updateGraphShape(shape.id, { strokeColor: value })} />
-        <ColorPresetField label="Fill" value={shape.fillColor} onChange={(value) => updateGraphShape(shape.id, { fillColor: value })} allowTransparent />
+        {fillMode === "filled" ? <ColorPresetField label="Fill" value={shape.fillColor} onChange={(value) => updateGraphShape(shape.id, { fillColor: value })} allowTransparent /> : null}
+        {supportsSides ? (
+          <div className="col-span-2 grid grid-cols-4 gap-1">
+            {CELL_LINE_SIDE_KEYS.map((side) => (
+              <label key={`shape-${shape.id}-${side}`} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] bg-white px-2 text-xs font-semibold text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={shape.sides.includes(side)}
+                  disabled={shape.locked}
+                  onChange={(event) => {
+                    const nextSides = event.target.checked ? [...shape.sides, side] : shape.sides.filter((item) => item !== side);
+                    updateGraphShape(shape.id, { sides: nextSides.length ? nextSides : shape.sides });
+                  }}
+                  className="h-4 w-4 accent-[var(--teal)]"
+                />
+                {CELL_LINE_SIDE_LABELS[side]}
+              </label>
+            ))}
+          </div>
+        ) : null}
         <div className="grid grid-cols-4 gap-1 col-span-2">
           <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, -1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
           <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, 1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
@@ -2976,7 +3384,24 @@ export function EditorClient({ project }: { project: Project }) {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <section className="border-b border-[#d7dde5] bg-white">
           <div className="flex h-10 items-center justify-between border-b border-[#d7dde5] px-3">
-            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">Sources</h2>
+            <button
+              type="button"
+              onClick={() => {
+                if (sourceCropMode) {
+                  setSourceCropMode(false);
+                  setSourceCropArea(null);
+                  setSourcesSectionCollapsed(false);
+                  return;
+                }
+                setSourcesSectionCollapsed((value) => !value);
+              }}
+              className="inline-flex min-w-0 items-center gap-2 text-left"
+              aria-expanded={!sourceCropMode && !sourcesSectionCollapsed}
+            >
+              {sourceCropMode || sourcesSectionCollapsed ? <ChevronRight size={15} className="shrink-0 text-[#667085]" aria-hidden="true" /> : <ChevronDown size={15} className="shrink-0 text-[#667085]" aria-hidden="true" />}
+              <span className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">Sources</span>
+              <span className="rounded bg-[#f2f4f7] px-1.5 py-0.5 text-[11px] font-semibold text-[#667085]">{settings.sourceImages.length}</span>
+            </button>
             <div className="flex items-center gap-1">
               <label className={`grid h-8 w-8 place-items-center rounded text-[#344054] hover:bg-[#f2f4f7] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add images">
                 {uploadingSources ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}
@@ -2989,39 +3414,69 @@ export function EditorClient({ project }: { project: Project }) {
               <button
                 type="button"
                 onClick={() => {
-                  if (!sourcePreviewUrl) return;
+                  if (!cropSourcePreviewUrl || !cropSource) return;
                   if (sourceCropMode) {
                     setSourceCropMode(false);
                     setSourceCropArea(null);
                   } else {
-                    setSourceCropMode(true);
-                    selectFullSourceCrop();
+                    openSourceCrop(cropSource.id);
                   }
                 }}
-                disabled={!sourcePreviewUrl}
+                disabled={!cropSourcePreviewUrl || !cropSource}
                 className="grid h-8 w-8 place-items-center rounded text-[#344054] hover:bg-[#f2f4f7] disabled:opacity-35"
-                title={sourceCropMode ? "Close crop mode" : "Crop source"}
+                title={sourceCropMode ? "Close source crop tools" : "Crop source images"}
               >
                 <MoreVertical size={18} aria-hidden="true" />
               </button>
             </div>
           </div>
-          {sourceCropMode && sourcePreviewUrl ? (
+          {sourceCropMode ? (
             <div className="border-b border-[#d7dde5] bg-[#f8fafc] p-2">
-              <div className="mb-2 grid grid-cols-3 gap-1">
-                <button type="button" onClick={applySourceCrop} disabled={!sourceCropArea || sourceCropPending} className="ui-btn h-8 px-2 text-xs disabled:opacity-50">
-                  {sourceCropPending ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
-                  Apply
-                </button>
-                <button type="button" onClick={selectFullSourceCrop} className="ui-btn h-8 px-2 text-xs"><Maximize2 size={14} aria-hidden="true" />Full</button>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="truncate text-[12px] font-bold uppercase tracking-wide text-[#344054]">Crop source image</span>
                 <button type="button" onClick={() => { setSourceCropMode(false); setSourceCropArea(null); }} className="ui-btn h-8 px-2 text-xs"><X size={14} aria-hidden="true" />Close</button>
               </div>
-              <div className="overflow-hidden rounded border border-[#d7dde5] bg-white">
-                <ManualCropper imageUrl={sourcePreviewUrl} crop={sourceCropArea} onCropChange={setSourceCropArea} className="h-64 p-2" />
-              </div>
+              {settings.sourceImages.length > 1 ? (
+                <div className="mb-2 max-h-28 overflow-y-auto rounded border border-[#d7dde5] bg-white">
+                  {settings.sourceImages.map((source) => {
+                    const active = cropSource?.id === source.id;
+                    return (
+                      <button
+                        key={`crop-source-${source.id}`}
+                        type="button"
+                        onClick={() => openSourceCrop(source.id)}
+                        className={`grid w-full grid-cols-[38px_minmax(0,1fr)_22px] items-center gap-2 border-b border-[#e8edf2] px-2 py-1.5 text-left last:border-b-0 ${active ? "bg-[#ecfeff]" : "hover:bg-[#f8fafc]"}`}
+                      >
+                        {renderSourceThumbnail(source, "h-9 w-9")}
+                        <span className="min-w-0">
+                          <span className="block truncate text-[12px] font-semibold text-[#101828]">{source.name}</span>
+                          <span className="block text-[11px] text-[#667085]">{roundCells(source.width)} x {roundCells(source.height)}</span>
+                        </span>
+                        {active ? <Check size={15} className="text-[#008c8f]" aria-hidden="true" /> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {cropSourcePreviewUrl ? (
+                <>
+                  <div className="mb-2 grid grid-cols-2 gap-1">
+                    <button type="button" onClick={applySourceCrop} disabled={!sourceCropArea || sourceCropPending} className="ui-btn h-8 px-2 text-xs disabled:opacity-50">
+                      {sourceCropPending ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
+                      Apply crop
+                    </button>
+                    <button type="button" onClick={() => selectFullSourceCrop()} className="ui-btn h-8 px-2 text-xs"><Maximize2 size={14} aria-hidden="true" />Full image</button>
+                  </div>
+                  <div className="overflow-hidden rounded border border-[#d7dde5] bg-white">
+                    <ManualCropper imageUrl={cropSourcePreviewUrl} crop={sourceCropArea} onCropChange={setSourceCropArea} className="h-64 p-2" />
+                  </div>
+                </>
+              ) : (
+                <div className="rounded border border-[#d7dde5] bg-white px-3 py-4 text-center text-sm text-[#667085]">Select a loaded source image to crop.</div>
+              )}
             </div>
           ) : null}
-          {settings.sourceImages.length ? (
+          {!sourceCropMode && !sourcesSectionCollapsed && settings.sourceImages.length ? (
             <div className="divide-y divide-[#e8edf2]">
               {settings.sourceImages.map((source) => {
                 const status = sourceStatus[source.id];
@@ -3050,9 +3505,9 @@ export function EditorClient({ project }: { project: Project }) {
                 );
               })}
             </div>
-          ) : (
+          ) : !sourceCropMode && !sourcesSectionCollapsed ? (
             <div className="grid min-h-28 place-items-center px-4 py-6 text-center text-sm text-[#667085]">Upload source files</div>
-          )}
+          ) : null}
         </section>
 
         <section className="border-b border-[#d7dde5] bg-white">
@@ -3125,6 +3580,49 @@ export function EditorClient({ project }: { project: Project }) {
                   </div>
                 );
               })}
+              {settings.graphShapes.length ? (
+                <div className="bg-white text-[#101828]">
+                  <button
+                    type="button"
+                    onClick={() => setGeneratedImagesCollapsed((value) => !value)}
+                    className="flex h-10 w-full items-center justify-between gap-3 border-y border-[#e8edf2] bg-[#fbfcfd] px-3 text-left"
+                    aria-expanded={!generatedImagesCollapsed}
+                  >
+                    <span className="inline-flex min-w-0 items-center gap-2">
+                      {generatedImagesCollapsed ? <ChevronRight size={15} className="shrink-0 text-[#667085]" aria-hidden="true" /> : <ChevronDown size={15} className="shrink-0 text-[#667085]" aria-hidden="true" />}
+                      <span className="truncate text-[12px] font-bold uppercase tracking-wide text-[#344054]">Generated images</span>
+                    </span>
+                    <span className="rounded bg-[#eef4ff] px-1.5 py-0.5 text-[11px] font-semibold text-[#344054]">{settings.graphShapes.length}</span>
+                  </button>
+                  {!generatedImagesCollapsed ? (
+                    <div className="divide-y divide-[#e8edf2]">
+                      {settings.graphShapes.map((shape) => {
+                        const key = drawingLayerKey("shape", shape.id);
+                        const selected = selectedDrawingLayerId === key;
+                        const expanded = Boolean(expandedDrawingLayerIds[key]);
+                        return (
+                          <div key={`layer-shape-${shape.id}`} className={selected ? "bg-[#16a6aa] text-white" : "bg-white text-[#101828]"}>
+                            <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                              <button type="button" onClick={() => selectGeneratedShape(shape.id)} className={selected ? "text-white/90" : "text-[#667085]"} title="Select generated image"><Eye size={15} aria-hidden="true" /></button>
+                              {renderShapeThumbnail(shape, "h-11 w-11")}
+                              <button type="button" onClick={() => selectGeneratedShape(shape.id)} className="min-w-0 text-left">
+                                <span className="block truncate text-[13px] font-semibold">{shape.name}</span>
+                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>
+                                  {GRAPH_SHAPE_KIND_LABELS[shape.kind]} / {shapeFillMode(shape) === "filled" ? "Filled" : "Outline"}
+                                </span>
+                              </button>
+                              <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
+                              <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className={selected ? "text-white" : "text-[#667085]"} title={shape.locked ? "Unlock generated image" : "Lock generated image"}>{shape.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                              <button type="button" onClick={() => toggleDrawingLayerCard(key)} className={selected ? "text-white" : "text-[#667085]"} title="Generated image settings"><Menu size={16} aria-hidden="true" /></button>
+                            </div>
+                            {expanded ? renderShapeAdvanced(shape) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               {settings.cellPaints.map((cell) => {
                 const key = drawingLayerKey("cell", cell.id);
                 const selected = selectedDrawingLayerId === key;
@@ -3143,27 +3641,6 @@ export function EditorClient({ project }: { project: Project }) {
                       <button type="button" onClick={() => toggleDrawingLayerCard(key)} className={selected ? "text-white" : "text-[#667085]"} title="Layer settings"><Menu size={16} aria-hidden="true" /></button>
                     </div>
                     {expanded ? renderCellAdvanced(cell) : null}
-                  </div>
-                );
-              })}
-              {settings.graphShapes.map((shape) => {
-                const key = drawingLayerKey("shape", shape.id);
-                const selected = selectedDrawingLayerId === key;
-                const expanded = Boolean(expandedDrawingLayerIds[key]);
-                return (
-                  <div key={`layer-shape-${shape.id}`} className={selected ? "bg-[#16a6aa] text-white" : "bg-white text-[#101828]"}>
-                    <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
-                      <button type="button" onClick={() => { setSelectedSourceId(null); setSelectedDrawingLayerId(key); }} className={selected ? "text-white/90" : "text-[#667085]"} title="Select layer"><Eye size={15} aria-hidden="true" /></button>
-                      {renderShapeThumbnail(shape, "h-11 w-11")}
-                      <button type="button" onClick={() => { setSelectedSourceId(null); setSelectedDrawingLayerId(key); }} className="min-w-0 text-left">
-                        <span className="block truncate text-[13px] font-semibold">{shape.name}</span>
-                        <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>Visible</span>
-                      </button>
-                      <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
-                      <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className={selected ? "text-white" : "text-[#667085]"} title={shape.locked ? "Unlock layer" : "Lock layer"}>{shape.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
-                      <button type="button" onClick={() => toggleDrawingLayerCard(key)} className={selected ? "text-white" : "text-[#667085]"} title="Layer settings"><Menu size={16} aria-hidden="true" /></button>
-                    </div>
-                    {expanded ? renderShapeAdvanced(shape) : null}
                   </div>
                 );
               })}
@@ -3612,99 +4089,129 @@ export function EditorClient({ project }: { project: Project }) {
           </div>
         ) : null}
 
-        <CollapsibleSection
-          title="Drawing"
-          summary={<span className="text-xs font-semibold text-slate-500">{settings.cellPaints.length + settings.graphShapes.length}</span>}
-          open={!collapsedSections.drawing}
-          onToggle={() => toggleSection("drawing")}
-          className={inspectorTab === "draw" ? "" : "hidden"}
-        >
-          <div className="space-y-3">
-            <div className="grid grid-cols-3 gap-2">
-              {(["image", "cell", "shape"] as DrawingTool[]).map((tool) => (
-                <button
-                  key={tool}
-                  type="button"
-                  onClick={() => setDrawingTool(tool)}
-                  className={`h-9 rounded-md border text-xs font-semibold capitalize ${
-                    drawingTool === tool ? "border-[var(--teal)] bg-teal-50 text-[var(--teal)]" : "border-[var(--line)] text-slate-600"
-                  }`}
-                >
-                  {tool}
-                </button>
-              ))}
-            </div>
-
-            <div className="rounded-md border border-[var(--line)] p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs font-semibold text-slate-500">Cell borders</span>
-                <button type="button" onClick={setAllCellPaintSides} className="h-8 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
-                  All
-                </button>
-              </div>
+        {inspectorTab === "draw" ? (
+          <div className="space-y-4">
+            <InspectorGroup title="Shape Generator">
               <div className="grid grid-cols-2 gap-2">
-                {CELL_LINE_SIDE_KEYS.map((side) => (
-                  <label key={side} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
-                    <input
-                      type="checkbox"
-                      checked={cellPaintSides.includes(side)}
-                      onChange={() => toggleCellPaintSide(side)}
-                      className="h-4 w-4 accent-[var(--teal)]"
-                    />
-                    {CELL_LINE_SIDE_LABELS[side]}
-                  </label>
-                ))}
-              </div>
-              <div className="mt-2 grid grid-cols-2 gap-2">
-                <label className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={cellPaintLineEnabled}
-                    onChange={(event) => setCellPaintLineEnabled(event.target.checked)}
-                    className="h-4 w-4 accent-[var(--teal)]"
-                  />
-                  Line
-                </label>
-                <label className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={cellPaintFillEnabled}
-                    onChange={(event) => setCellPaintFillEnabled(event.target.checked)}
-                    className="h-4 w-4 accent-[var(--teal)]"
-                  />
-                  Fill
-                </label>
-              </div>
-            </div>
-
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Shape</span>
-              <select
-                value={shapeKind}
-                onChange={(event) => {
-                  setShapeKind(event.target.value as GraphShapeKind);
-                  setDrawingTool("shape");
-                }}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {GRAPH_SHAPE_KIND_KEYS.map((kind) => (
-                  <option key={kind} value={kind}>
+                {GENERATED_SHAPE_KIND_KEYS.map((kind) => (
+                  <button
+                    key={`draft-shape-${kind}`}
+                    type="button"
+                    onClick={() => {
+                      setDraftShapeKind(kind);
+                      if (shapeUsesSingleSize(kind)) setDraftShapeHeightCm(draftShapeWidthCm);
+                    }}
+                    className={`h-9 rounded-md border text-xs font-semibold ${draftShapeKind === kind ? "border-[#008c8f] bg-teal-50 text-[#007174]" : "border-[#d7dde5] bg-white text-[#344054]"}`}
+                  >
                     {GRAPH_SHAPE_KIND_LABELS[kind]}
-                  </option>
+                  </button>
                 ))}
-              </select>
-            </label>
+              </div>
 
-            <div className="grid grid-cols-2 gap-2">
-              <button type="button" onClick={clearCellPaints} className="h-9 rounded-md border border-[var(--line)] text-xs font-semibold text-slate-600">
-                Clear cells
-              </button>
-              <button type="button" onClick={clearGraphShapes} className="h-9 rounded-md border border-[var(--line)] text-xs font-semibold text-slate-600">
-                Clear shapes
-              </button>
-            </div>
+              <div className="grid grid-cols-2 gap-2">
+                <NumberField
+                  label={shapeUsesSingleSize(draftShapeKind) ? "Size (CM)" : "Width (CM)"}
+                  value={draftShapeWidthCm}
+                  min={0.01}
+                  max={1000}
+                  step={0.1}
+                  allowDecimalInput
+                  inputClassName={inspectorControlClass}
+                  onChange={(value) => {
+                    setDraftShapeWidthCm(value);
+                    if (shapeUsesSingleSize(draftShapeKind)) setDraftShapeHeightCm(value);
+                  }}
+                />
+                <NumberField
+                  label={shapeUsesSingleSize(draftShapeKind) ? "Size (CM)" : "Height (CM)"}
+                  value={shapeUsesSingleSize(draftShapeKind) ? draftShapeWidthCm : draftShapeHeightCm}
+                  min={0.01}
+                  max={1000}
+                  step={0.1}
+                  allowDecimalInput
+                  inputClassName={inspectorControlClass}
+                  disabled={shapeUsesSingleSize(draftShapeKind)}
+                  onChange={setDraftShapeHeightCm}
+                />
+              </div>
+
+              <InspectorSegmented
+                label="Shape type"
+                value={draftShapeFillMode}
+                options={(["outline", "filled"] as ShapeFillMode[]).map((mode) => ({ value: mode, label: GENERATED_SHAPE_FILL_MODE_LABELS[mode] }))}
+                onChange={(value) => setDraftShapeFillMode(value as ShapeFillMode)}
+              />
+
+              {draftShapeFillMode === "outline" && shapeSupportsSides(draftShapeKind) ? (
+                <div className="grid grid-cols-4 gap-1">
+                  {CELL_LINE_SIDE_KEYS.map((side) => (
+                    <label key={`draft-side-${side}`} className="flex h-9 items-center gap-1.5 rounded-md border border-[#d7dde5] bg-white px-2 text-[11px] font-semibold text-[#344054]">
+                      <input
+                        type="checkbox"
+                        checked={draftShapeSides.includes(side)}
+                        onChange={(event) => setDraftShapeSide(side, event.target.checked)}
+                        className="h-4 w-4 accent-[#008c8f]"
+                      />
+                      {CELL_LINE_SIDE_LABELS[side]}
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+
+              <NumberField
+                label="Stroke width"
+                value={draftShapeStrokeWidth}
+                min={1}
+                max={24}
+                inputClassName={inspectorControlClass}
+                onChange={(value) => setDraftShapeStrokeWidth(Math.round(value))}
+              />
+              <ColorPresetField label="Stroke color" value={draftShapeStrokeColor} onChange={setDraftShapeStrokeColor} />
+              {draftShapeFillMode === "filled" ? <ColorPresetField label="Fill color" value={draftShapeFillColor} onChange={setDraftShapeFillColor} allowTransparent /> : null}
+
+              <div className="overflow-hidden rounded-md border border-[#d7dde5] bg-[#f8fafc]">
+                <div
+                  draggable
+                  onDragStart={handleGeneratedShapeDragStart}
+                  onDragEnd={() => setPlacingGeneratedShape(false)}
+                  className="grid h-36 cursor-grab place-items-center bg-white p-3 active:cursor-grabbing"
+                  title="Drag to canvas"
+                >
+                  <ShapePreviewSvg
+                    kind={draftShapeKind}
+                    sides={shapeSupportsSides(draftShapeKind) ? draftShapeSides : CELL_LINE_SIDE_KEYS}
+                    fillColor={draftShapeFillMode === "filled" ? draftShapeFillColor : TRANSPARENT_FILL_COLOR}
+                    strokeColor={draftShapeStrokeColor}
+                    strokeWidth={draftShapeStrokeWidth}
+                    widthCells={draftShapePreviewDimensions.width}
+                    heightCells={draftShapePreviewDimensions.height}
+                    className="h-full max-h-28 w-full"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2 border-t border-[#e8edf2] p-2">
+                  <button
+                    type="button"
+                    onClick={() => setPlacingGeneratedShape((value) => !value)}
+                    className={`h-9 rounded-md border text-xs font-semibold ${placingGeneratedShape ? "border-[#008c8f] bg-[#008c8f] text-white" : "border-[#d7dde5] bg-white text-[#344054]"}`}
+                  >
+                    Place on canvas
+                  </button>
+                  <button type="button" onClick={clearGraphShapes} disabled={!settings.graphShapes.length} className="h-9 rounded-md border border-[#d7dde5] bg-white text-xs font-semibold text-[#344054] disabled:opacity-45">
+                    Clear generated
+                  </button>
+                </div>
+              </div>
+            </InspectorGroup>
+
+            {selectedShapeLayer ? (
+              <InspectorGroup title="Selected Generated Image">
+                <div className="rounded-md border border-[#d7dde5] bg-white">
+                  {renderShapeAdvanced(selectedShapeLayer)}
+                </div>
+              </InspectorGroup>
+            ) : null}
           </div>
-        </CollapsibleSection>
+        ) : null}
 
         <CollapsibleSection title="Outline" summary={<ColorSummary value={settings.outlineColor} />} open={!collapsedSections.outline} onToggle={() => toggleSection("outline")} className={inspectorTab === "palette" ? "" : "hidden"}>
           <ColorPresetField label="Outline" value={settings.outlineColor} onChange={updateOutlineColor} />
@@ -3851,6 +4358,15 @@ export function EditorClient({ project }: { project: Project }) {
           height: Math.max(1, Math.round(selectedSourceLayout.height * GRAPH_MAJOR_CELL_PIXELS * zoom)),
         }
       : null;
+  const selectedShapeBox =
+    selectedShapeLayer && !showOriginal
+      ? {
+          left: Math.round(outsideNumberMargin + Math.min(selectedShapeLayer.x, selectedShapeLayer.x + selectedShapeLayer.width) * GRAPH_MAJOR_CELL_PIXELS * zoom),
+          top: Math.round(outsideNumberMargin + Math.min(selectedShapeLayer.y, selectedShapeLayer.y + selectedShapeLayer.height) * GRAPH_MAJOR_CELL_PIXELS * zoom),
+          width: Math.max(1, Math.round(Math.abs(selectedShapeLayer.width) * GRAPH_MAJOR_CELL_PIXELS * zoom)),
+          height: Math.max(1, Math.round(Math.abs(selectedShapeLayer.height) * GRAPH_MAJOR_CELL_PIXELS * zoom)),
+        }
+      : null;
 
   const canvasPanel = (
     <section className="editor-canvas-panel grid min-h-0 grid-rows-[40px_minmax(0,1fr)_36px]">
@@ -3890,10 +4406,13 @@ export function EditorClient({ project }: { project: Project }) {
 
         <div
           ref={canvasScrollRef}
+          onDragOver={handleGeneratedShapeDragOver}
+          onDrop={handleGeneratedShapeDrop}
           onPointerDown={(event) => {
             if (event.target === event.currentTarget) {
               setSelectedSourceId(null);
               setSelectedDrawingLayerId(null);
+              setLayerChooser(null);
             }
           }}
           className="ui-canvas-bg relative min-h-0 overflow-auto p-8"
@@ -3924,12 +4443,40 @@ export function EditorClient({ project }: { project: Project }) {
               Processing
             </div>
           ) : null}
+          {layerChooser ? (
+            <div
+              className="fixed z-40 w-64 overflow-hidden rounded-md border border-[#d7dde5] bg-white text-sm shadow-xl"
+              style={{ left: layerChooser.x + 8, top: layerChooser.y + 8 }}
+            >
+              <div className="border-b border-[#e8edf2] px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-[#667085]">Select layer</div>
+              <div className="max-h-64 overflow-y-auto">
+                {layerChooser.choices.map((choice) => (
+                  <button
+                    key={choice.key}
+                    type="button"
+                    onClick={() => selectLayerChoice(choice)}
+                    className="grid w-full grid-cols-[24px_minmax(0,1fr)] items-center gap-2 border-b border-[#eef2f6] px-3 py-2 text-left last:border-b-0 hover:bg-[#f8fafc]"
+                  >
+                    <span className="grid h-6 w-6 place-items-center rounded border border-[#d7dde5] bg-[#f8fafc] text-[#667085]">
+                      {choice.type === "source" ? <ImageIcon size={14} aria-hidden="true" /> : <Maximize2 size={14} aria-hidden="true" />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-[12px] font-semibold text-[#101828]">{choice.name}</span>
+                      <span className="block truncate text-[11px] text-[#667085]">{choice.detail}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {showOriginal && sourcePreviewUrl ? (
             <img src={sourcePreviewUrl} alt="" className="block rounded bg-white object-contain shadow-sm" style={{ width: `${graphPreviewWidth}px`, height: "auto" }} />
           ) : (
             <div
               ref={graphStageRef}
               className="relative mx-auto"
+              onDragOver={handleGeneratedShapeDragOver}
+              onDrop={handleGeneratedShapeDrop}
               style={{
                 width: `${graphPreviewWidth + outsideNumberMargin * 2}px`,
                 height: `${graphPreviewHeight + outsideNumberMargin * 2}px`,
@@ -3947,6 +4494,8 @@ export function EditorClient({ project }: { project: Project }) {
                 onPointerMove={dragGraph}
                 onPointerUp={endGraphDrag}
                 onPointerCancel={endGraphDrag}
+                onDragOver={handleGeneratedShapeDragOver}
+                onDrop={handleGeneratedShapeDrop}
                 title="Drag image to move it; arrow keys move selected image by 0.1cm; Space or Ctrl plus drag pans the view"
                 className="absolute left-0 top-0 rounded bg-white shadow-sm"
                 style={{
@@ -3954,7 +4503,7 @@ export function EditorClient({ project }: { project: Project }) {
                   top: `${outsideNumberMargin}px`,
                   width: `${graphPreviewWidth}px`,
                   height: `${graphPreviewHeight}px`,
-                  cursor: isDraggingGraph ? "grabbing" : copiedFillColor ? "copy" : "crosshair",
+                  cursor: isDraggingGraph ? "grabbing" : placingGeneratedShape ? "copy" : copiedFillColor ? "copy" : "crosshair",
                   imageRendering: "auto",
                   touchAction: "none",
                 }}
@@ -4028,6 +4577,12 @@ export function EditorClient({ project }: { project: Project }) {
                     </div>
                   ))}
                 </div>
+              ) : null}
+              {selectedShapeBox ? (
+                <div
+                  className="pointer-events-none absolute border border-teal-700/75 bg-teal-500/5 shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
+                  style={selectedShapeBox}
+                />
               ) : null}
               {selectedSourceBox && selectedSourceLayout ? (
                 <div
@@ -4189,9 +4744,9 @@ export function EditorClient({ project }: { project: Project }) {
       </header>
 
       <div className="editor-workspace" style={editorGridStyle}>
-        <div className={`${mobileTab === "source" ? "block" : "hidden"} ${sourcePanelCollapsed ? "lg:hidden" : "lg:block"}`}>{sourcePanel}</div>
+        <div className={`editor-side-column ${mobileTab === "source" ? "block" : "hidden"} ${sourcePanelCollapsed ? "lg:hidden" : "lg:block"}`}>{sourcePanel}</div>
         <div className={mobileTab === "canvas" ? "block" : "hidden lg:block"}>{canvasPanel}</div>
-        <div className={`${mobileTab === "controls" ? "block" : "hidden"} ${settingsPanelCollapsed ? "lg:hidden" : "lg:block"}`}>{settingsPanel}</div>
+        <div className={`editor-side-column ${mobileTab === "controls" ? "block" : "hidden"} ${settingsPanelCollapsed ? "lg:hidden" : "lg:block"}`}>{settingsPanel}</div>
       </div>
 
       <div className="grid h-16 grid-cols-3 border-t border-[#d7dde5] bg-white lg:hidden">

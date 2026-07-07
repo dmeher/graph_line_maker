@@ -63,6 +63,7 @@ const graphShapeSchema = z.object({
   strokeColor: hexSchema,
   fillColor: fillColorSchema,
   strokeWidth: z.number().int().min(1).max(24),
+  sides: z.array(cellLineSideSchema).max(4),
   locked: z.boolean(),
   rotationDegrees: rotationDegreesSchema,
   flipX: z.boolean(),

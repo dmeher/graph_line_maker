@@ -88,6 +88,7 @@ export type GraphShapeDrawing = {
   strokeColor: string;
   fillColor: string;
   strokeWidth: number;
+  sides: GraphCellLineSide[];
   locked: boolean;
   rotationDegrees: GraphRotationDegrees;
   flipX: boolean;

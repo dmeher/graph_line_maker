@@ -513,13 +513,14 @@ canvas {
 
 .editor-workspace {
   display: grid;
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: auto;
+  align-items: start;
   min-height: 0;
   flex: 1;
   grid-template-columns: var(--editor-grid-columns, 320px minmax(0, 1fr) 300px);
   gap: 4px;
   padding: 4px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .editor-workspace > * {
@@ -536,6 +537,29 @@ canvas {
   border: 1px solid #cfd7df;
   border-radius: 6px;
   background: #ffffff;
+}
+
+.editor-side-column {
+  position: sticky;
+  top: 62px;
+  align-self: start;
+  max-height: calc(100dvh - 70px);
+  min-width: 0;
+}
+
+.editor-side-column > .editor-panel {
+  max-height: calc(100dvh - 70px);
+}
+
+@media (max-width: 1023px) {
+  .editor-side-column {
+    position: static;
+    max-height: none;
+  }
+
+  .editor-side-column > .editor-panel {
+    max-height: none;
+  }
 }
 
 .editor-panel * {

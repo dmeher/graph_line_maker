@@ -16,6 +16,7 @@ import type { GraphSettings, PaletteColor } from "@/lib/types";
 
 type CanvasLike = HTMLCanvasElement | OffscreenCanvas;
 type ProcessingContext2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+const CELL_LINE_SIDE_KEYS = ["top", "right", "bottom", "left"] as const;
 
 type ProcessedGraphFor<TCanvas extends CanvasLike> = {
   canvas: TCanvas;
@@ -603,11 +604,33 @@ function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
 
     if (shape.kind === "circle" || shape.kind === "oval") {
       context.ellipse(centerX, centerY, drawWidth / 2, drawHeight / 2, 0, 0, Math.PI * 2);
+      if (!isTransparentFillColor(shape.fillColor)) context.fill();
+      context.stroke();
     } else {
       context.rect(left, top, drawWidth, drawHeight);
+      if (!isTransparentFillColor(shape.fillColor)) context.fill();
+      const sides = isTransparentFillColor(shape.fillColor) ? (shape.sides?.length ? shape.sides : CELL_LINE_SIDE_KEYS) : CELL_LINE_SIDE_KEYS;
+      if (sides.length) {
+        context.beginPath();
+        if (sides.includes("top")) {
+          context.moveTo(left, top);
+          context.lineTo(left + drawWidth, top);
+        }
+        if (sides.includes("right")) {
+          context.moveTo(left + drawWidth, top);
+          context.lineTo(left + drawWidth, top + drawHeight);
+        }
+        if (sides.includes("bottom")) {
+          context.moveTo(left + drawWidth, top + drawHeight);
+          context.lineTo(left, top + drawHeight);
+        }
+        if (sides.includes("left")) {
+          context.moveTo(left, top + drawHeight);
+          context.lineTo(left, top);
+        }
+        context.stroke();
+      }
     }
-    if (!isTransparentFillColor(shape.fillColor)) context.fill();
-    context.stroke();
     context.restore();
   }
 

@@ -27,9 +27,47 @@ import { getSupabaseAdmin } from "@/lib/supabase/server";
 const MAX_CANVAS_DIMENSION = 24000;
 const hexSchema = z.string().regex(/^#[0-9A-Fa-f]{6}$/);
 const fillColorSchema = z.union([hexSchema, z.literal(TRANSPARENT_FILL_COLOR)]);
+const rotationDegreesSchema = z
+  .number()
+  .min(0)
+  .max(345)
+  .refine((value) => Math.abs(value / 15 - Math.round(value / 15)) < 0.000001, "Rotation must use 15 degree steps.");
 const fillRegionsSchema = z
   .record(z.string().regex(/^\d+$/), fillColorSchema)
   .refine((value) => Object.keys(value).length <= 500, "Too many custom fill regions.");
+const cellLineSideSchema = z.union([z.literal("top"), z.literal("right"), z.literal("bottom"), z.literal("left")]);
+const cellPaintSchema = z.object({
+  id: z.string().min(1).max(80),
+  name: z.string().min(1).max(160),
+  x: z.number().min(0).max(1000),
+  y: z.number().min(0).max(1000),
+  width: z.number().min(0.01).max(1000),
+  height: z.number().min(0.01).max(1000),
+  sides: z.array(cellLineSideSchema).max(4),
+  lineColor: hexSchema,
+  fillColor: fillColorSchema,
+  lineWidth: z.number().int().min(1).max(24),
+  locked: z.boolean(),
+  rotationDegrees: rotationDegreesSchema,
+  flipX: z.boolean(),
+  flipY: z.boolean(),
+});
+const graphShapeSchema = z.object({
+  id: z.string().min(1).max(80),
+  name: z.string().min(1).max(160),
+  kind: z.union([z.literal("square"), z.literal("rectangle"), z.literal("circle"), z.literal("oval"), z.literal("line"), z.literal("arrow")]),
+  x: z.number().min(-1000).max(1000),
+  y: z.number().min(-1000).max(1000),
+  width: z.number().min(-1000).max(1000),
+  height: z.number().min(-1000).max(1000),
+  strokeColor: hexSchema,
+  fillColor: fillColorSchema,
+  strokeWidth: z.number().int().min(1).max(24),
+  locked: z.boolean(),
+  rotationDegrees: rotationDegreesSchema,
+  flipX: z.boolean(),
+  flipY: z.boolean(),
+});
 const sourceImageSchema = z.object({
   id: z.string().min(1).max(80),
   name: z.string().min(1).max(160),
@@ -41,9 +79,14 @@ const sourceImageSchema = z.object({
   sourceFillThreshold: z.number().min(MIN_SOURCE_FILL_THRESHOLD).max(MAX_SOURCE_FILL_THRESHOLD),
   sourceFillMinStrokePixels: z.number().int().min(MIN_SOURCE_FILL_MIN_STROKE_PIXELS).max(MAX_SOURCE_FILL_MIN_STROKE_PIXELS),
   strokeGapClosePixels: z.number().int().min(MIN_STROKE_GAP_CLOSE_PIXELS).max(MAX_STROKE_GAP_CLOSE_PIXELS),
-  x: z.number().min(0).max(1000),
+  x: z.number().min(-1000).max(1000),
+  y: z.number().min(-1000).max(1000),
   topPadding: z.number().min(-1000).max(1000),
   bottomPadding: z.number().min(-1000).max(1000),
+  locked: z.boolean(),
+  rotationDegrees: rotationDegreesSchema,
+  flipX: z.boolean(),
+  flipY: z.boolean(),
 });
 
 const graphSettingsSchema = z.object({
@@ -76,10 +119,14 @@ const graphSettingsSchema = z.object({
   showBorder: z.boolean(),
   transparentBackground: z.boolean(),
   showNumbers: z.boolean(),
+  gridNumberPlacement: z.union([z.literal("inside"), z.literal("outside")]),
+  showPageBreaks: z.boolean(),
   majorGridEvery: z.union([z.literal(5), z.literal(10)]),
   imageWidth: z.number().min(0.01).max(1000),
   imageHeight: z.number().min(0.01).max(1000),
   sourceImages: z.array(sourceImageSchema).max(12),
+  cellPaints: z.array(cellPaintSchema).max(2000),
+  graphShapes: z.array(graphShapeSchema).max(500),
   imagePadding: z.number().int().min(0).max(MAX_IMAGE_PADDING_PIXELS),
   imageOffsetX: z.number().int().min(-MAX_CANVAS_DIMENSION).max(MAX_CANVAS_DIMENSION),
   imageOffsetY: z.number().int().min(-MAX_CANVAS_DIMENSION).max(MAX_CANVAS_DIMENSION),

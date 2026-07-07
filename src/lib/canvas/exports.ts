@@ -47,6 +47,28 @@ function escapeHtml(value: string) {
   });
 }
 
+function uniqueCutGuideYPositions(topMm: number, bottomMm: number, pageHeightMm: number) {
+  const safeTop = Math.max(0, Math.min(pageHeightMm, topMm));
+  const safeBottom = Math.max(0, Math.min(pageHeightMm, bottomMm));
+  return Array.from(new Set([safeTop, safeBottom].map((value) => Math.round(value * 1000) / 1000)));
+}
+
+function drawPdfCutGuides(
+  pdf: import("jspdf").jsPDF,
+  topMm: number,
+  bottomMm: number,
+  pageWidthMm: number,
+  pageHeightMm: number,
+) {
+  pdf.setDrawColor(51, 65, 85);
+  pdf.setLineWidth(0.25);
+  pdf.setLineDashPattern([1.5, 1.5], 0);
+  for (const y of uniqueCutGuideYPositions(topMm, bottomMm, pageHeightMm)) {
+    pdf.line(0, y, pageWidthMm, y);
+  }
+  pdf.setLineDashPattern([], 0);
+}
+
 export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: string, settingsOrMargin: GraphSettings | number = 0) {
   const { jsPDF } = await import("jspdf");
   const settings = typeof settingsOrMargin === "number" ? null : settingsOrMargin;
@@ -84,6 +106,7 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
         tile.destinationWidthMm,
         tile.destinationHeightMm,
       );
+      drawPdfCutGuides(pdf, tile.cutGuideTopYMm, tile.cutGuideBottomYMm, plan.pageWidthMm, plan.pageHeightMm);
       pagesInCurrentFile += 1;
     }
 
@@ -109,7 +132,10 @@ export function printCanvas(canvas: HTMLCanvasElement, settings: GraphSettings, 
   const pages = plan.tiles
     .map((tile) => {
       const imageUrl = canvasSliceToDataUrl(canvas, tile.sourceX, tile.sourceY, tile.sourceWidth, tile.sourceHeight);
-      return `<section class="page"><img src="${imageUrl}" alt="" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" /></section>`;
+      const cutGuides = uniqueCutGuideYPositions(tile.cutGuideTopYMm, tile.cutGuideBottomYMm, plan.pageHeightMm)
+        .map((y) => `<span class="cut-guide" style="top:${y}mm"></span>`)
+        .join("");
+      return `<section class="page"><img src="${imageUrl}" alt="" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" />${cutGuides}</section>`;
     })
     .join("");
 
@@ -136,6 +162,14 @@ export function printCanvas(canvas: HTMLCanvasElement, settings: GraphSettings, 
       page-break-after: auto;
     }
     img { display: block; position: absolute; }
+    .cut-guide {
+      position: absolute;
+      left: 0;
+      right: 0;
+      z-index: 2;
+      height: 0;
+      border-top: 0.25mm dotted rgba(51, 65, 85, 0.78);
+    }
   </style>
 </head>
 <body>

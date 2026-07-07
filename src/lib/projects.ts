@@ -34,6 +34,7 @@ import {
   clampSourceFillThreshold,
   clampStrokeGapClosePixels,
 } from "@/lib/graph-paper";
+import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import type { GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSummary } from "@/lib/types";
 
 const MAX_CANVAS_DIMENSION = 24000;
@@ -72,11 +73,15 @@ export const defaultGraphSettings: GraphSettings = {
   gridLineThickness: 1,
   showBorder: true,
   transparentBackground: false,
-  showNumbers: false,
+  showNumbers: true,
+  gridNumberPlacement: "inside",
+  showPageBreaks: true,
   majorGridEvery: 5,
   imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
   imageHeight: DEFAULT_IMAGE_HEIGHT_CELLS,
   sourceImages: [],
+  cellPaints: [],
+  graphShapes: [],
   imagePadding: 0,
   imageOffsetX: 0,
   imageOffsetY: 0,
@@ -149,14 +154,26 @@ function clampPaddingCells(value: unknown, maxCells: number, fallback: number) {
 }
 
 function defaultSourceX(graphWidth: number, width: number) {
-  return roundCells(Math.max(0, (graphWidth - width) / 2));
+  return roundCells((graphWidth - width) / 2);
+}
+
+function clampFreeCellCoordinate(value: unknown, fallback: number) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return roundCells(fallback);
+  return roundCells(Math.max(-1000, Math.min(1000, numeric)));
 }
 
 function clampSourceX(value: unknown, graphWidth: number, width: number) {
-  const maxX = Math.max(0, graphWidth - width);
+  void graphWidth;
+  void width;
+  return clampFreeCellCoordinate(value, defaultSourceX(graphWidth, width));
+}
+
+function clampSourceSizeCells(value: unknown, fallback: number) {
   const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return defaultSourceX(graphWidth, width);
-  return roundCells(Math.max(0, Math.min(maxX, numeric)));
+  const safeFallback = Math.max(0.01, Math.min(1000, fallback));
+  if (!Number.isFinite(numeric)) return roundCells(safeFallback);
+  return roundCells(Math.max(0.01, Math.min(1000, numeric)));
 }
 
 function normalizeFillRegions(value: unknown) {
@@ -165,6 +182,86 @@ function normalizeFillRegions(value: unknown) {
     .filter(([regionId, color]) => /^\d+$/.test(regionId) && isFillColor(color))
     .slice(0, 500);
   return Object.fromEntries(entries);
+}
+
+const GRAPH_CELL_LINE_SIDES = ["top", "right", "bottom", "left"] as const;
+const GRAPH_SHAPE_KINDS = ["square", "rectangle", "circle", "oval", "line", "arrow"] as const;
+
+function normalizeCellPaints(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((paint, index) => {
+      if (!paint || typeof paint !== "object" || Array.isArray(paint)) return [];
+      const record = paint as Record<string, unknown>;
+      const x = roundCells(Math.max(0, Number(record.x) || 0));
+      const y = roundCells(Math.max(0, Number(record.y) || 0));
+      const width = Math.max(0.01, Math.min(1000, Number(record.width) || 1));
+      const height = Math.max(0.01, Math.min(1000, Number(record.height) || 1));
+      const sides = Array.isArray(record.sides)
+        ? Array.from(new Set(record.sides.filter((side): side is (typeof GRAPH_CELL_LINE_SIDES)[number] => GRAPH_CELL_LINE_SIDES.includes(side as never))))
+        : [];
+      const lineColor = isHexColor(record.lineColor) ? record.lineColor : DEFAULT_OUTLINE_COLOR;
+      const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
+      const lineWidthValue = Number(record.lineWidth);
+      const lineWidth = Math.max(1, Math.min(24, Number.isFinite(lineWidthValue) ? Math.round(lineWidthValue) : 3));
+      if (!sides.length && fillColor === TRANSPARENT_FILL_COLOR) return [];
+      return [
+        {
+          id: typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 80) : `cell-paint-${index + 1}`,
+          name: typeof record.name === "string" && record.name.trim() ? record.name.trim().slice(0, 160) : `Cell paint ${index + 1}`,
+          x,
+          y,
+          width,
+          height,
+          sides,
+          lineColor,
+          fillColor,
+          lineWidth,
+          locked: Boolean(record.locked),
+          rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
+          flipX: Boolean(record.flipX),
+          flipY: Boolean(record.flipY),
+        },
+      ];
+    })
+    .slice(0, 2000);
+}
+
+function normalizeGraphShapes(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((shape, index) => {
+      if (!shape || typeof shape !== "object" || Array.isArray(shape)) return [];
+      const record = shape as Record<string, unknown>;
+      const kind = GRAPH_SHAPE_KINDS.includes(record.kind as never) ? (record.kind as (typeof GRAPH_SHAPE_KINDS)[number]) : "rectangle";
+      const widthFallback = kind === "line" || kind === "arrow" ? 2 : 1;
+      const heightFallback = kind === "line" || kind === "arrow" ? 0 : 1;
+      const width = clampFreeCellCoordinate(record.width, widthFallback);
+      const height = clampFreeCellCoordinate(record.height, heightFallback);
+      const strokeColor = isHexColor(record.strokeColor) ? record.strokeColor : DEFAULT_OUTLINE_COLOR;
+      const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
+      const strokeWidthValue = Number(record.strokeWidth);
+      const strokeWidth = Math.max(1, Math.min(24, Number.isFinite(strokeWidthValue) ? Math.round(strokeWidthValue) : 3));
+      return [
+        {
+          id: typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 80) : `shape-${index + 1}`,
+          name: typeof record.name === "string" && record.name.trim() ? record.name.trim().slice(0, 160) : `${kind[0].toUpperCase()}${kind.slice(1)} ${index + 1}`,
+          kind,
+          x: clampFreeCellCoordinate(record.x, 0),
+          y: clampFreeCellCoordinate(record.y, 0),
+          width,
+          height,
+          strokeColor,
+          fillColor,
+          strokeWidth,
+          locked: Boolean(record.locked),
+          rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
+          flipX: Boolean(record.flipX),
+          flipY: Boolean(record.flipY),
+        },
+      ];
+    })
+    .slice(0, 500);
 }
 
 function normalizeSourceImages(
@@ -177,6 +274,7 @@ function normalizeSourceImages(
   >,
 ): GraphSourceImage[] {
   if (!Array.isArray(value)) return [];
+  let legacyY = 0;
   return value
     .flatMap((source, index) => {
       if (!source || typeof source !== "object" || Array.isArray(source)) return [];
@@ -185,8 +283,8 @@ function normalizeSourceImages(
       const name = typeof record.name === "string" && record.name.trim() ? record.name.trim().slice(0, 160) : `Source ${index + 1}`;
       const path = typeof record.path === "string" && record.path.trim() ? record.path.trim().slice(0, 1024) : null;
       const url = typeof record.url === "string" && record.url.trim() ? record.url.trim().slice(0, 4096) : null;
-      const width = clampImageCells(record.width, graphWidth, Math.min(defaultGraphSettings.imageWidth, graphWidth));
-      const height = clampImageCells(record.height, graphHeight, Math.min(defaultGraphSettings.imageHeight, graphHeight));
+      const width = clampSourceSizeCells(record.width, defaultGraphSettings.imageWidth);
+      const height = clampSourceSizeCells(record.height, defaultGraphSettings.imageHeight);
       const measurementUnit = isMeasurementUnit(record.measurementUnit) ? record.measurementUnit : defaults.measurementUnit;
       const imageLineThickness = clampImageLineThickness(record.imageLineThickness ?? defaults.imageLineThickness);
       const sourceFillThreshold = clampSourceFillThreshold(record.sourceFillThreshold ?? defaults.sourceFillThreshold);
@@ -195,6 +293,12 @@ function normalizeSourceImages(
       const x = clampSourceX(record.x, graphWidth, width);
       const topPadding = clampPaddingCells(record.topPadding, graphHeight, 0);
       const bottomPadding = clampPaddingCells(record.bottomPadding, graphHeight, 0);
+      const y = clampFreeCellCoordinate(record.y, legacyY + topPadding);
+      legacyY = y + height + bottomPadding;
+      const locked = Boolean(record.locked);
+      const rotationDegrees = normalizeRotationDegrees(record.rotationDegrees);
+      const flipX = Boolean(record.flipX);
+      const flipY = Boolean(record.flipY);
       return [
         {
           id,
@@ -209,8 +313,13 @@ function normalizeSourceImages(
           sourceFillMinStrokePixels,
           strokeGapClosePixels,
           x,
+          y,
           topPadding,
           bottomPadding,
+          locked,
+          rotationDegrees,
+          flipX,
+          flipY,
         },
       ];
     })
@@ -262,6 +371,8 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const outlineColor = isHexColor(cleanMerged.outlineColor) ? cleanMerged.outlineColor : isHexColor(cleanMerged.lineColor) ? cleanMerged.lineColor : DEFAULT_OUTLINE_COLOR;
   const fillColor = isFillColor(cleanMerged.fillColor) ? cleanMerged.fillColor : TRANSPARENT_FILL_COLOR;
   const fillRegions = normalizeFillRegions(cleanMerged.fillRegions);
+  const cellPaints = normalizeCellPaints(cleanMerged.cellPaints);
+  const graphShapes = normalizeGraphShapes(cleanMerged.graphShapes);
   const imageLineThickness = clampImageLineThickness(cleanMerged.imageLineThickness);
   const sourceFillThreshold = clampSourceFillThreshold(cleanMerged.sourceFillThreshold);
   const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(cleanMerged.sourceFillMinStrokePixels);
@@ -272,6 +383,9 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     : isGraphLineLayer(cleanMerged.gridLineLayer)
       ? cleanMerged.gridLineLayer
       : DEFAULT_GRAPH_LINE_LAYER;
+  const showNumbers = typeof cleanMerged.showNumbers === "boolean" ? cleanMerged.showNumbers : true;
+  const gridNumberPlacement = cleanMerged.gridNumberPlacement === "outside" ? "outside" : "inside";
+  const showPageBreaks = typeof cleanMerged.showPageBreaks === "boolean" ? cleanMerged.showPageBreaks : true;
   void legacyCellSizeInches;
   const cellSizeCm = DEFAULT_CELL_SIZE_CM;
   const measurementUnit = isMeasurementUnit(cleanMerged.measurementUnit) ? cleanMerged.measurementUnit : defaultGraphSettings.measurementUnit;
@@ -311,12 +425,17 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     outlineColor,
     fillColor,
     fillRegions,
+    cellPaints,
+    graphShapes,
     imageLineThickness,
     sourceFillThreshold,
     sourceFillMinStrokePixels,
     strokeGapClosePixels,
     gridLineColor,
     gridLineLayer,
+    showNumbers,
+    gridNumberPlacement,
+    showPageBreaks,
     imageWidth,
     imageHeight,
     sourceImages,
@@ -375,8 +494,13 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
           sourceFillMinStrokePixels: baseSettings.sourceFillMinStrokePixels,
           strokeGapClosePixels: baseSettings.strokeGapClosePixels,
           x: defaultSourceX(baseSettings.graphWidth, baseSettings.imageWidth),
+          y: 0,
           topPadding: 0,
           bottomPadding: 0,
+          locked: false,
+          rotationDegrees: 0 as const,
+          flipX: false,
+          flipY: false,
         },
       ]
     : [];

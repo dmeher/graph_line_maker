@@ -114,19 +114,23 @@ export async function POST(request: NextRequest) {
       }),
     );
 
-    const sourceHeight = files.length > 1 ? roundCells(settings.graphHeight / files.length) : settings.imageHeight;
-    const sourceImages = uploadedImages.map((image) => ({
+    const sourceImages = uploadedImages.map((image, index) => ({
       ...image,
       width: settings.imageWidth,
-      height: sourceHeight,
+      height: settings.imageHeight,
       measurementUnit: settings.measurementUnit,
       imageLineThickness: settings.imageLineThickness,
       sourceFillThreshold: settings.sourceFillThreshold,
       sourceFillMinStrokePixels: settings.sourceFillMinStrokePixels,
       strokeGapClosePixels: settings.strokeGapClosePixels,
       x: defaultSourceX(settings.graphWidth, settings.imageWidth),
+      y: index * settings.imageHeight,
       topPadding: 0,
       bottomPadding: 0,
+      locked: false,
+      rotationDegrees: 0 as const,
+      flipX: false,
+      flipY: false,
     }));
     const settingsWithSources = normalizeGraphSettings({
       ...settings,

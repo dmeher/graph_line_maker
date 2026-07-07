@@ -1,7 +1,9 @@
 import { hexToRgb, rgbToHex } from "@/lib/canvas/color";
+import { createGridNumberLabels } from "@/lib/canvas/grid-numbering";
 import { maskFromImageData } from "@/lib/canvas/ink-mask";
 import { isPdfSource, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
 import { createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
+import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import {
   DEFAULT_GRID_LINE_COLOR,
   GRAPH_MAJOR_CELL_PIXELS,
@@ -444,6 +446,153 @@ function drawGraphPaperGrid(canvas: HTMLCanvasElement, settings: GraphSettings) 
   context.restore();
 }
 
+function drawGridNumbers(canvas: HTMLCanvasElement, settings: GraphSettings) {
+  if (!settings.showNumbers || settings.gridNumberPlacement === "outside") return;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas is not available.");
+  const ctx = context;
+
+  const dimensions = graphDimensions(settings);
+  const labels = createGridNumberLabels(
+    dimensions.graphWidth,
+    dimensions.graphHeight,
+    dimensions.cellWidth,
+    dimensions.cellHeight,
+  );
+  const gridColor = hexToRgb(settings.gridLineColor || DEFAULT_GRID_LINE_COLOR);
+  const fontSize = Math.max(8, Math.min(13, Math.round(dimensions.cellWidth * 0.28)));
+  ctx.save();
+  ctx.font = `600 ${fontSize}px Arial, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.82)";
+  ctx.fillStyle = `rgba(${gridColor.r}, ${gridColor.g}, ${gridColor.b}, 0.78)`;
+
+  function drawLabel(label: { value: number; x: number; y: number }) {
+    const text = String(label.value);
+    ctx.strokeText(text, label.x, label.y);
+    ctx.fillText(text, label.x, label.y);
+  }
+
+  labels.top.forEach(drawLabel);
+  labels.bottom.forEach(drawLabel);
+  labels.left.forEach(drawLabel);
+  labels.right.forEach(drawLabel);
+  ctx.restore();
+}
+
+function drawManualGraphArtwork(canvas: HTMLCanvasElement, settings: GraphSettings) {
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas is not available.");
+  const cellWidth = GRAPH_MAJOR_CELL_PIXELS;
+  const cellHeight = GRAPH_MAJOR_CELL_PIXELS;
+
+  context.save();
+  context.lineJoin = "round";
+  context.lineCap = "round";
+
+  for (const paint of settings.cellPaints ?? []) {
+    const left = paint.x * cellWidth;
+    const top = paint.y * cellHeight;
+    const width = Math.max(1, paint.width * cellWidth);
+    const height = Math.max(1, paint.height * cellHeight);
+    const right = width / 2;
+    const bottom = height / 2;
+    const rotation = normalizeRotationDegrees(paint.rotationDegrees);
+
+    context.save();
+    context.translate(left + width / 2, top + height / 2);
+    context.rotate((rotation * Math.PI) / 180);
+    context.scale(paint.flipX ? -1 : 1, paint.flipY ? -1 : 1);
+
+    if (!isTransparentFillColor(paint.fillColor)) {
+      context.fillStyle = paint.fillColor;
+      context.fillRect(-right, -bottom, width, height);
+    }
+
+    if (paint.sides.length) {
+      context.beginPath();
+      context.strokeStyle = paint.lineColor || settings.outlineColor || settings.lineColor;
+      context.lineWidth = Math.max(1, Math.min(24, paint.lineWidth || 3));
+      if (paint.sides.includes("top")) {
+        context.moveTo(-right, -bottom);
+        context.lineTo(right, -bottom);
+      }
+      if (paint.sides.includes("right")) {
+        context.moveTo(right, -bottom);
+        context.lineTo(right, bottom);
+      }
+      if (paint.sides.includes("bottom")) {
+        context.moveTo(right, bottom);
+        context.lineTo(-right, bottom);
+      }
+      if (paint.sides.includes("left")) {
+        context.moveTo(-right, bottom);
+        context.lineTo(-right, -bottom);
+      }
+      context.stroke();
+    }
+    context.restore();
+  }
+
+  for (const shape of settings.graphShapes ?? []) {
+    const x = shape.x * cellWidth;
+    const y = shape.y * cellHeight;
+    const width = shape.width * cellWidth;
+    const height = shape.height * cellHeight;
+    const strokeWidth = Math.max(1, Math.min(24, shape.strokeWidth || 3));
+    context.strokeStyle = shape.strokeColor || settings.outlineColor || settings.lineColor;
+    context.fillStyle = isTransparentFillColor(shape.fillColor) ? "rgba(0,0,0,0)" : shape.fillColor;
+    context.lineWidth = strokeWidth;
+    context.save();
+    context.translate(x + width / 2, y + height / 2);
+    context.rotate((normalizeRotationDegrees(shape.rotationDegrees) * Math.PI) / 180);
+    context.scale(shape.flipX ? -1 : 1, shape.flipY ? -1 : 1);
+    context.translate(-(x + width / 2), -(y + height / 2));
+    context.beginPath();
+
+    if (shape.kind === "line" || shape.kind === "arrow") {
+      context.moveTo(x, y);
+      context.lineTo(x + width, y + height);
+      context.stroke();
+      if (shape.kind === "arrow") {
+        const angle = Math.atan2(height, width);
+        const headLength = Math.max(10, strokeWidth * 4);
+        context.beginPath();
+        context.moveTo(x + width, y + height);
+        context.lineTo(x + width - headLength * Math.cos(angle - Math.PI / 6), y + height - headLength * Math.sin(angle - Math.PI / 6));
+        context.moveTo(x + width, y + height);
+        context.lineTo(x + width - headLength * Math.cos(angle + Math.PI / 6), y + height - headLength * Math.sin(angle + Math.PI / 6));
+        context.stroke();
+      }
+      context.restore();
+      continue;
+    }
+
+    const left = Math.min(x, x + width);
+    const top = Math.min(y, y + height);
+    const rectWidth = Math.max(1, Math.abs(width));
+    const rectHeight = Math.max(1, Math.abs(height));
+    const squareSize = Math.max(rectWidth, rectHeight);
+    const drawWidth = shape.kind === "square" || shape.kind === "circle" ? squareSize : rectWidth;
+    const drawHeight = shape.kind === "square" || shape.kind === "circle" ? squareSize : rectHeight;
+    const centerX = left + drawWidth / 2;
+    const centerY = top + drawHeight / 2;
+
+    if (shape.kind === "circle" || shape.kind === "oval") {
+      context.ellipse(centerX, centerY, drawWidth / 2, drawHeight / 2, 0, 0, Math.PI * 2);
+    } else {
+      context.rect(left, top, drawWidth, drawHeight);
+    }
+    if (!isTransparentFillColor(shape.fillColor)) context.fill();
+    context.stroke();
+    context.restore();
+  }
+
+  context.restore();
+}
+
 export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSettings, options: { sourceIsFitted?: boolean } = {}) {
   const fitted = options.sourceIsFitted ? sourceCanvas : fitCanvas(sourceCanvas, settings);
   const fittedContext = fitted.getContext("2d", { willReadFrequently: true });
@@ -471,9 +620,11 @@ export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSe
   outputContext.fillRect(0, 0, output.width, output.height);
   if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
   drawFillRegions(outputContext, fillRegionMap, regions, output.width, output.height, settings, 0.8);
-  if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
   const imageLineThickness = clampImageLineThickness(settings.imageLineThickness);
   drawMaskLayer(outputContext, outlineMask, output.width, output.height, settings.outlineColor || settings.lineColor, 255, 0.12 * imageLineThickness);
+  if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
+  drawManualGraphArtwork(output, settings);
+  drawGridNumbers(output, settings);
 
   const outlineHex = rgbToHex(hexToRgb(settings.outlineColor || settings.lineColor));
   const outlineCount = outlineMask.reduce((sum, value) => sum + value, 0);
@@ -588,8 +739,10 @@ export function pixelateLayeredImages(layers: FittedImageLayer[], settings: Grap
   outputContext.fillRect(0, 0, output.width, output.height);
   if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
   drawFillRegions(outputContext, fillRegionMap, visibleRegions, output.width, output.height, settings, 0.8);
-  if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
   drawMaskLayer(outputContext, outlineMask, output.width, output.height, settings.outlineColor || settings.lineColor, 255, 0.12 * maxLineThickness);
+  if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
+  drawManualGraphArtwork(output, settings);
+  drawGridNumbers(output, settings);
 
   const outlineHex = rgbToHex(hexToRgb(settings.outlineColor || settings.lineColor));
   const outlineCount = outlineMask.reduce((sum, value) => sum + value, 0);

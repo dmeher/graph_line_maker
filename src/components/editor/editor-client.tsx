@@ -1,10 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import Link from "next/link";
 import {
   ArrowDown,
+  ArrowLeftRight,
   ArrowUp,
+  ArrowUpDown,
   Check,
   ChevronDown,
   ChevronRight,
@@ -16,14 +18,20 @@ import {
   FileText,
   ImageDown,
   ImageIcon,
+  FlipHorizontal,
+  FlipVertical,
+  Lock,
   Loader2,
   Maximize2,
   Pipette,
   Printer,
   RefreshCw,
+  RotateCcw,
+  RotateCw,
   Save,
   Settings2,
   Trash2,
+  Unlock,
   Upload,
   X,
   ZoomIn,
@@ -37,8 +45,10 @@ import { saveProjectState } from "@/app/(app)/projects/actions";
 import { ManualCropper } from "@/components/projects/manual-cropper";
 import { cropCanvasToFile, fullCrop, type CropPixels } from "@/lib/canvas/crop";
 import { exportCanvasAsPDF, exportCanvasAsPNG, exportSettingsAsJSON, printCanvas } from "@/lib/canvas/exports";
+import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
 import { findContentBounds, loadImageToCanvas, pixelateLayeredImagesWithWorker, resizeImage, type FillRegion } from "@/lib/canvas/processor";
 import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
+import { ROTATION_STEP_DEGREES, sourceLayouts, snapCellToGrid, sourceProcessingCacheKey, stackEndCell, normalizeRotationDegrees, type SourceLayout } from "@/lib/editor/source-layout";
 import {
   DEFAULT_CELL_SIZE_CM,
   DEFAULT_GRAPH_LINE_LAYER,
@@ -87,13 +97,15 @@ import {
   isPrintVerticalAlignment,
   isTransparentFillColor,
 } from "@/lib/graph-paper";
-import type { GraphSettings, GraphSourceImage, PaletteColor, Project } from "@/lib/types";
+import type { GraphCellLineSide, GraphCellPaint, GraphSettings, GraphShapeDrawing, GraphShapeKind, GraphSourceImage, PaletteColor, Project } from "@/lib/types";
 import { bytesToSize } from "@/lib/utils/format";
 
 type MobileTab = "source" | "canvas" | "controls";
 type Notice = { tone: "ok" | "error" | "info"; text: string };
-type CollapsibleKey = "parameters" | "outline" | "fill" | "selectedFill" | "graphLines";
+type CollapsibleKey = "parameters" | "drawing" | "outline" | "fill" | "selectedFill" | "graphLines";
 type FloatingPalette = { regionId: string; x: number; y: number } | null;
+type DrawingTool = "image" | "cell" | "shape";
+type DrawingLayerKey = `cell:${string}` | `shape:${string}`;
 type SourceStatus = {
   ready: boolean;
   previewUrl: string | null;
@@ -103,8 +115,16 @@ type SettingsHistory = {
   undo: GraphSettings[];
   redo: GraphSettings[];
 };
+type PanelResizeState = {
+  side: "left" | "right";
+  pointerId: number;
+  startClientX: number;
+  startWidth: number;
+};
+const SOURCE_RESIZE_HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
+type SourceResizeHandle = (typeof SOURCE_RESIZE_HANDLES)[number];
 type DragState = {
-  kind: "canvas" | "source";
+  kind: "viewport" | "source" | "resize-source" | "cell-paint" | "shape-draw";
   pointerId: number;
   startClientX: number;
   startClientY: number;
@@ -112,13 +132,23 @@ type DragState = {
   startOffsetY: number;
   sourceId?: string;
   startSourceX?: number;
+  startSourceY?: number;
+  startSourceBaseY?: number;
   startSourceTopPadding?: number;
+  startSourceWidth?: number;
+  startSourceHeight?: number;
+  resizeCorner?: SourceResizeHandle;
+  startScrollLeft?: number;
+  startScrollTop?: number;
   canvasWidth: number;
   canvasHeight: number;
   rectWidth: number;
   rectHeight: number;
   moved: boolean;
   historyRecorded: boolean;
+  startGraphX?: number;
+  startGraphY?: number;
+  shapeId?: string;
 };
 type UploadedSourceImage = {
   id: string;
@@ -132,6 +162,24 @@ type SourceImagesUploadResponse = {
 
 const MAX_CANVAS_DIMENSION = 24000;
 const MAX_SETTINGS_HISTORY = 80;
+const MIN_SIDE_PANEL_WIDTH = 280;
+const MAX_SIDE_PANEL_WIDTH = 560;
+const CELL_LINE_SIDE_KEYS: GraphCellLineSide[] = ["top", "right", "bottom", "left"];
+const GRAPH_SHAPE_KIND_KEYS: GraphShapeKind[] = ["square", "rectangle", "circle", "oval", "line", "arrow"];
+const CELL_LINE_SIDE_LABELS: Record<GraphCellLineSide, string> = {
+  top: "Top",
+  right: "Right",
+  bottom: "Bottom",
+  left: "Left",
+};
+const GRAPH_SHAPE_KIND_LABELS: Record<GraphShapeKind, string> = {
+  square: "Square",
+  rectangle: "Rectangle",
+  circle: "Circle",
+  oval: "Oval",
+  line: "Line",
+  arrow: "Arrow",
+};
 const PRINT_ORIENTATION_LABELS: Record<GraphSettings["printOrientation"], string> = {
   auto: "Auto",
   portrait: "Portrait",
@@ -150,6 +198,10 @@ const PRINT_VERTICAL_ALIGNMENT_LABELS: Record<GraphSettings["printVerticalAlignm
 const GRAPH_LINE_LAYER_LABELS: Record<GraphSettings["gridLineLayer"], string> = {
   front: "Front",
   back: "Back",
+};
+const GRID_NUMBER_PLACEMENT_LABELS: Record<GraphSettings["gridNumberPlacement"], string> = {
+  inside: "Inside",
+  outside: "Outside",
 };
 const MEASUREMENT_UNIT_LABELS: Record<GraphSettings["measurementUnit"], string> = {
   cm: "CM",
@@ -190,6 +242,11 @@ function clampImageOffset(value: number) {
   return Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(value)));
 }
 
+function clampSidePanelWidth(value: number) {
+  const viewportLimit = typeof window === "undefined" ? MAX_SIDE_PANEL_WIDTH : Math.max(MIN_SIDE_PANEL_WIDTH, Math.min(MAX_SIDE_PANEL_WIDTH, window.innerWidth * 0.36));
+  return Math.round(Math.max(MIN_SIDE_PANEL_WIDTH, Math.min(viewportLimit, value)));
+}
+
 function roundCm(value: number) {
   return Math.round(value * 1000) / 1000;
 }
@@ -215,7 +272,13 @@ function cmToUnit(value: number, unit: GraphSettings["measurementUnit"]) {
 }
 
 function defaultSourceX(graphWidth: number, width: number) {
-  return roundCells(Math.max(0, (graphWidth - width) / 2));
+  return roundCells((graphWidth - width) / 2);
+}
+
+function clampFreeCellCoordinate(value: unknown, fallback: number) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return roundCells(fallback);
+  return roundCells(Math.max(-1000, Math.min(1000, numeric)));
 }
 
 function clampImageCells(value: unknown, maxCells: number, fallback: number) {
@@ -234,10 +297,16 @@ function clampPaddingCells(value: unknown, maxCells: number, fallback: number) {
 }
 
 function clampSourceX(value: unknown, graphWidth: number, width: number) {
-  const maxX = Math.max(0, graphWidth - width);
+  void graphWidth;
+  void width;
+  return clampFreeCellCoordinate(value, defaultSourceX(graphWidth, width));
+}
+
+function clampSourceSizeCells(value: unknown, fallback: number) {
   const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return defaultSourceX(graphWidth, width);
-  return roundCells(Math.max(0, Math.min(maxX, numeric)));
+  const safeFallback = Math.max(0.01, Math.min(1000, fallback));
+  if (!Number.isFinite(numeric)) return roundCells(safeFallback);
+  return roundCells(Math.max(0.01, Math.min(1000, numeric)));
 }
 
 function normalizeSourceImagesForEditor(
@@ -252,6 +321,7 @@ function normalizeSourceImagesForEditor(
   >,
 ) {
   if (!Array.isArray(sourceImages)) return [];
+  let legacyY = 0;
   return sourceImages
     .flatMap((source, index) => {
       if (!source || typeof source !== "object") return [];
@@ -259,8 +329,8 @@ function normalizeSourceImagesForEditor(
       const name = typeof source.name === "string" && source.name.trim() ? source.name.trim() : `Source ${index + 1}`;
       const path = typeof source.path === "string" && source.path.trim() ? source.path : null;
       const url = typeof source.url === "string" && source.url.trim() ? source.url : null;
-      const width = clampImageCells(source.width, graphWidth, fallbackWidth);
-      const height = clampImageCells(source.height, graphHeight, fallbackHeight);
+      const width = clampSourceSizeCells(source.width, fallbackWidth);
+      const height = clampSourceSizeCells(source.height, fallbackHeight);
       const measurementUnit = isMeasurementUnit(source.measurementUnit) ? source.measurementUnit : defaults.measurementUnit;
       const imageLineThickness = clampImageLineThickness(source.imageLineThickness ?? defaults.imageLineThickness);
       const sourceFillThreshold = clampSourceFillThreshold(source.sourceFillThreshold ?? defaults.sourceFillThreshold);
@@ -269,6 +339,12 @@ function normalizeSourceImagesForEditor(
       const x = clampSourceX(source.x, graphWidth, width);
       const topPadding = clampPaddingCells(source.topPadding, graphHeight, 0);
       const bottomPadding = clampPaddingCells(source.bottomPadding, graphHeight, 0);
+      const y = clampFreeCellCoordinate(source.y, legacyY + topPadding);
+      legacyY = y + height + bottomPadding;
+      const locked = Boolean(source.locked);
+      const rotationDegrees = normalizeRotationDegrees(source.rotationDegrees);
+      const flipX = Boolean(source.flipX);
+      const flipY = Boolean(source.flipY);
       return [
         {
           id,
@@ -283,8 +359,13 @@ function normalizeSourceImagesForEditor(
           sourceFillMinStrokePixels,
           strokeGapClosePixels,
           x,
+          y,
           topPadding,
           bottomPadding,
+          locked,
+          rotationDegrees,
+          flipX,
+          flipY,
         },
       ];
     })
@@ -296,6 +377,68 @@ function normalizeFillRegions(value: GraphSettings["fillRegions"] | undefined) {
   return Object.fromEntries(Object.entries(value).filter(([regionId, color]) => /^\d+$/.test(regionId) && isFillColor(color)));
 }
 
+function normalizeCellPaints(value: GraphSettings["cellPaints"] | undefined): GraphSettings["cellPaints"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((paint, index) => {
+      if (!paint || typeof paint !== "object") return [];
+      const x = roundCells(Math.max(0, Number(paint.x) || 0));
+      const y = roundCells(Math.max(0, Number(paint.y) || 0));
+      const width = Math.max(0.01, Math.min(1000, Number(paint.width) || 1));
+      const height = Math.max(0.01, Math.min(1000, Number(paint.height) || 1));
+      const sides = Array.from(new Set((Array.isArray(paint.sides) ? paint.sides : []).filter((side): side is GraphCellLineSide => CELL_LINE_SIDE_KEYS.includes(side as GraphCellLineSide))));
+      const lineColor = isHexColor(paint.lineColor) ? paint.lineColor : DEFAULT_OUTLINE_COLOR;
+      const fillColor = isFillColor(paint.fillColor) ? paint.fillColor : TRANSPARENT_FILL_COLOR;
+      const lineWidth = Math.max(1, Math.min(24, Math.round(Number(paint.lineWidth) || 3)));
+      if (!sides.length && fillColor === TRANSPARENT_FILL_COLOR) return [];
+      return [{
+        id: paint.id || `cell-paint-${index + 1}`,
+        name: paint.name || `Cell paint ${index + 1}`,
+        x,
+        y,
+        width,
+        height,
+        sides,
+        lineColor,
+        fillColor,
+        lineWidth,
+        locked: Boolean(paint.locked),
+        rotationDegrees: normalizeRotationDegrees(paint.rotationDegrees),
+        flipX: Boolean(paint.flipX),
+        flipY: Boolean(paint.flipY),
+      }];
+    })
+    .slice(0, 2000);
+}
+
+function normalizeGraphShapes(value: GraphSettings["graphShapes"] | undefined): GraphSettings["graphShapes"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((shape, index) => {
+      if (!shape || typeof shape !== "object") return [];
+      const kind = GRAPH_SHAPE_KIND_KEYS.includes(shape.kind as GraphShapeKind) ? shape.kind : "rectangle";
+      return [
+        {
+          id: shape.id || `shape-${index + 1}`,
+          name: shape.name || `${kind[0].toUpperCase()}${kind.slice(1)} ${index + 1}`,
+          kind,
+          x: clampFreeCellCoordinate(shape.x, 0),
+          y: clampFreeCellCoordinate(shape.y, 0),
+          width: clampFreeCellCoordinate(shape.width, kind === "line" || kind === "arrow" ? 2 : 1),
+          height: clampFreeCellCoordinate(shape.height, kind === "line" || kind === "arrow" ? 0 : 1),
+          strokeColor: isHexColor(shape.strokeColor) ? shape.strokeColor : DEFAULT_OUTLINE_COLOR,
+          fillColor: isFillColor(shape.fillColor) ? shape.fillColor : TRANSPARENT_FILL_COLOR,
+          strokeWidth: Math.max(1, Math.min(24, Math.round(Number(shape.strokeWidth) || 3))),
+          locked: Boolean(shape.locked),
+          rotationDegrees: normalizeRotationDegrees(shape.rotationDegrees),
+          flipX: Boolean(shape.flipX),
+          flipY: Boolean(shape.flipY),
+        },
+      ];
+    })
+    .slice(0, 500);
+}
+
 function NumberField({
   label,
   value,
@@ -304,6 +447,7 @@ function NumberField({
   step = 1,
   allowDecimalInput = false,
   wholeStep = false,
+  disabled = false,
   onChange,
 }: {
   label: string;
@@ -313,6 +457,7 @@ function NumberField({
   step?: number;
   allowDecimalInput?: boolean;
   wholeStep?: boolean;
+  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   const [draftValue, setDraftValue] = useState(() => String(value));
@@ -364,6 +509,7 @@ function NumberField({
         inputMode={allowDecimalInput || step < 1 ? "decimal" : "numeric"}
         step={step}
         value={draftValue}
+        disabled={disabled}
         onFocus={() => setIsFocused(true)}
         onBlur={() => {
           setIsFocused(false);
@@ -373,12 +519,13 @@ function NumberField({
           const nextValue = event.target.value;
           const parsed = parseDraft(nextValue);
           setDraftValue(nextValue);
-          if (parsed === null || parsed < min || parsed > max) return;
-          const normalized = normalizeSteppedValue(parsed);
+          if (parsed === null) return;
+          const clamped = Math.max(min, Math.min(max, parsed));
+          const normalized = normalizeSteppedValue(clamped);
           if (normalized !== parsed) setDraftValue(String(normalized));
           onChange(normalized);
         }}
-        className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+        className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-400"
       />
     </label>
   );
@@ -444,11 +591,13 @@ function ColorPresetField({
 
 function CollapsibleSection({
   title,
+  summary,
   open,
   onToggle,
   children,
 }: {
   title: string;
+  summary?: ReactNode;
   open: boolean;
   onToggle: () => void;
   children: ReactNode;
@@ -461,12 +610,73 @@ function CollapsibleSection({
         className="flex w-full items-center justify-between gap-3 text-left text-sm font-semibold text-slate-950"
         aria-expanded={open}
       >
-        <span>{title}</span>
-        {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+        <span className="min-w-0 truncate">{title}</span>
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          {!open ? summary : null}
+          {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+        </span>
       </button>
       {open ? <div className="mt-3 space-y-3">{children}</div> : null}
     </section>
   );
+}
+
+function ColorSummary({ value }: { value: string }) {
+  const transparent = isTransparentFillColor(value);
+  return (
+    <span
+      className={`h-5 w-5 rounded-sm border border-slate-200 ${
+        transparent
+          ? "bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:8px_8px] bg-[position:0_0,0_4px,4px_-4px,-4px_0]"
+          : ""
+      }`}
+      style={transparent ? undefined : { backgroundColor: value }}
+      aria-hidden="true"
+    />
+  );
+}
+
+function sourceResizeHandleClass(handle: SourceResizeHandle, locked: boolean | undefined) {
+  const base = `pointer-events-auto absolute grid place-items-center text-slate-700 transition-colors ${
+    locked ? "opacity-40" : "hover:text-slate-950"
+  }`;
+  switch (handle) {
+    case "n":
+      return `${base} -top-3 left-8 right-8 h-6 cursor-ns-resize`;
+    case "s":
+      return `${base} -bottom-3 left-8 right-8 h-6 cursor-ns-resize`;
+    case "w":
+      return `${base} -left-3 bottom-8 top-8 w-6 cursor-ew-resize`;
+    case "e":
+      return `${base} -right-3 bottom-8 top-8 w-6 cursor-ew-resize`;
+    case "nw":
+      return `${base} -left-3 -top-3 h-6 w-6 cursor-nwse-resize`;
+    case "ne":
+      return `${base} -right-3 -top-3 h-6 w-6 cursor-nesw-resize`;
+    case "sw":
+      return `${base} -bottom-3 -left-3 h-6 w-6 cursor-nesw-resize`;
+    case "se":
+      return `${base} -bottom-3 -right-3 h-6 w-6 cursor-nwse-resize`;
+  }
+  return base;
+}
+
+function sourceResizeHandleIconClass(handle: SourceResizeHandle) {
+  const base = "grid h-5 w-5 place-items-center rounded border border-slate-400 bg-white/95 shadow-sm";
+  if (handle === "n" || handle === "s") return `${base} h-5 w-7`;
+  if (handle === "e" || handle === "w") return `${base} h-7 w-5`;
+  return base;
+}
+
+function sourceResizeHandleIcon(handle: SourceResizeHandle) {
+  if (handle === "n" || handle === "s") return <ArrowUpDown size={13} aria-hidden="true" />;
+  if (handle === "e" || handle === "w") return <ArrowLeftRight size={13} aria-hidden="true" />;
+  return <Maximize2 size={12} aria-hidden="true" />;
+}
+
+function cellNumberLabels(cellCount: number) {
+  const count = Math.max(1, Math.round(cellCount || 1));
+  return Array.from({ length: count }, (_, index) => index + 1);
 }
 
 function deriveGraphSettings(settings: GraphSettings): GraphSettings {
@@ -482,6 +692,9 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const strokeGapClosePixels = clampStrokeGapClosePixels(settings.strokeGapClosePixels ?? DEFAULT_STROKE_GAP_CLOSE_PIXELS);
   const gridLineColor = isHexColor(settings.gridLineColor) && settings.gridLineColor.toLowerCase() !== "#cbd5e1" ? settings.gridLineColor : DEFAULT_GRID_LINE_COLOR;
   const gridLineLayer = isGraphLineLayer(settings.gridLineLayer) ? settings.gridLineLayer : DEFAULT_GRAPH_LINE_LAYER;
+  const showNumbers = typeof settings.showNumbers === "boolean" ? settings.showNumbers : true;
+  const gridNumberPlacement = settings.gridNumberPlacement === "outside" ? "outside" : "inside";
+  const showPageBreaks = typeof settings.showPageBreaks === "boolean" ? settings.showPageBreaks : true;
   const cellSizeCm = DEFAULT_CELL_SIZE_CM;
   const measurementUnit = isMeasurementUnit(settings.measurementUnit) ? settings.measurementUnit : "in";
   const printPaperSize = isPrintPaperSize(settings.printPaperSize) ? settings.printPaperSize : DEFAULT_PRINT_PAPER_SIZE;
@@ -505,6 +718,8 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const outputWidth = graphWidth * GRAPH_MAJOR_CELL_PIXELS;
   const outputHeight = graphHeight * GRAPH_MAJOR_CELL_PIXELS;
   const fillRegions = normalizeFillRegions(settings.fillRegions);
+  const cellPaints = normalizeCellPaints(settings.cellPaints);
+  const graphShapes = normalizeGraphShapes(settings.graphShapes);
 
   return {
     ...settings,
@@ -526,12 +741,17 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
     outlineColor,
     fillColor,
     fillRegions,
+    cellPaints,
+    graphShapes,
     imageLineThickness,
     sourceFillThreshold,
     sourceFillMinStrokePixels,
     strokeGapClosePixels,
     gridLineColor,
     gridLineLayer,
+    showNumbers,
+    gridNumberPlacement,
+    showPageBreaks,
     imageWidth,
     imageHeight,
     sourceImages,
@@ -560,12 +780,17 @@ function editorDefaultGraphSettings(current: GraphSettings): GraphSettings {
     outlineColor: DEFAULT_OUTLINE_COLOR,
     fillColor: TRANSPARENT_FILL_COLOR,
     fillRegions: {},
+    cellPaints: [],
+    graphShapes: [],
     imageLineThickness: DEFAULT_IMAGE_LINE_THICKNESS,
     sourceFillThreshold: DEFAULT_SOURCE_FILL_THRESHOLD,
     sourceFillMinStrokePixels: DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
     strokeGapClosePixels: DEFAULT_STROKE_GAP_CLOSE_PIXELS,
     gridLineColor: DEFAULT_GRID_LINE_COLOR,
     gridLineLayer: DEFAULT_GRAPH_LINE_LAYER,
+    showNumbers: true,
+    gridNumberPlacement: "inside",
+    showPageBreaks: true,
     imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
     imageHeight: DEFAULT_IMAGE_HEIGHT_CELLS,
     imagePadding: 0,
@@ -575,7 +800,7 @@ function editorDefaultGraphSettings(current: GraphSettings): GraphSettings {
 }
 
 function areSettingsEqual(a: GraphSettings, b: GraphSettings) {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return a === b;
 }
 
 function isTextEditingTarget(target: EventTarget | null) {
@@ -621,26 +846,15 @@ function initialEditorSettings(project: Project) {
         sourceFillMinStrokePixels: settings.sourceFillMinStrokePixels,
         strokeGapClosePixels: settings.strokeGapClosePixels,
         x: defaultSourceX(settings.graphWidth, settings.imageWidth),
+        y: 0,
         topPadding: 0,
         bottomPadding: 0,
+        locked: false,
+        rotationDegrees: 0 as const,
+        flipX: false,
+        flipY: false,
       },
     ],
-  });
-}
-
-function sourceLayouts(sources: GraphSourceImage[]) {
-  let yCells = 0;
-  return sources.map((source) => {
-    yCells += source.topPadding;
-    const layout = {
-      source,
-      x: source.x,
-      y: yCells,
-      width: source.width,
-      height: source.height,
-    };
-    yCells += source.height + source.bottomPadding;
-    return layout;
   });
 }
 
@@ -657,7 +871,7 @@ function sourceSettings(settings: GraphSettings, source: GraphSourceImage) {
 }
 
 function composeSourceLayerCanvas(
-  layout: ReturnType<typeof sourceLayouts>[number],
+  layout: SourceLayout,
   sourceCanvases: Map<string, HTMLCanvasElement>,
   settings: GraphSettings,
 ) {
@@ -680,7 +894,27 @@ function composeSourceLayerCanvas(
   const drawY = Math.round(layout.y * GRAPH_MAJOR_CELL_PIXELS + settings.imageOffsetY);
   const drawWidth = Math.round(layout.width * GRAPH_MAJOR_CELL_PIXELS);
   const drawHeight = Math.round(layout.height * GRAPH_MAJOR_CELL_PIXELS);
-  context.drawImage(sourceCanvas, bounds.x, bounds.y, bounds.width, bounds.height, drawX, drawY, drawWidth, drawHeight);
+  const rotation = normalizeRotationDegrees(layout.source.rotationDegrees);
+  const rotatedSideways = rotation === 90 || rotation === 270;
+  const fittedWidth = rotatedSideways ? drawHeight : drawWidth;
+  const fittedHeight = rotatedSideways ? drawWidth : drawHeight;
+
+  context.save();
+  context.translate(drawX + drawWidth / 2, drawY + drawHeight / 2);
+  context.rotate((rotation * Math.PI) / 180);
+  context.scale(layout.source.flipX ? -1 : 1, layout.source.flipY ? -1 : 1);
+  context.drawImage(
+    sourceCanvas,
+    bounds.x,
+    bounds.y,
+    bounds.width,
+    bounds.height,
+    -fittedWidth / 2,
+    -fittedHeight / 2,
+    fittedWidth,
+    fittedHeight,
+  );
+  context.restore();
 
   return output;
 }
@@ -702,14 +936,32 @@ export function EditorClient({ project }: { project: Project }) {
   const [zoom, setZoom] = useState(1);
   const [showOriginal, setShowOriginal] = useState(false);
   const [isDraggingGraph, setIsDraggingGraph] = useState(false);
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+  const [selectedDrawingLayerId, setSelectedDrawingLayerId] = useState<DrawingLayerKey | null>(null);
+  const [expandedSourceIds, setExpandedSourceIds] = useState<Record<string, boolean>>({});
+  const [expandedDrawingLayerIds, setExpandedDrawingLayerIds] = useState<Record<string, boolean>>({});
+  const [previewCanvasSize, setPreviewCanvasSize] = useState({ width: 1, height: 1 });
+  const [drawingTool, setDrawingTool] = useState<DrawingTool>("image");
+  const [cellPaintSides, setCellPaintSides] = useState<GraphCellLineSide[]>(CELL_LINE_SIDE_KEYS);
+  const [cellPaintFillEnabled, setCellPaintFillEnabled] = useState(false);
+  const [cellPaintLineEnabled, setCellPaintLineEnabled] = useState(true);
+  const [shapeKind, setShapeKind] = useState<GraphShapeKind>("rectangle");
+  const [canvasViewportGuide, setCanvasViewportGuide] = useState({ left: 0, top: 0, width: 1, height: 1 });
+  const [leftPanelWidth, setLeftPanelWidth] = useState(320);
+  const [rightPanelWidth, setRightPanelWidth] = useState(360);
+  const [resizingPanelSide, setResizingPanelSide] = useState<"left" | "right" | null>(null);
+  const [uploadingSources, setUploadingSources] = useState(false);
+  const [replacingSourceId, setReplacingSourceId] = useState<string | null>(null);
+  const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [sourcePanelCollapsed, setSourcePanelCollapsed] = useState(false);
   const [settingsPanelCollapsed, setSettingsPanelCollapsed] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Record<CollapsibleKey, boolean>>({
     parameters: false,
-    outline: false,
-    fill: false,
-    selectedFill: false,
-    graphLines: false,
+    drawing: false,
+    outline: true,
+    fill: true,
+    selectedFill: true,
+    graphLines: true,
   });
   const [floatingPalette, setFloatingPalette] = useState<FloatingPalette>(null);
   const [copiedFillColor, setCopiedFillColor] = useState<string | null>(null);
@@ -720,16 +972,24 @@ export function EditorClient({ project }: { project: Project }) {
   const sourceCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const processedCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const overviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvasScrollRef = useRef<HTMLDivElement | null>(null);
+  const graphStageRef = useRef<HTMLDivElement | null>(null);
   const uploadedSourceObjectUrlsRef = useRef<string[]>([]);
   const sourcePreviewObjectUrlsRef = useRef<Map<string, string>>(new Map());
+  const sourceLayerCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const dragStateRef = useRef<DragState | null>(null);
+  const panelResizeStateRef = useRef<PanelResizeState | null>(null);
   const fillRegionMapRef = useRef<Uint16Array | null>(null);
   const settingsHistoryRef = useRef<SettingsHistory>({ undo: [], redo: [] });
+  const spacePressedRef = useRef(false);
 
   const filename = useMemo(() => slug(title), [title]);
   const primarySource = settings.sourceImages[0] ?? null;
   const sourceName = primarySource?.name ?? "Source image";
   const sourcePreviewUrl = primarySource ? sourceStatus[primarySource.id]?.previewUrl ?? primarySource.url ?? null : null;
+  const selectedSource = selectedSourceId ? settings.sourceImages.find((source) => source.id === selectedSourceId) ?? null : null;
+  const selectedSourceLayout = selectedSourceId ? sourceLayouts(settings.sourceImages).find((layout) => layout.source.id === selectedSourceId) ?? null : null;
   const sourceLoadKey = useMemo(
     () => settings.sourceImages.map((source) => `${source.id}:${source.name}:${source.url ?? source.path ?? ""}`).join("|"),
     [settings.sourceImages],
@@ -867,7 +1127,70 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   function sourceRightPadding(source: GraphSourceImage) {
-    return roundCells(Math.max(0, settings.graphWidth - source.width - source.x));
+    return roundCells(settings.graphWidth - source.width - source.x);
+  }
+
+  function sourceBottomPadding(source: GraphSourceImage) {
+    return roundCells(settings.graphHeight - source.height - source.y);
+  }
+
+  function drawingLayerKey(type: "cell" | "shape", id: string): DrawingLayerKey {
+    return `${type}:${id}` as DrawingLayerKey;
+  }
+
+  function drawingRightPadding(layer: { x: number; width: number }) {
+    return roundCells(settings.graphWidth - layer.width - layer.x);
+  }
+
+  function drawingBottomPadding(layer: { y: number; height: number }) {
+    return roundCells(settings.graphHeight - layer.height - layer.y);
+  }
+
+  function updateCellPaint(cellId: string, patch: Partial<GraphCellPaint>) {
+    setSettingsWithHistory((current) => ({
+      ...current,
+      cellPaints: current.cellPaints.map((cell) => {
+        if (cell.id !== cellId || cell.locked) return cell;
+        const width = patch.width === undefined ? cell.width : clampSourceSizeCells(patch.width, cell.width);
+        const height = patch.height === undefined ? cell.height : clampSourceSizeCells(patch.height, cell.height);
+        return {
+          ...cell,
+          ...patch,
+          x: patch.x === undefined ? cell.x : roundCells(Math.max(0, patch.x)),
+          y: patch.y === undefined ? cell.y : roundCells(Math.max(0, patch.y)),
+          width,
+          height,
+          sides: patch.sides === undefined ? cell.sides : Array.from(new Set(patch.sides.filter((side) => CELL_LINE_SIDE_KEYS.includes(side)))),
+          lineColor: patch.lineColor && isHexColor(patch.lineColor) ? patch.lineColor : cell.lineColor,
+          fillColor: patch.fillColor && isFillColor(patch.fillColor) ? patch.fillColor : cell.fillColor,
+          lineWidth: patch.lineWidth === undefined ? cell.lineWidth : Math.max(1, Math.min(24, Math.round(patch.lineWidth))),
+          rotationDegrees: patch.rotationDegrees === undefined ? cell.rotationDegrees : normalizeRotationDegrees(patch.rotationDegrees),
+        };
+      }),
+    }));
+  }
+
+  function updateGraphShape(shapeId: string, patch: Partial<GraphShapeDrawing>) {
+    setSettingsWithHistory((current) => ({
+      ...current,
+      graphShapes: current.graphShapes.map((shape) => {
+        if (shape.id !== shapeId || shape.locked) return shape;
+        const kind = patch.kind && GRAPH_SHAPE_KIND_KEYS.includes(patch.kind) ? patch.kind : shape.kind;
+        return {
+          ...shape,
+          ...patch,
+          kind,
+          x: patch.x === undefined ? shape.x : clampFreeCellCoordinate(patch.x, shape.x),
+          y: patch.y === undefined ? shape.y : clampFreeCellCoordinate(patch.y, shape.y),
+          width: patch.width === undefined ? shape.width : clampSourceSizeCells(patch.width, shape.width),
+          height: patch.height === undefined ? shape.height : clampSourceSizeCells(patch.height, shape.height),
+          strokeColor: patch.strokeColor && isHexColor(patch.strokeColor) ? patch.strokeColor : shape.strokeColor,
+          fillColor: patch.fillColor && isFillColor(patch.fillColor) ? patch.fillColor : shape.fillColor,
+          strokeWidth: patch.strokeWidth === undefined ? shape.strokeWidth : Math.max(1, Math.min(24, Math.round(patch.strokeWidth))),
+          rotationDegrees: patch.rotationDegrees === undefined ? shape.rotationDegrees : normalizeRotationDegrees(patch.rotationDegrees),
+        };
+      }),
+    }));
   }
 
   function updateSourceImagePhysicalWidthCm(sourceId: string, value: number) {
@@ -895,8 +1218,13 @@ export function EditorClient({ project }: { project: Project }) {
         | "sourceFillMinStrokePixels"
         | "strokeGapClosePixels"
         | "x"
+        | "y"
         | "topPadding"
         | "bottomPadding"
+        | "locked"
+        | "rotationDegrees"
+        | "flipX"
+        | "flipY"
       >
     >,
   ) {
@@ -905,13 +1233,30 @@ export function EditorClient({ project }: { project: Project }) {
       fillRegions: {},
       sourceImages: current.sourceImages.map((source) => {
         if (source.id !== sourceId) return source;
-        const width = patch.width ?? source.width;
+        const changesLockedGeometry =
+          patch.width !== undefined ||
+          patch.height !== undefined ||
+          patch.x !== undefined ||
+          patch.y !== undefined ||
+          patch.topPadding !== undefined ||
+          patch.bottomPadding !== undefined ||
+          patch.rotationDegrees !== undefined ||
+          patch.flipX !== undefined ||
+          patch.flipY !== undefined;
+        if (source.locked && changesLockedGeometry) return source;
+        const width = patch.width === undefined ? source.width : clampSourceSizeCells(patch.width, source.width);
+        const height = patch.height === undefined ? source.height : clampSourceSizeCells(patch.height, source.height);
         const topPadding = patch.topPadding === undefined ? source.topPadding : clampPaddingCells(patch.topPadding, current.graphHeight, source.topPadding);
         const bottomPadding = patch.bottomPadding === undefined ? source.bottomPadding : clampPaddingCells(patch.bottomPadding, current.graphHeight, source.bottomPadding);
+        const y = patch.y === undefined ? source.y : clampFreeCellCoordinate(patch.y, source.y);
         return {
           ...source,
           ...patch,
-          x: patch.x ?? (patch.width ? clampSourceX(source.x, current.graphWidth, width) : source.x),
+          width,
+          height,
+          rotationDegrees: patch.rotationDegrees === undefined ? source.rotationDegrees : normalizeRotationDegrees(patch.rotationDegrees),
+          x: patch.x === undefined ? (patch.width ? clampSourceX(source.x, current.graphWidth, width) : source.x) : clampSourceX(patch.x, current.graphWidth, width),
+          y,
           topPadding,
           bottomPadding,
         };
@@ -919,11 +1264,53 @@ export function EditorClient({ project }: { project: Project }) {
     }));
   }
 
+  const nudgeSelectedSource = useCallback((deltaX: number, deltaY: number) => {
+    const sourceId = selectedSourceId;
+    const drawingId = selectedDrawingLayerId;
+    if (!sourceId && !drawingId) return;
+    setSettingsWithHistory((current) => {
+      if (!sourceId && drawingId) {
+        const [type, id] = drawingId.split(":") as ["cell" | "shape", string];
+        const nudgeCells = roundCells(0.1 / Math.max(0.05, current.cellSizeCm));
+        if (type === "cell") {
+          const cell = current.cellPaints.find((item) => item.id === id);
+          if (!cell || cell.locked) return current;
+          return {
+            ...current,
+            cellPaints: current.cellPaints.map((item) =>
+              item.id === id ? { ...item, x: roundCells(Math.max(0, item.x + deltaX * nudgeCells)), y: roundCells(Math.max(0, item.y + deltaY * nudgeCells)) } : item,
+            ),
+          };
+        }
+        const shape = current.graphShapes.find((item) => item.id === id);
+        if (!shape || shape.locked) return current;
+        return {
+          ...current,
+          graphShapes: current.graphShapes.map((item) =>
+            item.id === id ? { ...item, x: clampFreeCellCoordinate(item.x + deltaX * nudgeCells, item.x), y: clampFreeCellCoordinate(item.y + deltaY * nudgeCells, item.y) } : item,
+          ),
+        };
+      }
+      const source = current.sourceImages.find((image) => image.id === sourceId);
+      if (!source || source.locked) return current;
+      const nudgeCells = roundCells(0.1 / Math.max(0.05, current.cellSizeCm));
+      const x = clampSourceX(source.x + deltaX * nudgeCells, current.graphWidth, source.width);
+      const y = clampFreeCellCoordinate(source.y + deltaY * nudgeCells, source.y);
+      if (source.x === x && source.y === y) return current;
+      return {
+        ...current,
+        fillRegions: {},
+        sourceImages: current.sourceImages.map((image) => (image.id === sourceId ? { ...image, x, y } : image)),
+      };
+    });
+  }, [selectedDrawingLayerId, selectedSourceId, setSettingsWithHistory]);
+
   function moveSourceImage(sourceId: string, direction: -1 | 1) {
     setSettingsWithHistory((current) => {
       const index = current.sourceImages.findIndex((source) => source.id === sourceId);
       const nextIndex = index + direction;
       if (index < 0 || nextIndex < 0 || nextIndex >= current.sourceImages.length) return current;
+      if (current.sourceImages[index]?.locked || current.sourceImages[nextIndex]?.locked) return current;
       const sourceImages = [...current.sourceImages];
       const [source] = sourceImages.splice(index, 1);
       sourceImages.splice(nextIndex, 0, source);
@@ -931,12 +1318,148 @@ export function EditorClient({ project }: { project: Project }) {
     });
   }
 
-  function removeSourceImage(sourceId: string) {
+  function removeSourceImage(sourceId: string, options: { skipConfirm?: boolean } = {}) {
+    const source = settingsRef.current.sourceImages.find((image) => image.id === sourceId);
+    if (!source || source.locked) return;
+    if (!options.skipConfirm && !window.confirm(`Delete "${source.name}" from this project?`)) return;
+    setDeletingSourceId(sourceId);
     setSettingsWithHistory((current) => ({
       ...current,
       fillRegions: {},
-      sourceImages: current.sourceImages.filter((source) => source.id !== sourceId),
+      sourceImages: current.sourceImages.filter((source) => source.id !== sourceId || source.locked),
     }));
+    window.setTimeout(() => setDeletingSourceId((current) => (current === sourceId ? null : current)), 180);
+  }
+
+  function toggleSourceLock(sourceId: string) {
+    setSettingsWithHistory((current) => ({
+      ...current,
+      sourceImages: current.sourceImages.map((source) => (source.id === sourceId ? { ...source, locked: !source.locked } : source)),
+    }));
+  }
+
+  function rotateSourceImage(sourceId: string, direction: -1 | 1) {
+    const source = settingsRef.current.sourceImages.find((image) => image.id === sourceId);
+    if (!source || source.locked) return;
+    updateSourceImage(sourceId, { rotationDegrees: normalizeRotationDegrees(source.rotationDegrees + direction * ROTATION_STEP_DEGREES) });
+  }
+
+  function flipSourceImage(sourceId: string, axis: "x" | "y") {
+    const source = settingsRef.current.sourceImages.find((image) => image.id === sourceId);
+    if (!source || source.locked) return;
+    updateSourceImage(sourceId, axis === "x" ? { flipX: !source.flipX } : { flipY: !source.flipY });
+  }
+
+  function toggleDrawingLayerCard(key: DrawingLayerKey) {
+    setExpandedDrawingLayerIds((current) => ({ ...current, [key]: !current[key] }));
+  }
+
+  function toggleDrawingLock(type: "cell" | "shape", id: string) {
+    setSettingsWithHistory((current) => ({
+      ...current,
+      cellPaints: type === "cell" ? current.cellPaints.map((cell) => (cell.id === id ? { ...cell, locked: !cell.locked } : cell)) : current.cellPaints,
+      graphShapes: type === "shape" ? current.graphShapes.map((shape) => (shape.id === id ? { ...shape, locked: !shape.locked } : shape)) : current.graphShapes,
+    }));
+  }
+
+  function removeDrawingLayer(type: "cell" | "shape", id: string, name: string, locked: boolean) {
+    if (locked) return;
+    if (!window.confirm(`Delete "${name}" from this project?`)) return;
+    setSettingsWithHistory((current) => ({
+      ...current,
+      cellPaints: type === "cell" ? current.cellPaints.filter((cell) => cell.id !== id) : current.cellPaints,
+      graphShapes: type === "shape" ? current.graphShapes.filter((shape) => shape.id !== id) : current.graphShapes,
+    }));
+    setSelectedDrawingLayerId((current) => (current === drawingLayerKey(type, id) ? null : current));
+  }
+
+  function moveDrawingLayer(type: "cell" | "shape", id: string, direction: -1 | 1) {
+    setSettingsWithHistory((current) => {
+      const list = type === "cell" ? current.cellPaints : current.graphShapes;
+      const index = list.findIndex((item) => item.id === id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= list.length) return current;
+      if (list[index]?.locked || list[nextIndex]?.locked) return current;
+      const nextList = [...list];
+      const [item] = nextList.splice(index, 1);
+      nextList.splice(nextIndex, 0, item);
+      return type === "cell" ? { ...current, cellPaints: nextList as GraphCellPaint[] } : { ...current, graphShapes: nextList as GraphShapeDrawing[] };
+    });
+  }
+
+  function rotateDrawingLayer(type: "cell" | "shape", id: string, direction: -1 | 1) {
+    if (type === "cell") {
+      const cell = settingsRef.current.cellPaints.find((item) => item.id === id);
+      if (!cell || cell.locked) return;
+      updateCellPaint(id, { rotationDegrees: normalizeRotationDegrees(cell.rotationDegrees + direction * ROTATION_STEP_DEGREES) });
+      return;
+    }
+    const shape = settingsRef.current.graphShapes.find((item) => item.id === id);
+    if (!shape || shape.locked) return;
+    updateGraphShape(id, { rotationDegrees: normalizeRotationDegrees(shape.rotationDegrees + direction * ROTATION_STEP_DEGREES) });
+  }
+
+  function flipDrawingLayer(type: "cell" | "shape", id: string, axis: "x" | "y") {
+    if (type === "cell") {
+      const cell = settingsRef.current.cellPaints.find((item) => item.id === id);
+      if (!cell || cell.locked) return;
+      updateCellPaint(id, axis === "x" ? { flipX: !cell.flipX } : { flipY: !cell.flipY });
+      return;
+    }
+    const shape = settingsRef.current.graphShapes.find((item) => item.id === id);
+    if (!shape || shape.locked) return;
+    updateGraphShape(id, axis === "x" ? { flipX: !shape.flipX } : { flipY: !shape.flipY });
+  }
+
+  function toggleCellPaintSide(side: GraphCellLineSide) {
+    setCellPaintSides((current) => (current.includes(side) ? current.filter((item) => item !== side) : [...current, side]));
+  }
+
+  function setAllCellPaintSides() {
+    setCellPaintSides(CELL_LINE_SIDE_KEYS);
+    setCellPaintLineEnabled(true);
+  }
+
+  function clearCellPaints() {
+    setSettingsWithHistory((current) => ({ ...current, cellPaints: [] }));
+  }
+
+  function clearGraphShapes() {
+    setSettingsWithHistory((current) => ({ ...current, graphShapes: [] }));
+  }
+
+  function toggleSourceCard(sourceId: string) {
+    setExpandedSourceIds((current) => ({ ...current, [sourceId]: !current[sourceId] }));
+  }
+
+  function beginPanelResize(event: ReactPointerEvent<HTMLElement>, side: "left" | "right") {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    panelResizeStateRef.current = {
+      side,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startWidth: side === "left" ? leftPanelWidth : rightPanelWidth,
+    };
+    setResizingPanelSide(side);
+  }
+
+  function resizePanel(event: ReactPointerEvent<HTMLElement>) {
+    const resizeState = panelResizeStateRef.current;
+    if (!resizeState || resizeState.pointerId !== event.pointerId) return;
+    const delta = event.clientX - resizeState.startClientX;
+    const width = resizeState.side === "left" ? resizeState.startWidth + delta : resizeState.startWidth - delta;
+    if (resizeState.side === "left") setLeftPanelWidth(clampSidePanelWidth(width));
+    else setRightPanelWidth(clampSidePanelWidth(width));
+  }
+
+  function endPanelResize(event: ReactPointerEvent<HTMLElement>) {
+    const resizeState = panelResizeStateRef.current;
+    if (!resizeState || resizeState.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    panelResizeStateRef.current = null;
+    setResizingPanelSide(null);
   }
 
   function updateFillRegionColor(regionId: string, color: string) {
@@ -977,6 +1500,160 @@ export function EditorClient({ project }: { project: Project }) {
     }
 
     return null;
+  }
+
+  function graphPointAtPointer(event: ReactPointerEvent<HTMLElement>) {
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || !canvas.width || !canvas.height) return null;
+    const canvasX = ((event.clientX - rect.left) * canvas.width) / rect.width;
+    const canvasY = ((event.clientY - rect.top) * canvas.height) / rect.height;
+    return {
+      x: canvasX / GRAPH_MAJOR_CELL_PIXELS,
+      y: canvasY / GRAPH_MAJOR_CELL_PIXELS,
+    };
+  }
+
+  function drawingId(prefix: string) {
+    return `${prefix}-${typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Date.now().toString(36)}`;
+  }
+
+  function paintCellAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
+    const point = graphPointAtPointer(event);
+    if (!point) return;
+    const x = Math.floor(point.x);
+    const y = Math.floor(point.y);
+    if (x < 0 || y < 0 || x >= settingsRef.current.graphWidth || y >= settingsRef.current.graphHeight) return;
+    const sides = cellPaintLineEnabled ? cellPaintSides : [];
+    const fillColor = cellPaintFillEnabled ? settingsRef.current.fillColor : TRANSPARENT_FILL_COLOR;
+    if (!sides.length && fillColor === TRANSPARENT_FILL_COLOR) return;
+    const currentPaints = settingsRef.current.cellPaints;
+    const existingBefore = currentPaints.find((paint) => paint.x === x && paint.y === y);
+    const selectedPaintId = existingBefore?.id ?? drawingId("cell");
+    setSelectedSourceId(null);
+    setSelectedDrawingLayerId(drawingLayerKey("cell", selectedPaintId));
+
+    setSettings((current) => {
+      const existingIndex = current.cellPaints.findIndex((paint) => paint.x === x && paint.y === y);
+      const existing = existingIndex >= 0 ? current.cellPaints[existingIndex] : null;
+      const nextPaint = {
+        id: existing?.id ?? selectedPaintId,
+        name: existing?.name ?? `Cell paint ${current.cellPaints.length + 1}`,
+        x,
+        y,
+        width: existing?.width ?? 1,
+        height: existing?.height ?? 1,
+        sides: Array.from(new Set([...(existing?.sides ?? []), ...sides])),
+        lineColor: settingsRef.current.outlineColor,
+        fillColor: fillColor === TRANSPARENT_FILL_COLOR ? existing?.fillColor ?? TRANSPARENT_FILL_COLOR : fillColor,
+        lineWidth: Math.max(1, Math.round(settingsRef.current.imageLineThickness || 3)),
+        locked: existing?.locked ?? false,
+        rotationDegrees: existing?.rotationDegrees ?? 0,
+        flipX: existing?.flipX ?? false,
+        flipY: existing?.flipY ?? false,
+      };
+      if (
+        existing &&
+        existing.fillColor === nextPaint.fillColor &&
+        existing.lineColor === nextPaint.lineColor &&
+        existing.lineWidth === nextPaint.lineWidth &&
+        existing.sides.length === nextPaint.sides.length &&
+        existing.sides.every((side) => nextPaint.sides.includes(side))
+      ) {
+        return current;
+      }
+      if (!dragState.historyRecorded) {
+        pushUndoSettings(current);
+        dragState.historyRecorded = true;
+      }
+      const cellPaints = [...current.cellPaints];
+      if (existingIndex >= 0) cellPaints[existingIndex] = nextPaint;
+      else cellPaints.push(nextPaint);
+      const next = deriveGraphSettings({ ...current, cellPaints });
+      settingsRef.current = next;
+      return next;
+    });
+  }
+
+  function startShapeAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
+    const point = graphPointAtPointer(event);
+    if (!point) return;
+    const id = drawingId("shape");
+    const cellX = Math.max(0, Math.floor(point.x));
+    const cellY = Math.max(0, Math.floor(point.y));
+    dragState.shapeId = id;
+    dragState.startGraphX = cellX;
+    dragState.startGraphY = cellY;
+    setSelectedSourceId(null);
+    setSelectedDrawingLayerId(drawingLayerKey("shape", id));
+    setSettings((current) => {
+      if (!dragState.historyRecorded) {
+        pushUndoSettings(current);
+        dragState.historyRecorded = true;
+      }
+      const next = deriveGraphSettings({
+        ...current,
+        graphShapes: [
+          ...current.graphShapes,
+          {
+            id,
+            name: `${GRAPH_SHAPE_KIND_LABELS[shapeKind]} ${current.graphShapes.length + 1}`,
+            kind: shapeKind,
+            x: cellX,
+            y: cellY,
+            width: 1,
+            height: 1,
+            strokeColor: current.outlineColor,
+            fillColor: cellPaintFillEnabled ? current.fillColor : TRANSPARENT_FILL_COLOR,
+            strokeWidth: Math.max(1, Math.round(current.imageLineThickness || 3)),
+            locked: false,
+            rotationDegrees: 0,
+            flipX: false,
+            flipY: false,
+          },
+        ],
+      });
+      settingsRef.current = next;
+      return next;
+    });
+  }
+
+  function updateShapeAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
+    if (!dragState.shapeId || dragState.startGraphX === undefined || dragState.startGraphY === undefined) return;
+    const point = graphPointAtPointer(event);
+    if (!point) return;
+    const startX = dragState.startGraphX;
+    const startY = dragState.startGraphY;
+    const rawWidth = point.x - startX;
+    const rawHeight = point.y - startY;
+    setSettings((current) => {
+      const shape = current.graphShapes.find((item) => item.id === dragState.shapeId);
+      if (!shape) return current;
+      let x = startX;
+      let y = startY;
+      let width = rawWidth;
+      let height = rawHeight;
+      if (shape.kind !== "line" && shape.kind !== "arrow") {
+        x = Math.min(startX, point.x);
+        y = Math.min(startY, point.y);
+        width = Math.max(0.1, Math.abs(rawWidth));
+        height = Math.max(0.1, Math.abs(rawHeight));
+        if (shape.kind === "square" || shape.kind === "circle") {
+          const size = Math.max(width, height);
+          width = size;
+          height = size;
+        }
+      }
+      const next = deriveGraphSettings({
+        ...current,
+        graphShapes: current.graphShapes.map((item) =>
+          item.id === dragState.shapeId ? { ...item, x, y, width, height } : item,
+        ),
+      });
+      settingsRef.current = next;
+      return next;
+    });
   }
 
   function fillRegionIdAtPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
@@ -1033,13 +1710,50 @@ export function EditorClient({ project }: { project: Project }) {
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
+    const viewportDrag = event.ctrlKey || spacePressedRef.current;
+    if (!viewportDrag && drawingTool !== "image") {
+      event.preventDefault();
+      setSelectedSourceId(null);
+      setFloatingPalette(null);
+      canvas.setPointerCapture(event.pointerId);
+      const dragState: DragState = {
+        kind: drawingTool === "cell" ? "cell-paint" : "shape-draw",
+        pointerId: event.pointerId,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        startOffsetX: settings.imageOffsetX,
+        startOffsetY: settings.imageOffsetY,
+        startScrollLeft: canvasScrollRef.current?.scrollLeft ?? 0,
+        startScrollTop: canvasScrollRef.current?.scrollTop ?? 0,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        rectWidth: rect.width,
+        rectHeight: rect.height,
+        moved: false,
+        historyRecorded: false,
+      };
+      dragStateRef.current = dragState;
+      if (drawingTool === "cell") paintCellAtPointer(event, dragState);
+      else startShapeAtPointer(event, dragState);
+      setIsDraggingGraph(true);
+      return;
+    }
+
     const sourceHit = sourceLayoutAtPointer(event);
-    if (!sourceHit) selectFillRegionFromPointer(event, true);
+    if (sourceHit) {
+      setSelectedSourceId(sourceHit.source.id);
+      setSelectedDrawingLayerId(null);
+    }
+    if (!sourceHit && !viewportDrag) {
+      setSelectedSourceId(null);
+      setSelectedDrawingLayerId(null);
+      selectFillRegionFromPointer(event, true);
+    }
 
     event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
     dragStateRef.current = {
-      kind: sourceHit ? "source" : "canvas",
+      kind: viewportDrag || !sourceHit ? "viewport" : "source",
       pointerId: event.pointerId,
       startClientX: event.clientX,
       startClientY: event.clientY,
@@ -1047,7 +1761,11 @@ export function EditorClient({ project }: { project: Project }) {
       startOffsetY: settings.imageOffsetY,
       sourceId: sourceHit?.source.id,
       startSourceX: sourceHit?.source.x,
-      startSourceTopPadding: sourceHit?.source.topPadding,
+      startSourceY: sourceHit?.y,
+      startSourceWidth: sourceHit?.source.width,
+      startSourceHeight: sourceHit?.source.height,
+      startScrollLeft: canvasScrollRef.current?.scrollLeft ?? 0,
+      startScrollTop: canvasScrollRef.current?.scrollTop ?? 0,
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
       rectWidth: rect.width,
@@ -1058,10 +1776,48 @@ export function EditorClient({ project }: { project: Project }) {
     setIsDraggingGraph(true);
   }
 
-  function dragGraph(event: ReactPointerEvent<HTMLCanvasElement>) {
+  function beginSourceResize(event: ReactPointerEvent<HTMLElement>, layout: SourceLayout, resizeCorner: SourceResizeHandle) {
+    if (showOriginal || event.button !== 0 || layout.source.locked) return;
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedSourceId(layout.source.id);
+    setSelectedDrawingLayerId(null);
+    dragStateRef.current = {
+      kind: "resize-source",
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startOffsetX: settings.imageOffsetX,
+      startOffsetY: settings.imageOffsetY,
+      sourceId: layout.source.id,
+      startSourceX: layout.x,
+      startSourceY: layout.y,
+      startSourceWidth: layout.width,
+      startSourceHeight: layout.height,
+      resizeCorner,
+      startScrollLeft: canvasScrollRef.current?.scrollLeft ?? 0,
+      startScrollTop: canvasScrollRef.current?.scrollTop ?? 0,
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      rectWidth: rect.width,
+      rectHeight: rect.height,
+      moved: false,
+      historyRecorded: false,
+    };
+    setIsDraggingGraph(true);
+  }
+
+  function dragGraph(event: ReactPointerEvent<HTMLElement>) {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== event.pointerId) {
-      if (!showOriginal && event.buttons === 1) selectFillRegionFromPointer(event);
+      if (!showOriginal && event.buttons === 1 && event.currentTarget === previewCanvasRef.current) {
+        selectFillRegionFromPointer(event as ReactPointerEvent<HTMLCanvasElement>);
+      }
       return;
     }
     event.preventDefault();
@@ -1072,15 +1828,63 @@ export function EditorClient({ project }: { project: Project }) {
     const imageOffsetY = clampImageOffset(dragState.startOffsetY + deltaY);
     dragState.moved = dragState.moved || Math.abs(event.clientX - dragState.startClientX) > 3 || Math.abs(event.clientY - dragState.startClientY) > 3;
 
-    if (dragState.kind === "source" && dragState.sourceId && dragState.startSourceX !== undefined && dragState.startSourceTopPadding !== undefined) {
+    if (dragState.kind === "viewport") {
+      const scroller = canvasScrollRef.current;
+      if (scroller) {
+        scroller.scrollLeft = (dragState.startScrollLeft ?? 0) - (event.clientX - dragState.startClientX);
+        scroller.scrollTop = (dragState.startScrollTop ?? 0) - (event.clientY - dragState.startClientY);
+      }
+      return;
+    }
+
+    if (dragState.kind === "cell-paint") {
+      paintCellAtPointer(event, dragState);
+      return;
+    }
+
+    if (dragState.kind === "shape-draw") {
+      updateShapeAtPointer(event, dragState);
+      return;
+    }
+
+    if (
+      dragState.kind === "resize-source" &&
+      dragState.sourceId &&
+      dragState.startSourceX !== undefined &&
+      dragState.startSourceY !== undefined &&
+      dragState.startSourceWidth !== undefined &&
+      dragState.startSourceHeight !== undefined
+    ) {
       const deltaCellsX = deltaX / GRAPH_MAJOR_CELL_PIXELS;
       const deltaCellsY = deltaY / GRAPH_MAJOR_CELL_PIXELS;
       setSettings((current) => {
         const source = current.sourceImages.find((image) => image.id === dragState.sourceId);
-        if (!source) return current;
-        const x = clampSourceX(dragState.startSourceX! + deltaCellsX, current.graphWidth, source.width);
-        const topPadding = clampPaddingCells(dragState.startSourceTopPadding! + deltaCellsY, current.graphHeight, source.topPadding);
-        if (source.x === x && source.topPadding === topPadding) return current;
+        if (!source || source.locked) return current;
+
+        let left = dragState.startSourceX!;
+        let right = dragState.startSourceX! + dragState.startSourceWidth!;
+        let top = dragState.startSourceY!;
+        let bottom = dragState.startSourceY! + dragState.startSourceHeight!;
+        if (dragState.resizeCorner?.includes("w")) left = snapCellToGrid(left + deltaCellsX);
+        if (dragState.resizeCorner?.includes("e")) right = snapCellToGrid(right + deltaCellsX);
+        if (dragState.resizeCorner?.includes("n")) top = snapCellToGrid(top + deltaCellsY);
+        if (dragState.resizeCorner?.includes("s")) bottom = snapCellToGrid(bottom + deltaCellsY);
+
+        const minSize = 0.25;
+        if (right - left < minSize) {
+          if (dragState.resizeCorner?.includes("w")) left = right - minSize;
+          else right = left + minSize;
+        }
+        if (bottom - top < minSize) {
+          if (dragState.resizeCorner?.includes("n")) top = bottom - minSize;
+          else bottom = top + minSize;
+        }
+
+        const width = clampSourceSizeCells(right - left, source.width);
+        const height = clampSourceSizeCells(bottom - top, source.height);
+        const x = clampSourceX(left, current.graphWidth, width);
+        const y = clampFreeCellCoordinate(top, source.y);
+        if (source.x === x && source.y === y && source.width === width && source.height === height) return current;
         if (!dragState.historyRecorded) {
           pushUndoSettings(current);
           dragState.historyRecorded = true;
@@ -1088,7 +1892,9 @@ export function EditorClient({ project }: { project: Project }) {
         const next = deriveGraphSettings({
           ...current,
           fillRegions: {},
-          sourceImages: current.sourceImages.map((image) => (image.id === dragState.sourceId ? { ...image, x, topPadding } : image)),
+          sourceImages: current.sourceImages.map((image) =>
+            image.id === dragState.sourceId ? { ...image, x, y, width, height } : image,
+          ),
         });
         settingsRef.current = next;
         return next;
@@ -1096,23 +1902,35 @@ export function EditorClient({ project }: { project: Project }) {
       return;
     }
 
-    setSettings((current) => {
-      if (current.imageOffsetX === imageOffsetX && current.imageOffsetY === imageOffsetY) return current;
-      if (!dragState.historyRecorded) {
-        pushUndoSettings(current);
-        dragState.historyRecorded = true;
-      }
-      const next = deriveGraphSettings({
-        ...current,
-        imageOffsetX,
-        imageOffsetY,
+    if (dragState.kind === "source" && dragState.sourceId && dragState.startSourceX !== undefined && dragState.startSourceY !== undefined) {
+      const deltaCellsX = deltaX / GRAPH_MAJOR_CELL_PIXELS;
+      const deltaCellsY = deltaY / GRAPH_MAJOR_CELL_PIXELS;
+      setSettings((current) => {
+        const source = current.sourceImages.find((image) => image.id === dragState.sourceId);
+        if (!source || source.locked) return current;
+        const x = clampSourceX(snapCellToGrid(dragState.startSourceX! + deltaCellsX), current.graphWidth, source.width);
+        const y = clampFreeCellCoordinate(snapCellToGrid((dragState.startSourceY ?? 0) + deltaCellsY), source.y);
+        if (source.x === x && source.y === y) return current;
+        if (!dragState.historyRecorded) {
+          pushUndoSettings(current);
+          dragState.historyRecorded = true;
+        }
+        const next = deriveGraphSettings({
+          ...current,
+          fillRegions: {},
+          sourceImages: current.sourceImages.map((image) => (image.id === dragState.sourceId ? { ...image, x, y } : image)),
+        });
+        settingsRef.current = next;
+        return next;
       });
-      settingsRef.current = next;
-      return next;
-    });
+      return;
+    }
+
+    void imageOffsetX;
+    void imageOffsetY;
   }
 
-  function endGraphDrag(event: ReactPointerEvent<HTMLCanvasElement>) {
+  function endGraphDrag(event: ReactPointerEvent<HTMLElement>) {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== event.pointerId) return;
     const shouldSelectFill = dragState.kind === "source" && !dragState.moved && !showOriginal;
@@ -1122,7 +1940,9 @@ export function EditorClient({ project }: { project: Project }) {
     }
     dragStateRef.current = null;
     setIsDraggingGraph(false);
-    if (shouldSelectFill) selectFillRegionFromPointer(event, true);
+    if (shouldSelectFill && event.currentTarget === previewCanvasRef.current) {
+      selectFillRegionFromPointer(event as ReactPointerEvent<HTMLCanvasElement>, true);
+    }
   }
 
   useEffect(() => {
@@ -1131,6 +1951,8 @@ export function EditorClient({ project }: { project: Project }) {
 
   const drawPreview = useCallback((canvas: HTMLCanvasElement) => {
     const preview = previewCanvasRef.current;
+    const overview = overviewCanvasRef.current;
+    setPreviewCanvasSize({ width: canvas.width, height: canvas.height });
     if (!preview) return;
     preview.width = canvas.width;
     preview.height = canvas.height;
@@ -1138,6 +1960,15 @@ export function EditorClient({ project }: { project: Project }) {
     if (!context) return;
     context.clearRect(0, 0, preview.width, preview.height);
     context.drawImage(canvas, 0, 0);
+    if (overview) {
+      overview.width = canvas.width;
+      overview.height = canvas.height;
+      const overviewContext = overview.getContext("2d");
+      if (overviewContext) {
+        overviewContext.clearRect(0, 0, overview.width, overview.height);
+        overviewContext.drawImage(canvas, 0, 0);
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -1153,6 +1984,7 @@ export function EditorClient({ project }: { project: Project }) {
     fillRegionMapRef.current = null;
     sourceCanvasRef.current = null;
     sourceCanvasesRef.current = new Map();
+    sourceLayerCacheRef.current = new Map();
     processedCanvasRef.current = null;
     setProcessing(false);
     sourcePreviewObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
@@ -1161,8 +1993,11 @@ export function EditorClient({ project }: { project: Project }) {
 
     if (!sources.length) {
       const preview = previewCanvasRef.current;
+      const overview = overviewCanvasRef.current;
       const context = preview?.getContext("2d");
+      const overviewContext = overview?.getContext("2d");
       if (preview && context) context.clearRect(0, 0, preview.width, preview.height);
+      if (overview && overviewContext) overviewContext.clearRect(0, 0, overview.width, overview.height);
       setNotice(null);
       return () => {
         cancelled = true;
@@ -1228,7 +2063,7 @@ export function EditorClient({ project }: { project: Project }) {
   }, [sourceLoadKey]);
 
   useEffect(() => {
-    if (!sourceReady || !settings.sourceImages.length) return;
+    if (settings.sourceImages.length && !sourceReady) return;
     let cancelled = false;
     setProcessing(true);
 
@@ -1236,10 +2071,24 @@ export function EditorClient({ project }: { project: Project }) {
       const layouts = sourceLayouts(settings.sourceImages);
       const layers = layouts
         .filter((layout) => sourceCanvasesRef.current.has(layout.source.id))
-        .map((layout) => ({
-          canvas: composeSourceLayerCanvas(layout, sourceCanvasesRef.current, settings),
-          settings: sourceSettings(settings, layout.source),
-        }));
+        .map((layout) => {
+          const cacheKey = `${settings.graphWidth}x${settings.graphHeight}:${settings.imageOffsetX},${settings.imageOffsetY}:${sourceProcessingCacheKey(layout.source, layout)}`;
+          let canvas = sourceLayerCacheRef.current.get(cacheKey);
+          if (!canvas) {
+            canvas = composeSourceLayerCanvas(layout, sourceCanvasesRef.current, settings);
+            sourceLayerCacheRef.current.set(cacheKey, canvas);
+          }
+          return {
+            canvas,
+            settings: sourceSettings(settings, layout.source),
+          };
+        });
+      if (sourceLayerCacheRef.current.size > settings.sourceImages.length * 4) {
+        const liveKeys = new Set(layouts.map((layout) => `${settings.graphWidth}x${settings.graphHeight}:${settings.imageOffsetX},${settings.imageOffsetY}:${sourceProcessingCacheKey(layout.source, layout)}`));
+        for (const key of sourceLayerCacheRef.current.keys()) {
+          if (!liveKeys.has(key)) sourceLayerCacheRef.current.delete(key);
+        }
+      }
       const renderSettings = deriveGraphSettings({
         ...settings,
         imageWidth: settings.graphWidth,
@@ -1263,7 +2112,7 @@ export function EditorClient({ project }: { project: Project }) {
             setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to process image." });
           }
         });
-    }, 220);
+    }, 60);
 
     return () => {
       cancelled = true;
@@ -1273,6 +2122,21 @@ export function EditorClient({ project }: { project: Project }) {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (event.code === "Space" && !isFormControlTarget(event.target)) {
+        spacePressedRef.current = true;
+      }
+      const arrowNudge: Record<string, [number, number]> = {
+        ArrowLeft: [-1, 0],
+        ArrowRight: [1, 0],
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1],
+      };
+      const nudge = arrowNudge[event.key];
+      if (nudge && (selectedSourceId || selectedDrawingLayerId) && !isFormControlTarget(event.target)) {
+        event.preventDefault();
+        nudgeSelectedSource(nudge[0], nudge[1]);
+        return;
+      }
       if (!(event.ctrlKey || event.metaKey)) return;
       const key = event.key.toLowerCase();
       if ((key === "z" || key === "y") && !isTextEditingTarget(event.target)) {
@@ -1288,9 +2152,17 @@ export function EditorClient({ project }: { project: Project }) {
       setNotice({ tone: "info", text: "Fill color copied." });
     }
 
+    function handleKeyUp(event: KeyboardEvent) {
+      if (event.code === "Space") spacePressedRef.current = false;
+    }
+
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [restoreSettingsHistory, selectedFillRegion, selectedFillRegionColor]);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [nudgeSelectedSource, restoreSettingsHistory, selectedDrawingLayerId, selectedFillRegion, selectedFillRegionColor, selectedSourceId]);
 
   useEffect(() => {
     return () => {
@@ -1303,6 +2175,10 @@ export function EditorClient({ project }: { project: Project }) {
     setNotice(null);
     const files = Array.from(filesInput);
     if (!files.length) return false;
+    if (replaceSourceId && files.length !== 1) {
+      setNotice({ tone: "error", text: "Choose one image to replace this source." });
+      return false;
+    }
     for (const file of files) {
       if (!isAllowedImageFile(file)) {
         setNotice({ tone: "error", text: `Use ${ALLOWED_IMAGE_LABEL} files only.` });
@@ -1313,6 +2189,13 @@ export function EditorClient({ project }: { project: Project }) {
         return false;
       }
     }
+    const previousSource = replaceSourceId ? settingsRef.current.sourceImages.find((source) => source.id === replaceSourceId) ?? null : null;
+    if (replaceSourceId && !previousSource) {
+      setNotice({ tone: "error", text: "Unable to find the image to replace." });
+      return false;
+    }
+    setUploadingSources(true);
+    setReplacingSourceId(replaceSourceId ?? null);
 
     const uploadItems = files.map((file) => ({
       file,
@@ -1320,15 +2203,15 @@ export function EditorClient({ project }: { project: Project }) {
       url: URL.createObjectURL(file),
     }));
     const optimisticIds = new Set(uploadItems.map((item) => item.id));
-    const previousSource = replaceSourceId ? settingsRef.current.sourceImages.find((source) => source.id === replaceSourceId) ?? null : null;
     uploadedSourceObjectUrlsRef.current.push(...uploadItems.map((item) => item.url));
     setSettingsWithHistory((current) => {
       const replacedSource = replaceSourceId ? current.sourceImages.find((source) => source.id === replaceSourceId) : null;
-      const totalSourceCount = replaceSourceId ? current.sourceImages.length : current.sourceImages.length + uploadItems.length;
-      const stackHeight = totalSourceCount > 1 ? roundCells(current.graphHeight / totalSourceCount) : current.imageHeight;
+      let nextY = stackEndCell(current.sourceImages);
       const addedSources = uploadItems.map((item, index) => {
         const width = replacedSource?.width ?? current.imageWidth;
-        const height = replacedSource?.height ?? stackHeight;
+        const height = replacedSource?.height ?? current.imageHeight;
+        const y = replacedSource ? replacedSource.y : nextY;
+        if (!replacedSource) nextY += height;
         return {
           id: item.id,
           name: item.file.name || `Source ${current.sourceImages.length + index + 1}`,
@@ -1342,36 +2225,31 @@ export function EditorClient({ project }: { project: Project }) {
           sourceFillMinStrokePixels: replacedSource?.sourceFillMinStrokePixels ?? current.sourceFillMinStrokePixels,
           strokeGapClosePixels: replacedSource?.strokeGapClosePixels ?? current.strokeGapClosePixels,
           x: replacedSource ? replacedSource.x : defaultSourceX(current.graphWidth, width),
+          y,
           topPadding: replacedSource?.topPadding ?? 0,
           bottomPadding: replacedSource?.bottomPadding ?? 0,
+          locked: replacedSource?.locked ?? false,
+          rotationDegrees: replacedSource?.rotationDegrees ?? 0,
+          flipX: replacedSource?.flipX ?? false,
+          flipY: replacedSource?.flipY ?? false,
         };
       });
-      const appendedSourceImages = [...current.sourceImages, ...addedSources];
-      const appendedHeight = appendedSourceImages.reduce((sum, source) => sum + source.height, 0);
-      const shouldFitStack = !replaceSourceId && totalSourceCount > 1 && (files.length > 1 || appendedHeight > current.graphHeight);
-      const fittedSourceImages = shouldFitStack
-        ? appendedSourceImages.map((source) => ({
-            ...source,
-            height: stackHeight,
-            x: clampSourceX(source.x, current.graphWidth, source.width),
-          }))
-        : appendedSourceImages;
 
       return {
         ...current,
         fillRegions: {},
-        imageOffsetX: 0,
-        imageOffsetY: 0,
         sourceImages:
           replaceSourceId && addedSources[0]
             ? current.sourceImages.map((source) => (source.id === replaceSourceId ? addedSources[0] : source))
-            : fittedSourceImages,
+            : [...current.sourceImages, ...addedSources],
       };
     });
     setNotice({ tone: "info", text: replaceSourceId ? "Updating image..." : "Adding images..." });
 
     if (!isPersistableProjectId(project.id)) {
       setNotice({ tone: "ok", text: successText });
+      setUploadingSources(false);
+      setReplacingSourceId(null);
       return true;
     }
 
@@ -1386,10 +2264,14 @@ export function EditorClient({ project }: { project: Project }) {
           return next;
         });
         setNotice({ tone: "error", text: message });
+        setUploadingSources(false);
+        setReplacingSourceId(null);
         return false;
       }
 
       setNotice({ tone: "error", text: `${message} The selected image is still available in this editor until refresh.` });
+      setUploadingSources(false);
+      setReplacingSourceId(null);
       return false;
     }
 
@@ -1444,6 +2326,8 @@ export function EditorClient({ project }: { project: Project }) {
     }));
 
     setNotice(result.ok ? { tone: "ok", text: successText } : { tone: "error", text: result.message });
+    setUploadingSources(false);
+    setReplacingSourceId(null);
     return true;
   }
 
@@ -1548,7 +2432,7 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   const sourcePanel = (
-    <aside className="space-y-4 rounded-md border border-[var(--line)] bg-white p-4 shadow-sm">
+    <aside className="relative space-y-4 rounded-md border border-[var(--line)] bg-white p-4 shadow-sm lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
       <div className="flex items-center justify-between gap-3">
         <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950">
           <ImageIcon size={16} aria-hidden="true" />
@@ -1601,12 +2485,13 @@ export function EditorClient({ project }: { project: Project }) {
               </button>
             )
           ) : null}
-          <label className="grid h-9 w-9 cursor-pointer place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50" title="Add images">
-            <Upload size={15} aria-hidden="true" />
+          <label className={`grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 ${uploadingSources ? "cursor-wait opacity-70" : "cursor-pointer"}`} title="Add images">
+            {uploadingSources ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Upload size={15} aria-hidden="true" />}
             <input
               type="file"
               accept={IMAGE_ACCEPT}
               multiple
+              disabled={uploadingSources}
               className="sr-only"
               onChange={(event) => {
                 const files = Array.from(event.target.files ?? []);
@@ -1619,23 +2504,25 @@ export function EditorClient({ project }: { project: Project }) {
       </div>
 
       <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
-        <p className="truncate text-sm font-semibold text-slate-950">{sourceName}</p>
+        <p className="truncate text-sm font-semibold text-slate-950">{title || "Graph preview"}</p>
         <p className="mt-1 text-xs text-slate-500">
           {settings.sourceImages.length
             ? sourceReady
               ? `${settings.sourceImages.length} source${settings.sourceImages.length === 1 ? "" : "s"} ready`
               : "Loading source files"
-            : "Waiting for source files"}
+            : settings.cellPaints.length || settings.graphShapes.length
+              ? `${settings.cellPaints.length + settings.graphShapes.length} drawing layer${settings.cellPaints.length + settings.graphShapes.length === 1 ? "" : "s"}`
+              : "Waiting for source files"}
         </p>
       </div>
 
-      {sourcePreviewUrl ? (
+      {sourceCropMode && sourcePreviewUrl ? (
         <div className="overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)]">
-          {sourceCropMode ? (
-            <ManualCropper imageUrl={sourcePreviewUrl} crop={sourceCropArea} onCropChange={setSourceCropArea} className="h-[min(75vh,42rem)] p-3" />
-          ) : (
-            <img src={sourcePreviewUrl} alt="" className="max-h-72 w-full object-contain p-3" />
-          )}
+          <ManualCropper imageUrl={sourcePreviewUrl} crop={sourceCropArea} onCropChange={setSourceCropArea} className="h-[min(75vh,42rem)] p-3" />
+        </div>
+      ) : settings.sourceImages.length || settings.cellPaints.length || settings.graphShapes.length ? (
+        <div className="overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
+          <canvas ref={overviewCanvasRef} className="max-h-72 w-full rounded bg-white object-contain shadow-sm" style={{ height: "auto" }} />
         </div>
       ) : (
         <div className="grid min-h-48 place-items-center rounded-md border border-dashed border-slate-300 bg-[var(--panel)] text-center text-sm text-slate-500">
@@ -1643,35 +2530,50 @@ export function EditorClient({ project }: { project: Project }) {
         </div>
       )}
 
-      {settings.sourceImages.length ? (
+      {settings.sourceImages.length || settings.cellPaints.length || settings.graphShapes.length ? (
         <div className="space-y-3">
           {settings.sourceImages.map((source, index) => {
-            const maxX = Math.max(0, roundCells(settings.graphWidth - source.width));
             const status = sourceStatus[source.id];
+            const expanded = Boolean(expandedSourceIds[source.id]);
+            const selected = selectedSourceId === source.id;
+            const replacing = replacingSourceId === source.id;
+            const previousLocked = Boolean(settings.sourceImages[index - 1]?.locked);
+            const nextLocked = Boolean(settings.sourceImages[index + 1]?.locked);
             return (
-              <div key={source.id} className="space-y-3 rounded-md border border-[var(--line)] bg-white p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex min-w-0 gap-2">
+              <div key={source.id} className={`space-y-3 rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
+                <div className="grid gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedSourceId(source.id);
+                      setSelectedDrawingLayerId(null);
+                      toggleSourceCard(source.id);
+                    }}
+                    className="grid min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
+                  >
+                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[var(--teal)] text-xs font-bold text-white">{index + 1}</span>
                     {status?.previewUrl ? (
                       <img src={status.previewUrl} alt="" className="h-12 w-12 shrink-0 rounded border border-[var(--line)] bg-[var(--panel)] object-contain p-1" />
                     ) : (
-                      <div className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] text-slate-400">
+                      <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] text-slate-400">
                         <ImageIcon size={16} aria-hidden="true" />
-                      </div>
+                      </span>
                     )}
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold text-slate-950">{source.name}</p>
-                      <p className="mt-1 text-xs text-slate-500">
-                        {status?.ready ? "Ready" : status?.error || "Loading"} / position {index + 1}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 gap-1">
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-semibold text-slate-950">{source.name}</span>
+                      <span className="mt-1 inline-flex items-center gap-1 text-xs text-slate-500">
+                        {source.locked ? <Lock size={12} aria-hidden="true" /> : <Unlock size={12} aria-hidden="true" />}
+                        {status?.ready ? "Ready" : status?.error || "Loading"}
+                      </span>
+                    </span>
+                    {expanded ? <ChevronDown size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" /> : <ChevronRight size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" />}
+                  </button>
+                  <div className="grid grid-cols-5 gap-1">
                     <button
                       type="button"
                       onClick={() => moveSourceImage(source.id, -1)}
-                      disabled={index === 0}
-                      className="grid h-8 w-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                      disabled={source.locked || previousLocked || index === 0}
+                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
                       title="Move up"
                     >
                       <ArrowUp size={14} aria-hidden="true" />
@@ -1679,31 +2581,71 @@ export function EditorClient({ project }: { project: Project }) {
                     <button
                       type="button"
                       onClick={() => moveSourceImage(source.id, 1)}
-                      disabled={index === settings.sourceImages.length - 1}
-                      className="grid h-8 w-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                      disabled={source.locked || nextLocked || index === settings.sourceImages.length - 1}
+                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
                       title="Move down"
                     >
                       <ArrowDown size={14} aria-hidden="true" />
                     </button>
                     <button
                       type="button"
+                      onClick={() => toggleSourceLock(source.id)}
+                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
+                      title={source.locked ? "Unlock image" : "Lock image"}
+                    >
+                      {source.locked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
+                    </button>
+                    <label
+                      className={`grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 ${
+                        uploadingSources ? "cursor-wait opacity-40" : "cursor-pointer"
+                      }`}
+                      title="Replace image and keep current position, size, and transform"
+                    >
+                      {replacing ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={14} aria-hidden="true" />}
+                      <input
+                        type="file"
+                        accept={IMAGE_ACCEPT}
+                        disabled={uploadingSources}
+                        className="sr-only"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0] ?? null;
+                          event.target.value = "";
+                          if (file) void uploadSourceImages([file], `"${source.name}" replaced.`, source.id);
+                        }}
+                      />
+                    </label>
+                    <button
+                      type="button"
                       onClick={() => removeSourceImage(source.id)}
-                      className="grid h-8 w-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
+                      disabled={source.locked}
+                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
                       title="Remove source"
                     >
-                      <Trash2 size={14} aria-hidden="true" />
+                      {deletingSourceId === source.id ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Trash2 size={14} aria-hidden="true" />}
                     </button>
                   </div>
                 </div>
+                {expanded ? (
                 <div className="grid min-w-0 grid-cols-2 gap-2">
                   <NumberField
                     label="Width (CM)"
                     value={sourcePhysicalWidthCm(source)}
                     min={0.01}
-                    max={roundMeasure(settings.graphWidth * settings.cellSizeCm)}
+                    max={1000}
                     step={0.1}
                     allowDecimalInput
+                    disabled={source.locked}
                     onChange={(value) => updateSourceImagePhysicalWidthCm(source.id, value)}
+                  />
+                  <NumberField
+                    label={`Height (${MEASUREMENT_UNIT_LABELS[source.measurementUnit]})`}
+                    value={sourcePhysicalHeight(source)}
+                    min={0.01}
+                    max={roundMeasure(cmToUnit(1000 * settings.cellSizeCm, source.measurementUnit))}
+                    step={0.1}
+                    allowDecimalInput
+                    disabled={source.locked}
+                    onChange={(value) => updateSourceImagePhysicalHeight(source.id, value)}
                   />
                   <label className="grid min-w-0 gap-1.5">
                     <span className="text-xs font-semibold text-slate-500">Size unit</span>
@@ -1717,53 +2659,6 @@ export function EditorClient({ project }: { project: Project }) {
                     </select>
                   </label>
                   <NumberField
-                    label={`Height (${MEASUREMENT_UNIT_LABELS[source.measurementUnit]})`}
-                    value={sourcePhysicalHeight(source)}
-                    min={0.01}
-                    max={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, source.measurementUnit))}
-                    step={0.1}
-                    allowDecimalInput
-                    onChange={(value) => updateSourceImagePhysicalHeight(source.id, value)}
-                  />
-                  <NumberField
-                    label="Left padding (cells)"
-                    value={source.x}
-                    min={0}
-                    max={maxX}
-                    step={1}
-                    allowDecimalInput
-                    wholeStep
-                    onChange={(value) => updateSourceImage(source.id, { x: value })}
-                  />
-                  <NumberField
-                    label="Right padding (cells)"
-                    value={sourceRightPadding(source)}
-                    min={0}
-                    max={maxX}
-                    step={1}
-                    allowDecimalInput
-                    wholeStep
-                    onChange={(value) => updateSourceImage(source.id, { x: settings.graphWidth - source.width - value })}
-                  />
-                  <NumberField
-                    label="Top padding (cells)"
-                    value={source.topPadding}
-                    min={-settings.graphHeight}
-                    max={settings.graphHeight}
-                    step={0.1}
-                    allowDecimalInput
-                    onChange={(value) => updateSourceImage(source.id, { topPadding: value })}
-                  />
-                  <NumberField
-                    label="Bottom padding (cells)"
-                    value={source.bottomPadding}
-                    min={-settings.graphHeight}
-                    max={settings.graphHeight}
-                    step={0.1}
-                    allowDecimalInput
-                    onChange={(value) => updateSourceImage(source.id, { bottomPadding: value })}
-                  />
-                  <NumberField
                     label="Line size"
                     value={source.imageLineThickness}
                     min={MIN_IMAGE_LINE_THICKNESS}
@@ -1771,6 +2666,50 @@ export function EditorClient({ project }: { project: Project }) {
                     step={0.01}
                     allowDecimalInput
                     onChange={(value) => updateSourceImage(source.id, { imageLineThickness: value })}
+                  />
+                  <NumberField
+                    label="Left padding (cells)"
+                    value={source.x}
+                    min={-1000}
+                    max={1000}
+                    step={1}
+                    allowDecimalInput
+                    wholeStep
+                    disabled={source.locked}
+                    onChange={(value) => updateSourceImage(source.id, { x: value })}
+                  />
+                  <NumberField
+                    label="Right padding (cells)"
+                    value={sourceRightPadding(source)}
+                    min={-1000}
+                    max={1000}
+                    step={1}
+                    allowDecimalInput
+                    wholeStep
+                    disabled={source.locked}
+                    onChange={(value) => updateSourceImage(source.id, { x: settings.graphWidth - source.width - value })}
+                  />
+                  <NumberField
+                    label="Top padding (cells)"
+                    value={source.y}
+                    min={-1000}
+                    max={1000}
+                    step={1}
+                    allowDecimalInput
+                    wholeStep
+                    disabled={source.locked}
+                    onChange={(value) => updateSourceImage(source.id, { y: value })}
+                  />
+                  <NumberField
+                    label="Bottom padding (cells)"
+                    value={sourceBottomPadding(source)}
+                    min={-1000}
+                    max={1000}
+                    step={1}
+                    allowDecimalInput
+                    wholeStep
+                    disabled={source.locked}
+                    onChange={(value) => updateSourceImage(source.id, { y: settings.graphHeight - source.height - value })}
                   />
                   <NumberField
                     label="Fill detection"
@@ -1795,20 +2734,204 @@ export function EditorClient({ project }: { project: Project }) {
                     max={MAX_STROKE_GAP_CLOSE_PIXELS}
                     onChange={(value) => updateSourceImage(source.id, { strokeGapClosePixels: value })}
                   />
+                  <button type="button" onClick={() => rotateSourceImage(source.id, -1)} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left">
+                    <RotateCcw size={15} aria-hidden="true" />
+                  </button>
+                  <button type="button" onClick={() => rotateSourceImage(source.id, 1)} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right">
+                    <RotateCw size={15} aria-hidden="true" />
+                  </button>
+                  <button type="button" onClick={() => flipSourceImage(source.id, "x")} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal">
+                    <FlipHorizontal size={15} aria-hidden="true" />
+                  </button>
+                  <button type="button" onClick={() => flipSourceImage(source.id, "y")} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical">
+                    <FlipVertical size={15} aria-hidden="true" />
+                  </button>
                 </div>
+                ) : null}
+              </div>
+            );
+          })}
+          {settings.cellPaints.map((cell, index) => {
+            const key = drawingLayerKey("cell", cell.id);
+            const expanded = Boolean(expandedDrawingLayerIds[key]);
+            const selected = selectedDrawingLayerId === key;
+            const previousLocked = Boolean(settings.cellPaints[index - 1]?.locked);
+            const nextLocked = Boolean(settings.cellPaints[index + 1]?.locked);
+            return (
+              <div key={key} className={`space-y-3 rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
+                <div className="grid gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedSourceId(null);
+                      setSelectedDrawingLayerId(key);
+                      toggleDrawingLayerCard(key);
+                    }}
+                    className="grid min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
+                  >
+                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-700 text-xs font-bold text-white">{settings.sourceImages.length + index + 1}</span>
+                    <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] p-1">
+                      <span className="h-8 w-8 border-2" style={{ borderColor: cell.lineColor, backgroundColor: isTransparentFillColor(cell.fillColor) ? "transparent" : cell.fillColor }} />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-semibold text-slate-950">{cell.name}</span>
+                      <span className="mt-1 inline-flex items-center gap-1 text-xs text-slate-500">
+                        {cell.locked ? <Lock size={12} aria-hidden="true" /> : <Unlock size={12} aria-hidden="true" />}
+                        Painted cell
+                      </span>
+                    </span>
+                    {expanded ? <ChevronDown size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" /> : <ChevronRight size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" />}
+                  </button>
+                  <div className="grid grid-cols-4 gap-1">
+                    <button type="button" onClick={() => moveDrawingLayer("cell", cell.id, -1)} disabled={cell.locked || previousLocked || index === 0} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move up">
+                      <ArrowUp size={14} aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => moveDrawingLayer("cell", cell.id, 1)} disabled={cell.locked || nextLocked || index === settings.cellPaints.length - 1} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move down">
+                      <ArrowDown size={14} aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => toggleDrawingLock("cell", cell.id)} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50" title={cell.locked ? "Unlock drawing" : "Lock drawing"}>
+                      {cell.locked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
+                    </button>
+                    <button type="button" onClick={() => removeDrawingLayer("cell", cell.id, cell.name, cell.locked)} disabled={cell.locked} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Remove drawing">
+                      <Trash2 size={14} aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+                {expanded ? (
+                  <div className="grid min-w-0 grid-cols-2 gap-2">
+                    <NumberField label="Width (cells)" value={cell.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { width: value })} />
+                    <NumberField label="Height (cells)" value={cell.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { height: value })} />
+                    <NumberField label="Left padding (cells)" value={cell.x} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: value })} />
+                    <NumberField label="Right padding (cells)" value={drawingRightPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: settings.graphWidth - cell.width - value })} />
+                    <NumberField label="Top padding (cells)" value={cell.y} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: value })} />
+                    <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: settings.graphHeight - cell.height - value })} />
+                    <NumberField label="Line size" value={cell.lineWidth} min={1} max={24} disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { lineWidth: value })} />
+                    <ColorPresetField label="Line" value={cell.lineColor} onChange={(value) => updateCellPaint(cell.id, { lineColor: value })} />
+                    <ColorPresetField label="Fill" value={cell.fillColor} onChange={(value) => updateCellPaint(cell.id, { fillColor: value })} allowTransparent />
+                    <div className="grid grid-cols-2 gap-1">
+                      {CELL_LINE_SIDE_KEYS.map((side) => (
+                        <label key={side} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
+                          <input
+                            type="checkbox"
+                            checked={cell.sides.includes(side)}
+                            disabled={cell.locked}
+                            onChange={() => updateCellPaint(cell.id, { sides: cell.sides.includes(side) ? cell.sides.filter((item) => item !== side) : [...cell.sides, side] })}
+                            className="h-4 w-4 accent-[var(--teal)]"
+                          />
+                          {CELL_LINE_SIDE_LABELS[side]}
+                        </label>
+                      ))}
+                    </div>
+                    <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, -1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left">
+                      <RotateCcw size={15} aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, 1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right">
+                      <RotateCw size={15} aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "x")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal">
+                      <FlipHorizontal size={15} aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "y")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical">
+                      <FlipVertical size={15} aria-hidden="true" />
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+          {settings.graphShapes.map((shape, index) => {
+            const key = drawingLayerKey("shape", shape.id);
+            const expanded = Boolean(expandedDrawingLayerIds[key]);
+            const selected = selectedDrawingLayerId === key;
+            const previousLocked = Boolean(settings.graphShapes[index - 1]?.locked);
+            const nextLocked = Boolean(settings.graphShapes[index + 1]?.locked);
+            return (
+              <div key={key} className={`space-y-3 rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
+                <div className="grid gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedSourceId(null);
+                      setSelectedDrawingLayerId(key);
+                      toggleDrawingLayerCard(key);
+                    }}
+                    className="grid min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
+                  >
+                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-700 text-xs font-bold text-white">{settings.sourceImages.length + settings.cellPaints.length + index + 1}</span>
+                    <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] p-1 text-slate-500">
+                      <Maximize2 size={18} aria-hidden="true" />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-semibold text-slate-950">{shape.name}</span>
+                      <span className="mt-1 inline-flex items-center gap-1 text-xs text-slate-500">
+                        {shape.locked ? <Lock size={12} aria-hidden="true" /> : <Unlock size={12} aria-hidden="true" />}
+                        {GRAPH_SHAPE_KIND_LABELS[shape.kind]}
+                      </span>
+                    </span>
+                    {expanded ? <ChevronDown size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" /> : <ChevronRight size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" />}
+                  </button>
+                  <div className="grid grid-cols-4 gap-1">
+                    <button type="button" onClick={() => moveDrawingLayer("shape", shape.id, -1)} disabled={shape.locked || previousLocked || index === 0} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move up">
+                      <ArrowUp size={14} aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => moveDrawingLayer("shape", shape.id, 1)} disabled={shape.locked || nextLocked || index === settings.graphShapes.length - 1} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move down">
+                      <ArrowDown size={14} aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50" title={shape.locked ? "Unlock drawing" : "Lock drawing"}>
+                      {shape.locked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
+                    </button>
+                    <button type="button" onClick={() => removeDrawingLayer("shape", shape.id, shape.name, shape.locked)} disabled={shape.locked} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Remove drawing">
+                      <Trash2 size={14} aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+                {expanded ? (
+                  <div className="grid min-w-0 grid-cols-2 gap-2">
+                    <label className="grid min-w-0 gap-1.5">
+                      <span className="text-xs font-semibold text-slate-500">Shape</span>
+                      <select value={shape.kind} disabled={shape.locked} onChange={(event) => updateGraphShape(shape.id, { kind: event.target.value as GraphShapeKind })} className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60">
+                        {GRAPH_SHAPE_KIND_KEYS.map((kind) => (
+                          <option key={kind} value={kind}>{GRAPH_SHAPE_KIND_LABELS[kind]}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <NumberField label="Line size" value={shape.strokeWidth} min={1} max={24} disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { strokeWidth: value })} />
+                    <NumberField label="Width (cells)" value={shape.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { width: value })} />
+                    <NumberField label="Height (cells)" value={shape.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { height: value })} />
+                    <NumberField label="Left padding (cells)" value={shape.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: value })} />
+                    <NumberField label="Right padding (cells)" value={drawingRightPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: settings.graphWidth - shape.width - value })} />
+                    <NumberField label="Top padding (cells)" value={shape.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: value })} />
+                    <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: settings.graphHeight - shape.height - value })} />
+                    <ColorPresetField label="Line" value={shape.strokeColor} onChange={(value) => updateGraphShape(shape.id, { strokeColor: value })} />
+                    <ColorPresetField label="Fill" value={shape.fillColor} onChange={(value) => updateGraphShape(shape.id, { fillColor: value })} allowTransparent />
+                    <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, -1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left">
+                      <RotateCcw size={15} aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, 1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right">
+                      <RotateCw size={15} aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "x")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal">
+                      <FlipHorizontal size={15} aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "y")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical">
+                      <FlipVertical size={15} aria-hidden="true" />
+                    </button>
+                  </div>
+                ) : null}
               </div>
             );
           })}
         </div>
       ) : null}
 
-      <label className="inline-flex h-10 w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-slate-300 bg-[var(--panel)] px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100">
-        <Upload size={15} aria-hidden="true" />
-        Add images
+      <label className={`inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-dashed border-slate-300 bg-[var(--panel)] px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100 ${uploadingSources ? "cursor-wait opacity-70" : "cursor-pointer"}`}>
+        {uploadingSources ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Upload size={15} aria-hidden="true" />}
+        {uploadingSources ? "Adding..." : "Add images"}
         <input
           type="file"
           accept={IMAGE_ACCEPT}
           multiple
+          disabled={uploadingSources}
           className="sr-only"
           onChange={(event) => {
             const files = Array.from(event.target.files ?? []);
@@ -1836,6 +2959,26 @@ export function EditorClient({ project }: { project: Project }) {
           />
         </label>
       </div>
+      <button
+        type="button"
+        aria-label="Resize source panel"
+        title="Resize source panel"
+        onPointerDown={(event) => beginPanelResize(event, "left")}
+        onPointerMove={resizePanel}
+        onPointerUp={endPanelResize}
+        onPointerCancel={endPanelResize}
+        className="group absolute inset-y-0 right-0 hidden w-3 cursor-col-resize touch-none place-items-center lg:grid"
+      >
+        <span className="absolute inset-y-0 right-1.5 w-px bg-slate-200 transition-colors group-hover:bg-[var(--teal)]" aria-hidden="true" />
+        <span
+          className={`grid h-6 w-6 place-items-center rounded-full border border-[var(--line)] bg-white text-slate-500 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${
+            resizingPanelSide === "left" ? "opacity-100" : "opacity-0"
+          }`}
+          aria-hidden="true"
+        >
+          <ArrowLeftRight size={13} />
+        </span>
+      </button>
     </aside>
   );
 
@@ -1845,12 +2988,13 @@ export function EditorClient({ project }: { project: Project }) {
   const printHeightCm = imageHeightCm;
   const desktopGridColumns =
     sourcePanelCollapsed && settingsPanelCollapsed
-      ? "lg:grid-cols-[minmax(0,1fr)]"
+      ? "minmax(0,1fr)"
       : sourcePanelCollapsed
-        ? "lg:grid-cols-[minmax(0,1fr)_360px]"
+        ? `minmax(0,1fr) minmax(${MIN_SIDE_PANEL_WIDTH}px, ${rightPanelWidth}px)`
         : settingsPanelCollapsed
-          ? "lg:grid-cols-[320px_minmax(0,1fr)]"
-          : "lg:grid-cols-[320px_minmax(0,1fr)_360px]";
+          ? `minmax(${MIN_SIDE_PANEL_WIDTH}px, ${leftPanelWidth}px) minmax(0,1fr)`
+          : `minmax(${MIN_SIDE_PANEL_WIDTH}px, ${leftPanelWidth}px) minmax(0,1fr) minmax(${MIN_SIDE_PANEL_WIDTH}px, ${rightPanelWidth}px)`;
+  const editorGridStyle = { "--editor-grid-columns": desktopGridColumns } as CSSProperties;
   const floatingFillRegion = floatingPalette ? fillRegionsById.get(floatingPalette.regionId) ?? null : null;
   const floatingFillRegionColor = floatingFillRegion ? currentFillRegionColor(floatingFillRegion) : settings.fillColor;
   const floatingPaletteNode =
@@ -1916,7 +3060,7 @@ export function EditorClient({ project }: { project: Project }) {
     ) : null;
 
   const settingsPanel = (
-    <aside className="space-y-4 rounded-md border border-[var(--line)] bg-white p-4 shadow-sm">
+    <aside className="relative space-y-4 rounded-md border border-[var(--line)] bg-white p-4 shadow-sm lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
       <div className="flex items-center justify-between gap-3">
         <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950">
           <Settings2 size={16} aria-hidden="true" />
@@ -1980,10 +3124,52 @@ export function EditorClient({ project }: { project: Project }) {
               allowDecimalInput
               onChange={updateImageHeightPhysical}
             />
-            <NumberField label="Default line size" value={settings.imageLineThickness} min={MIN_IMAGE_LINE_THICKNESS} max={MAX_IMAGE_LINE_THICKNESS} step={0.01} onChange={(value) => updateSetting("imageLineThickness", value)} />
-            <NumberField label="Default fill detection" value={settings.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} onChange={(value) => updateSetting("sourceFillThreshold", value)} />
-            <NumberField label="Default fill width" value={settings.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSetting("sourceFillMinStrokePixels", value)} />
-            <NumberField label="Default gap closing" value={settings.strokeGapClosePixels} min={MIN_STROKE_GAP_CLOSE_PIXELS} max={MAX_STROKE_GAP_CLOSE_PIXELS} onChange={(value) => updateSetting("strokeGapClosePixels", value)} />
+            <label className="grid min-w-0 gap-1.5">
+              <span className="text-xs font-semibold text-slate-500">Graph lines layer</span>
+              <select
+                value={settings.gridLineLayer}
+                onChange={(event) => updateSetting("gridLineLayer", event.target.value as GraphSettings["gridLineLayer"])}
+                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+              >
+                {GRAPH_LINE_LAYER_KEYS.map((key) => (
+                  <option key={key} value={key}>
+                    {GRAPH_LINE_LAYER_LABELS[key]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex h-10 min-w-0 items-center gap-2 self-end rounded-md border border-[var(--line)] bg-white px-3 text-sm font-semibold text-slate-600">
+              <input
+                type="checkbox"
+                checked={settings.showNumbers}
+                onChange={(event) => updateSetting("showNumbers", event.target.checked)}
+                className="h-4 w-4 accent-[var(--teal)]"
+              />
+              <span>Show grid numbers</span>
+            </label>
+            <label className="grid min-w-0 gap-1.5">
+              <span className="text-xs font-semibold text-slate-500">Grid number position</span>
+              <select
+                value={settings.gridNumberPlacement}
+                onChange={(event) => updateSetting("gridNumberPlacement", event.target.value as GraphSettings["gridNumberPlacement"])}
+                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+              >
+                {(["inside", "outside"] as const).map((key) => (
+                  <option key={key} value={key}>
+                    {GRID_NUMBER_PLACEMENT_LABELS[key]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex h-10 min-w-0 items-center gap-2 self-end rounded-md border border-[var(--line)] bg-white px-3 text-sm font-semibold text-slate-600">
+              <input
+                type="checkbox"
+                checked={settings.showPageBreaks}
+                onChange={(event) => updateSetting("showPageBreaks", event.target.checked)}
+                className="h-4 w-4 accent-[var(--teal)]"
+              />
+              <span>Show page breaks</span>
+            </label>
             <label className="grid min-w-0 gap-1.5">
               <span className="text-xs font-semibold text-slate-500">Print paper</span>
               <select
@@ -2044,21 +3230,114 @@ export function EditorClient({ project }: { project: Project }) {
 
           <div className="min-w-0 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
             <p className="break-words font-mono text-xs text-slate-600">
-              Image {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / line {settings.imageLineThickness}x / fill {settings.sourceFillThreshold} / fill width {settings.sourceFillMinStrokePixels}px / gap {settings.strokeGapClosePixels}px / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
+              Graph {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / {GRAPH_LINE_LAYER_LABELS[settings.gridLineLayer].toLowerCase()} grid / {settings.showNumbers ? `${GRID_NUMBER_PLACEMENT_LABELS[settings.gridNumberPlacement].toLowerCase()} numbers` : "numbers off"} / {settings.showPageBreaks ? "page breaks on" : "page breaks off"} / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
             </p>
           </div>
         </CollapsibleSection>
 
-        <CollapsibleSection title="Outline" open={!collapsedSections.outline} onToggle={() => toggleSection("outline")}>
+        <CollapsibleSection
+          title="Drawing"
+          summary={<span className="text-xs font-semibold text-slate-500">{settings.cellPaints.length + settings.graphShapes.length}</span>}
+          open={!collapsedSections.drawing}
+          onToggle={() => toggleSection("drawing")}
+        >
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-2">
+              {(["image", "cell", "shape"] as DrawingTool[]).map((tool) => (
+                <button
+                  key={tool}
+                  type="button"
+                  onClick={() => setDrawingTool(tool)}
+                  className={`h-9 rounded-md border text-xs font-semibold capitalize ${
+                    drawingTool === tool ? "border-[var(--teal)] bg-teal-50 text-[var(--teal)]" : "border-[var(--line)] text-slate-600"
+                  }`}
+                >
+                  {tool}
+                </button>
+              ))}
+            </div>
+
+            <div className="rounded-md border border-[var(--line)] p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-slate-500">Cell borders</span>
+                <button type="button" onClick={setAllCellPaintSides} className="h-8 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
+                  All
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {CELL_LINE_SIDE_KEYS.map((side) => (
+                  <label key={side} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
+                    <input
+                      type="checkbox"
+                      checked={cellPaintSides.includes(side)}
+                      onChange={() => toggleCellPaintSide(side)}
+                      className="h-4 w-4 accent-[var(--teal)]"
+                    />
+                    {CELL_LINE_SIDE_LABELS[side]}
+                  </label>
+                ))}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <label className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={cellPaintLineEnabled}
+                    onChange={(event) => setCellPaintLineEnabled(event.target.checked)}
+                    className="h-4 w-4 accent-[var(--teal)]"
+                  />
+                  Line
+                </label>
+                <label className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={cellPaintFillEnabled}
+                    onChange={(event) => setCellPaintFillEnabled(event.target.checked)}
+                    className="h-4 w-4 accent-[var(--teal)]"
+                  />
+                  Fill
+                </label>
+              </div>
+            </div>
+
+            <label className="grid min-w-0 gap-1.5">
+              <span className="text-xs font-semibold text-slate-500">Shape</span>
+              <select
+                value={shapeKind}
+                onChange={(event) => {
+                  setShapeKind(event.target.value as GraphShapeKind);
+                  setDrawingTool("shape");
+                }}
+                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+              >
+                {GRAPH_SHAPE_KIND_KEYS.map((kind) => (
+                  <option key={kind} value={kind}>
+                    {GRAPH_SHAPE_KIND_LABELS[kind]}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button type="button" onClick={clearCellPaints} className="h-9 rounded-md border border-[var(--line)] text-xs font-semibold text-slate-600">
+                Clear cells
+              </button>
+              <button type="button" onClick={clearGraphShapes} className="h-9 rounded-md border border-[var(--line)] text-xs font-semibold text-slate-600">
+                Clear shapes
+              </button>
+            </div>
+          </div>
+        </CollapsibleSection>
+
+        <CollapsibleSection title="Outline" summary={<ColorSummary value={settings.outlineColor} />} open={!collapsedSections.outline} onToggle={() => toggleSection("outline")}>
           <ColorPresetField label="Outline" value={settings.outlineColor} onChange={updateOutlineColor} />
         </CollapsibleSection>
 
-        <CollapsibleSection title="Default fill" open={!collapsedSections.fill} onToggle={() => toggleSection("fill")}>
+        <CollapsibleSection title="Default fill" summary={<ColorSummary value={settings.fillColor} />} open={!collapsedSections.fill} onToggle={() => toggleSection("fill")}>
           <ColorPresetField label="Default fill" value={settings.fillColor} onChange={(value) => updateSetting("fillColor", value)} allowTransparent />
         </CollapsibleSection>
 
         {selectedFillRegion ? (
-          <CollapsibleSection title={`Selected fill ${selectedFillRegion.id}`} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")}>
+          <CollapsibleSection title={`Selected fill ${selectedFillRegion.id}`} summary={<ColorSummary value={selectedFillRegionColor} />} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")}>
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs font-semibold text-slate-500">{selectedFillRegion.kind === "source" ? "Source fill" : "Manual fill"}</span>
               <button
@@ -2079,29 +3358,35 @@ export function EditorClient({ project }: { project: Project }) {
           </CollapsibleSection>
         ) : null}
 
-        <CollapsibleSection title="Graph lines" open={!collapsedSections.graphLines} onToggle={() => toggleSection("graphLines")}>
+        <CollapsibleSection title="Graph lines" summary={<ColorSummary value={settings.gridLineColor} />} open={!collapsedSections.graphLines} onToggle={() => toggleSection("graphLines")}>
           <ColorPresetField
             label="Graph lines"
             value={settings.gridLineColor}
             colors={PRESET_GRAPH_LINE_COLORS}
             onChange={(value) => updateSetting("gridLineColor", value)}
           />
-          <label className="grid min-w-0 gap-1.5">
-            <span className="text-xs font-semibold text-slate-500">Graph lines layer</span>
-            <select
-              value={settings.gridLineLayer}
-              onChange={(event) => updateSetting("gridLineLayer", event.target.value as GraphSettings["gridLineLayer"])}
-              className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-            >
-              {GRAPH_LINE_LAYER_KEYS.map((key) => (
-                <option key={key} value={key}>
-                  {GRAPH_LINE_LAYER_LABELS[key]}
-                </option>
-              ))}
-            </select>
-          </label>
         </CollapsibleSection>
       </div>
+      <button
+        type="button"
+        aria-label="Resize controls panel"
+        title="Resize controls panel"
+        onPointerDown={(event) => beginPanelResize(event, "right")}
+        onPointerMove={resizePanel}
+        onPointerUp={endPanelResize}
+        onPointerCancel={endPanelResize}
+        className="group absolute inset-y-0 left-0 hidden w-3 cursor-col-resize touch-none place-items-center lg:grid"
+      >
+        <span className="absolute inset-y-0 left-1.5 w-px bg-slate-200 transition-colors group-hover:bg-[var(--teal)]" aria-hidden="true" />
+        <span
+          className={`grid h-6 w-6 place-items-center rounded-full border border-[var(--line)] bg-white text-slate-500 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${
+            resizingPanelSide === "right" ? "opacity-100" : "opacity-0"
+          }`}
+          aria-hidden="true"
+        >
+          <ArrowLeftRight size={13} />
+        </span>
+      </button>
     </aside>
   );
 
@@ -2133,6 +3418,87 @@ export function EditorClient({ project }: { project: Project }) {
       </div>
     </div>
   );
+
+  const graphPreviewWidth = Math.max(1, previewCanvasSize.width * zoom);
+  const graphPreviewHeight = Math.max(1, previewCanvasSize.height * zoom);
+  const outsideNumberMargin = settings.showNumbers && settings.gridNumberPlacement === "outside" ? 34 : 0;
+  const outsideHorizontalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? cellNumberLabels(settings.graphWidth) : [];
+  const outsideVerticalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? cellNumberLabels(settings.graphHeight) : [];
+  const paperForPreview = PRINT_PAPER_SIZES[settings.printPaperSize] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
+  const printPreviewPlan = createPdfExportPlan({
+    settings,
+    paper: paperForPreview,
+    canvasWidth: previewCanvasSize.width,
+    canvasHeight: previewCanvasSize.height,
+  });
+  const pageBreakGuideY = settings.showPageBreaks
+    ? Array.from(new Set(printPreviewPlan.tiles.filter((tile) => tile.tileX === 0 && tile.tileY > 0).map((tile) => tile.sourceY))).sort((a, b) => a - b)
+    : [];
+  const pageBreakGuideX = settings.showPageBreaks
+    ? Array.from(new Set(printPreviewPlan.tiles.filter((tile) => tile.tileY === 0 && tile.tileX > 0).map((tile) => tile.sourceX))).sort((a, b) => a - b)
+    : [];
+  useEffect(() => {
+    const scroller = canvasScrollRef.current;
+    const stage = graphStageRef.current;
+    if (!scroller || !stage) return;
+
+    let frame = 0;
+    const updateGuide = () => {
+      frame = 0;
+      const nextGuide = {
+        left: scroller.scrollLeft - stage.offsetLeft,
+        top: scroller.scrollTop - stage.offsetTop,
+        width: Math.max(1, scroller.clientWidth),
+        height: Math.max(1, scroller.clientHeight),
+      };
+      setCanvasViewportGuide((current) =>
+        current.left === nextGuide.left &&
+        current.top === nextGuide.top &&
+        current.width === nextGuide.width &&
+        current.height === nextGuide.height
+          ? current
+          : nextGuide,
+      );
+    };
+    const scheduleGuideUpdate = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(updateGuide);
+    };
+
+    updateGuide();
+    scroller.addEventListener("scroll", scheduleGuideUpdate, { passive: true });
+    window.addEventListener("resize", scheduleGuideUpdate);
+    const resizeObserver = new ResizeObserver(scheduleGuideUpdate);
+    resizeObserver.observe(scroller);
+    resizeObserver.observe(stage);
+
+    return () => {
+      scroller.removeEventListener("scroll", scheduleGuideUpdate);
+      window.removeEventListener("resize", scheduleGuideUpdate);
+      resizeObserver.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [
+    graphPreviewHeight,
+    graphPreviewWidth,
+    leftPanelWidth,
+    outsideNumberMargin,
+    rightPanelWidth,
+    settingsPanelCollapsed,
+    sourcePanelCollapsed,
+    zoom,
+  ]);
+  const pageBreakGuideWidth = Math.max(1, canvasViewportGuide.width);
+  const pageBreakGuideHeight = Math.max(1, canvasViewportGuide.height);
+  const selectedSourceBox =
+    selectedSourceLayout && !showOriginal
+      ? {
+          left: Math.round(outsideNumberMargin + (selectedSourceLayout.x * GRAPH_MAJOR_CELL_PIXELS + settings.imageOffsetX) * zoom),
+          top: Math.round(outsideNumberMargin + (selectedSourceLayout.y * GRAPH_MAJOR_CELL_PIXELS + settings.imageOffsetY) * zoom),
+          width: Math.max(1, Math.round(selectedSourceLayout.width * GRAPH_MAJOR_CELL_PIXELS * zoom)),
+          height: Math.max(1, Math.round(selectedSourceLayout.height * GRAPH_MAJOR_CELL_PIXELS * zoom)),
+        }
+      : null;
 
   const canvasPanel = (
     <section className="min-w-0 space-y-4">
@@ -2191,7 +3557,16 @@ export function EditorClient({ project }: { project: Project }) {
           </p>
         ) : null}
 
-        <div className="relative mt-3 grid min-h-[520px] place-items-center overflow-auto rounded-md border border-[var(--line)] bg-[linear-gradient(45deg,#f8fafc_25%,transparent_25%),linear-gradient(-45deg,#f8fafc_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#f8fafc_75%),linear-gradient(-45deg,transparent_75%,#f8fafc_75%)] bg-[length:24px_24px] bg-[position:0_0,0_12px,12px_-12px,-12px_0] p-4">
+        <div
+          ref={canvasScrollRef}
+          onPointerDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setSelectedSourceId(null);
+              setSelectedDrawingLayerId(null);
+            }
+          }}
+          className="relative mt-3 min-h-[520px] overflow-auto rounded-md border border-[var(--line)] bg-[linear-gradient(45deg,#f8fafc_25%,transparent_25%),linear-gradient(-45deg,#f8fafc_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#f8fafc_75%),linear-gradient(-45deg,transparent_75%,#f8fafc_75%)] bg-[length:24px_24px] bg-[position:0_0,0_12px,12px_-12px,-12px_0] p-4"
+        >
           {processing ? (
             <div className="absolute right-3 top-3 inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm">
               <Loader2 size={14} className="animate-spin" aria-hidden="true" />
@@ -2199,24 +3574,133 @@ export function EditorClient({ project }: { project: Project }) {
             </div>
           ) : null}
           {showOriginal && sourcePreviewUrl ? (
-            <img src={sourcePreviewUrl} alt="" className="max-h-full max-w-full object-contain" style={{ transform: `scale(${zoom})` }} />
+            <img src={sourcePreviewUrl} alt="" className="block rounded bg-white object-contain shadow-sm" style={{ width: `${graphPreviewWidth}px`, height: "auto" }} />
           ) : (
-            <canvas
-              ref={previewCanvasRef}
-              onPointerDown={beginGraphDrag}
-              onPointerMove={dragGraph}
-              onPointerUp={endGraphDrag}
-              onPointerCancel={endGraphDrag}
-              title="Drag to move graph"
-              className="max-h-full max-w-full rounded bg-white shadow-sm"
+            <div
+              ref={graphStageRef}
+              className="relative mx-auto"
               style={{
-                cursor: isDraggingGraph ? "move" : copiedFillColor ? "copy" : "crosshair",
-                imageRendering: "auto",
-                transform: `scale(${zoom})`,
-                transformOrigin: "center",
-                touchAction: "none",
+                width: `${graphPreviewWidth + outsideNumberMargin * 2}px`,
+                height: `${graphPreviewHeight + outsideNumberMargin * 2}px`,
               }}
-            />
+              onPointerDown={(event) => {
+                if (event.target === event.currentTarget) {
+                  setSelectedSourceId(null);
+                  setSelectedDrawingLayerId(null);
+                }
+              }}
+            >
+              <canvas
+                ref={previewCanvasRef}
+                onPointerDown={beginGraphDrag}
+                onPointerMove={dragGraph}
+                onPointerUp={endGraphDrag}
+                onPointerCancel={endGraphDrag}
+                title="Drag image to move it; arrow keys move selected image by 0.1cm; Space or Ctrl plus drag pans the view"
+                className="absolute left-0 top-0 rounded bg-white shadow-sm"
+                style={{
+                  left: `${outsideNumberMargin}px`,
+                  top: `${outsideNumberMargin}px`,
+                  width: `${graphPreviewWidth}px`,
+                  height: `${graphPreviewHeight}px`,
+                  cursor: isDraggingGraph ? "grabbing" : copiedFillColor ? "copy" : "crosshair",
+                  imageRendering: "auto",
+                  touchAction: "none",
+                }}
+              />
+              {settings.showNumbers && settings.gridNumberPlacement === "outside" ? (
+                <div className="pointer-events-none absolute inset-0 text-[11px] font-semibold text-slate-500">
+                  {outsideHorizontalLabels.map((value) => {
+                    const x = outsideNumberMargin + (value - 0.5) * GRAPH_MAJOR_CELL_PIXELS * zoom;
+                    return (
+                      <span key={`top-${value}`} className="absolute -translate-x-1/2" style={{ left: x, top: 6 }}>
+                        {value}
+                      </span>
+                    );
+                  })}
+                  {outsideHorizontalLabels.map((value) => {
+                    const x = outsideNumberMargin + (value - 0.5) * GRAPH_MAJOR_CELL_PIXELS * zoom;
+                    return (
+                      <span key={`bottom-${value}`} className="absolute -translate-x-1/2" style={{ left: x, top: outsideNumberMargin + graphPreviewHeight + 8 }}>
+                        {value}
+                      </span>
+                    );
+                  })}
+                  {outsideVerticalLabels.map((value) => {
+                    const y = outsideNumberMargin + (value - 0.45) * GRAPH_MAJOR_CELL_PIXELS * zoom;
+                    return (
+                      <span key={`left-${value}`} className="absolute -translate-y-1/2" style={{ left: 8, top: y }}>
+                        {value}
+                      </span>
+                    );
+                  })}
+                  {outsideVerticalLabels.map((value) => {
+                    const y = outsideNumberMargin + (value - 0.45) * GRAPH_MAJOR_CELL_PIXELS * zoom;
+                    return (
+                      <span key={`right-${value}`} className="absolute -translate-y-1/2" style={{ left: outsideNumberMargin + graphPreviewWidth + 10, top: y }}>
+                        {value}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {settings.showPageBreaks ? (
+                <div className="pointer-events-none absolute inset-0">
+                  {pageBreakGuideY.map((sourceY, index) => (
+                    <div
+                      key={`page-y-${sourceY}`}
+                      className="absolute border-t-2 border-dotted border-slate-700/70"
+                      style={{
+                        left: canvasViewportGuide.left,
+                        top: outsideNumberMargin + sourceY * zoom,
+                        width: pageBreakGuideWidth,
+                      }}
+                    >
+                      <span className="absolute right-2 -top-5 rounded bg-white/90 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 shadow-sm">
+                        Page {index + 2}
+                      </span>
+                    </div>
+                  ))}
+                  {pageBreakGuideX.map((sourceX, index) => (
+                    <div
+                      key={`page-x-${sourceX}`}
+                      className="absolute border-l-2 border-dotted border-slate-700/70"
+                      style={{
+                        height: pageBreakGuideHeight,
+                        left: outsideNumberMargin + sourceX * zoom,
+                        top: canvasViewportGuide.top,
+                      }}
+                    >
+                      <span className="absolute left-1 top-2 rounded bg-white/90 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 shadow-sm">
+                        Page {index + 2}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {selectedSourceBox && selectedSourceLayout ? (
+                <div
+                  className="pointer-events-none absolute border border-teal-700/75 bg-transparent shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
+                  style={selectedSourceBox}
+                >
+                  {SOURCE_RESIZE_HANDLES.map((handle) => (
+                    <button
+                      key={handle}
+                      type="button"
+                      aria-label={`Resize ${handle}`}
+                      disabled={selectedSource?.locked}
+                      onPointerDown={(event) => beginSourceResize(event, selectedSourceLayout, handle)}
+                      onPointerMove={dragGraph}
+                      onPointerUp={endGraphDrag}
+                      onPointerCancel={endGraphDrag}
+                      className={sourceResizeHandleClass(handle, selectedSource?.locked)}
+                    >
+                      <span className={sourceResizeHandleIconClass(handle)}>{sourceResizeHandleIcon(handle)}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           )}
         </div>
       </div>
@@ -2250,7 +3734,7 @@ export function EditorClient({ project }: { project: Project }) {
         ))}
       </div>
 
-      <div className={`grid gap-4 ${desktopGridColumns}`}>
+      <div className="grid gap-4 lg:grid-cols-[var(--editor-grid-columns)]" style={editorGridStyle}>
         <div className={`${mobileTab === "source" ? "block" : "hidden"} ${sourcePanelCollapsed ? "lg:hidden" : "lg:block"}`}>{sourcePanel}</div>
         <div className={mobileTab === "canvas" ? "block" : "hidden lg:block"}>{canvasPanel}</div>
         <div className={`${mobileTab === "controls" ? "block" : "hidden"} ${settingsPanelCollapsed ? "lg:hidden" : "lg:block"}`}>{settingsPanel}</div>

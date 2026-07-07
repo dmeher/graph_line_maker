@@ -10,6 +10,7 @@ export type PdfExportSettings = {
   graphHeight: number;
   cellSizeCm: number;
   imagePadding?: number;
+  pageMargin?: number;
   printOrientation?: "auto" | "portrait" | "landscape";
   printHorizontalAlignment?: "left" | "center" | "right";
   printVerticalAlignment?: "top" | "center" | "bottom";
@@ -27,6 +28,8 @@ export type PdfExportTile = {
   destinationYMm: number;
   destinationWidthMm: number;
   destinationHeightMm: number;
+  cutGuideTopYMm: number;
+  cutGuideBottomYMm: number;
 };
 
 export type PdfExportPlan = {
@@ -35,6 +38,8 @@ export type PdfExportPlan = {
   graphHeightMm: number;
   pageWidthMm: number;
   pageHeightMm: number;
+  pageVerticalMarginMm: number;
+  printablePageHeightMm: number;
   pagesX: number;
   pagesY: number;
   totalPages: number;
@@ -61,6 +66,28 @@ function pageSpanWithoutCuttingCells(pageSizeMm: number, graphSizeMm: number, ce
   const wholeCellsPerPage = Math.floor(pageSizeMm / cellSizeMm);
   if (wholeCellsPerPage < 1) return pageSizeMm;
   return Math.max(cellSizeMm, wholeCellsPerPage * cellSizeMm);
+}
+
+function safeVerticalPageMarginMm({
+  settings,
+  graphHeightMm,
+  canvasHeight,
+  pageHeightMm,
+  cellSizeMm,
+}: {
+  settings: PdfExportSettings;
+  graphHeightMm: number;
+  canvasHeight: number;
+  pageHeightMm: number;
+  cellSizeMm: number;
+}) {
+  const pageMarginPixels = Number(settings.pageMargin);
+  if (!Number.isFinite(pageMarginPixels) || pageMarginPixels <= 0) return 0;
+
+  const pixelHeightMm = graphHeightMm / Math.max(1, canvasHeight);
+  const rawMarginMm = pageMarginPixels * pixelHeightMm;
+  const maxMarginMm = Math.max(0, (pageHeightMm - Math.min(pageHeightMm, cellSizeMm)) / 2);
+  return Math.min(rawMarginMm, maxMarginMm);
 }
 
 export function getGraphPrintSizeMm(settings: PdfExportSettings) {
@@ -93,15 +120,25 @@ export function createPdfExportPlan({
     (settings.printOrientation !== "portrait" && graphSize.widthMm > graphSize.heightMm);
   const pageWidthMm = cmToMm(landscape ? Math.max(paper.widthCm, paper.heightCm) : Math.min(paper.widthCm, paper.heightCm));
   const pageHeightMm = cmToMm(landscape ? Math.min(paper.widthCm, paper.heightCm) : Math.max(paper.widthCm, paper.heightCm));
-  const cellSizeMm = cmToMm(Math.max(0.05, safePositive(settings.cellSizeCm, 1)));
-  const tileWidthMm = pageSpanWithoutCuttingCells(pageWidthMm, graphSize.widthMm, cellSizeMm);
-  const tileHeightMm = pageSpanWithoutCuttingCells(pageHeightMm, graphSize.heightMm, cellSizeMm);
-  const pagesX = Math.max(1, Math.ceil(graphSize.widthMm / tileWidthMm));
-  const pagesY = Math.max(1, Math.ceil(graphSize.heightMm / tileHeightMm));
   const safeCanvasWidth = Math.max(1, Math.round(canvasWidth));
   const safeCanvasHeight = Math.max(1, Math.round(canvasHeight));
+  const cellSizeMm = cmToMm(Math.max(0.05, safePositive(settings.cellSizeCm, 1)));
+  const pageVerticalMarginMm = safeVerticalPageMarginMm({
+    settings,
+    graphHeightMm: graphSize.heightMm,
+    canvasHeight: safeCanvasHeight,
+    pageHeightMm,
+    cellSizeMm,
+  });
+  const printablePageHeightMm = Math.max(cellSizeMm, pageHeightMm - pageVerticalMarginMm * 2);
+  const tileWidthMm = pageSpanWithoutCuttingCells(pageWidthMm, graphSize.widthMm, cellSizeMm);
+  const tileHeightMm = pageSpanWithoutCuttingCells(printablePageHeightMm, graphSize.heightMm, cellSizeMm);
+  const pagesX = Math.max(1, Math.ceil(graphSize.widthMm / tileWidthMm));
+  const pagesY = Math.max(1, Math.ceil(graphSize.heightMm / tileHeightMm));
   const singlePageOffsetX = alignmentOffset(Math.max(0, pageWidthMm - graphSize.widthMm), settings.printHorizontalAlignment ?? "center");
-  const singlePageOffsetY = alignmentOffset(Math.max(0, pageHeightMm - graphSize.heightMm), settings.printVerticalAlignment ?? "center");
+  const singlePageOffsetY =
+    pageVerticalMarginMm +
+    alignmentOffset(Math.max(0, printablePageHeightMm - graphSize.heightMm), settings.printVerticalAlignment ?? "center");
   const tiles: PdfExportTile[] = [];
 
   for (let tileY = 0; tileY < pagesY; tileY += 1) {
@@ -116,6 +153,7 @@ export function createPdfExportPlan({
       const sourceEndY = Math.round((sourceEndMmY / graphSize.heightMm) * safeCanvasHeight);
       const destinationWidthMm = sourceEndMmX - sourceStartMmX;
       const destinationHeightMm = sourceEndMmY - sourceStartMmY;
+      const destinationYMm = pagesY === 1 ? singlePageOffsetY : pageVerticalMarginMm;
 
       tiles.push({
         index: tiles.length,
@@ -126,9 +164,11 @@ export function createPdfExportPlan({
         sourceWidth: Math.max(1, sourceEndX - sourceX),
         sourceHeight: Math.max(1, sourceEndY - sourceY),
         destinationXMm: pagesX === 1 ? singlePageOffsetX : 0,
-        destinationYMm: pagesY === 1 ? singlePageOffsetY : 0,
+        destinationYMm,
         destinationWidthMm,
         destinationHeightMm,
+        cutGuideTopYMm: destinationYMm,
+        cutGuideBottomYMm: destinationYMm + destinationHeightMm,
       });
     }
   }
@@ -139,6 +179,8 @@ export function createPdfExportPlan({
     graphHeightMm: graphSize.heightMm,
     pageWidthMm,
     pageHeightMm,
+    pageVerticalMarginMm,
+    printablePageHeightMm,
     pagesX,
     pagesY,
     totalPages: pagesX * pagesY,

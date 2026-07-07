@@ -177,3 +177,39 @@ test("multi-page PDF export splits on whole graph-cell boundaries", () => {
   assert.equal(plan.tiles[0].destinationHeightMm, 290);
   assert.equal(plan.tiles.at(-1)?.destinationHeightMm, 250);
 });
+
+test("PDF export reserves top and bottom safe margins on every printed page", () => {
+  const plan = createPdfExportPlan({
+    settings: {
+      graphWidth: 10,
+      graphHeight: 112,
+      cellSizeCm: 1,
+      pageMargin: 24,
+      printHorizontalAlignment: "center",
+      printVerticalAlignment: "top",
+    },
+    paper: A4_PAPER,
+    canvasWidth: 400,
+    canvasHeight: 4480,
+  });
+
+  assert.equal(plan.pageVerticalMarginMm, 6);
+  assert.equal(plan.printablePageHeightMm, 285);
+  assert.equal(plan.pagesY, 4);
+  assert.equal(plan.tiles[0].destinationYMm, 6);
+  assert.equal(plan.tiles[0].destinationHeightMm, 280);
+  assert.equal(plan.tiles[0].cutGuideTopYMm, 6);
+  assert.equal(plan.tiles[0].cutGuideBottomYMm, 286);
+  assert.equal(plan.tiles.at(-1)?.destinationYMm, 6);
+  assert.equal(plan.tiles.at(-1)?.destinationHeightMm, 280);
+  assert.equal(plan.tiles.at(-1)?.cutGuideTopYMm, 6);
+  assert.equal(plan.tiles.at(-1)?.cutGuideBottomYMm, 286);
+
+  for (const tile of plan.tiles) {
+    assert.ok(tile.destinationYMm >= plan.pageVerticalMarginMm);
+    assert.ok(tile.destinationYMm + tile.destinationHeightMm <= plan.pageHeightMm - plan.pageVerticalMarginMm);
+    assert.equal(tile.cutGuideTopYMm, tile.destinationYMm);
+    assert.equal(tile.cutGuideBottomYMm, tile.destinationYMm + tile.destinationHeightMm);
+    assert.equal(tile.destinationHeightMm % 10, 0);
+  }
+});

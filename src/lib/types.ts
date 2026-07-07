@@ -31,6 +31,8 @@ export type PaletteColor = {
   sortOrder: number;
 };
 
+export type GraphRotationDegrees = number;
+
 export type GraphSourceImage = {
   id: string;
   name: string;
@@ -44,11 +46,53 @@ export type GraphSourceImage = {
   sourceFillMinStrokePixels: number;
   strokeGapClosePixels: number;
   x: number;
+  y: number;
   topPadding: number;
   bottomPadding: number;
+  locked: boolean;
+  rotationDegrees: GraphRotationDegrees;
+  flipX: boolean;
+  flipY: boolean;
 };
 
 export type MeasurementUnit = "cm" | "in";
+export type GraphCellLineSide = "top" | "right" | "bottom" | "left";
+
+export type GraphCellPaint = {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  sides: GraphCellLineSide[];
+  lineColor: string;
+  fillColor: string;
+  lineWidth: number;
+  locked: boolean;
+  rotationDegrees: GraphRotationDegrees;
+  flipX: boolean;
+  flipY: boolean;
+};
+
+export type GraphShapeKind = "square" | "rectangle" | "circle" | "oval" | "line" | "arrow";
+
+export type GraphShapeDrawing = {
+  id: string;
+  name: string;
+  kind: GraphShapeKind;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  strokeColor: string;
+  fillColor: string;
+  strokeWidth: number;
+  locked: boolean;
+  rotationDegrees: GraphRotationDegrees;
+  flipX: boolean;
+  flipY: boolean;
+};
 
 export type GraphSettings = {
   graphWidth: number;
@@ -80,10 +124,14 @@ export type GraphSettings = {
   showBorder: boolean;
   transparentBackground: boolean;
   showNumbers: boolean;
+  gridNumberPlacement: "inside" | "outside";
+  showPageBreaks: boolean;
   majorGridEvery: 5 | 10;
   imageWidth: number;
   imageHeight: number;
   sourceImages: GraphSourceImage[];
+  cellPaints: GraphCellPaint[];
+  graphShapes: GraphShapeDrawing[];
   imagePadding: number;
   imageOffsetX: number;
   imageOffsetY: number;

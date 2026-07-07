@@ -37,6 +37,11 @@ type ContentBounds = {
 
 export type FillRegionKind = "source" | "enclosed";
 
+export type FittedImageLayer = {
+  canvas: HTMLCanvasElement;
+  settings: GraphSettings;
+};
+
 type FillMaskLayer = {
   mask: Uint8Array;
   kind: FillRegionKind;
@@ -146,7 +151,7 @@ function fitCanvas(canvas: HTMLCanvasElement, settings: GraphSettings) {
   return output;
 }
 
-function findContentBounds(canvas: HTMLCanvasElement): ContentBounds {
+export function findContentBounds(canvas: HTMLCanvasElement): ContentBounds {
   const cached = contentBoundsCache.get(canvas);
   if (cached) return cached;
 
@@ -403,16 +408,17 @@ function drawGraphPaperGrid(canvas: HTMLCanvasElement, settings: GraphSettings) 
   const columns = Math.max(1, Math.round(dimensions.outputWidth / minorWidth));
   const rows = Math.max(1, Math.round(dimensions.outputHeight / minorHeight));
   const minorLineWidth = 1;
-  const midLineWidth = 2;
-  const majorLineWidth = 4;
+  const midLineWidth = 1;
+  const majorLineWidth = 2;
+  const gridColor = hexToRgb(settings.gridLineColor || DEFAULT_GRID_LINE_COLOR);
 
   context.save();
-  context.fillStyle = settings.gridLineColor || DEFAULT_GRID_LINE_COLOR;
+  context.fillStyle = `rgb(${gridColor.r}, ${gridColor.g}, ${gridColor.b})`;
 
-  function lineWidthForIndex(index: number) {
-    if (index % GRAPH_SUBDIVISIONS === 0) return majorLineWidth;
-    if (index % 5 === 0) return midLineWidth;
-    return minorLineWidth;
+  function lineProfileForIndex(index: number) {
+    if (index % GRAPH_SUBDIVISIONS === 0) return { width: majorLineWidth, alpha: 0.72 };
+    if (index % 5 === 0) return { width: midLineWidth, alpha: 0.52 };
+    return { width: minorLineWidth, alpha: 0.34 };
   }
 
   function lineStart(index: number, count: number, spacing: number, lineWidth: number, limit: number) {
@@ -422,22 +428,24 @@ function drawGraphPaperGrid(canvas: HTMLCanvasElement, settings: GraphSettings) 
   }
 
   for (let column = 0; column <= columns; column += 1) {
-    const lineWidth = lineWidthForIndex(column);
-    const x = lineStart(column, columns, minorWidth, lineWidth, canvas.width);
-    context.fillRect(x, 0, lineWidth, canvas.height);
+    const line = lineProfileForIndex(column);
+    const x = lineStart(column, columns, minorWidth, line.width, canvas.width);
+    context.globalAlpha = line.alpha;
+    context.fillRect(x, 0, line.width, canvas.height);
   }
 
   for (let row = 0; row <= rows; row += 1) {
-    const lineWidth = lineWidthForIndex(row);
-    const y = lineStart(row, rows, minorHeight, lineWidth, canvas.height);
-    context.fillRect(0, y, canvas.width, lineWidth);
+    const line = lineProfileForIndex(row);
+    const y = lineStart(row, rows, minorHeight, line.width, canvas.height);
+    context.globalAlpha = line.alpha;
+    context.fillRect(0, y, canvas.width, line.width);
   }
 
   context.restore();
 }
 
-export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSettings) {
-  const fitted = fitCanvas(sourceCanvas, settings);
+export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSettings, options: { sourceIsFitted?: boolean } = {}) {
+  const fitted = options.sourceIsFitted ? sourceCanvas : fitCanvas(sourceCanvas, settings);
   const fittedContext = fitted.getContext("2d", { willReadFrequently: true });
   if (!fittedContext) throw new Error("Canvas is not available.");
 
@@ -493,6 +501,126 @@ export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSe
   };
 }
 
+export function pixelateLayeredImages(layers: FittedImageLayer[], settings: GraphSettings) {
+  const dimensions = graphDimensions(settings);
+  const width = dimensions.outputWidth;
+  const height = dimensions.outputHeight;
+  const output = document.createElement("canvas");
+  output.width = width;
+  output.height = height;
+  const outputContext = output.getContext("2d", { willReadFrequently: true });
+  if (!outputContext) throw new Error("Canvas is not available.");
+
+  const fillRegionMap = new Uint16Array(width * height);
+  const outlineMask = new Uint8Array(width * height);
+  const regions: FillRegion[] = [];
+  let nextRegionId = 0;
+  let maxLineThickness = 0;
+
+  for (const layer of layers) {
+    const fitted =
+      layer.canvas.width === width && layer.canvas.height === height
+        ? layer.canvas
+        : (() => {
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext("2d", { willReadFrequently: true });
+            if (!context) throw new Error("Canvas is not available.");
+            context.drawImage(layer.canvas, 0, 0, width, height);
+            return canvas;
+          })();
+    const fittedContext = fitted.getContext("2d", { willReadFrequently: true });
+    if (!fittedContext) throw new Error("Canvas is not available.");
+
+    const sourceData = fittedContext.getImageData(0, 0, width, height);
+    const { enclosedFillMask, outlineMask: layerOutlineMask, sourceFillMask } = buildArtworkMasks(sourceData, layer.settings);
+    const local = labelFillRegions(
+      [
+        { mask: sourceFillMask, kind: "source" },
+        { mask: enclosedFillMask, kind: "enclosed" },
+      ],
+      width,
+      height,
+      settings,
+    );
+
+    const regionNumberMap = new Map<number, number>();
+    for (const region of local.regions) {
+      if (nextRegionId >= 65535) break;
+      nextRegionId += 1;
+      const globalId = String(nextRegionId);
+      regionNumberMap.set(Number(region.id), nextRegionId);
+      regions.push({
+        ...region,
+        id: globalId,
+        color: fillColorForRegion(settings, globalId, region.kind),
+      });
+    }
+
+    for (let pixel = 0; pixel < local.fillRegionMap.length; pixel += 1) {
+      const localRegionNumber = local.fillRegionMap[pixel];
+      if (!localRegionNumber) continue;
+      const globalRegionNumber = regionNumberMap.get(localRegionNumber);
+      if (globalRegionNumber) fillRegionMap[pixel] = globalRegionNumber;
+    }
+
+    for (let pixel = 0; pixel < layerOutlineMask.length; pixel += 1) {
+      if (layerOutlineMask[pixel]) outlineMask[pixel] = 1;
+    }
+    maxLineThickness = Math.max(maxLineThickness, clampImageLineThickness(layer.settings.imageLineThickness));
+  }
+
+  const visibleCounts = new Map<string, number>();
+  for (let pixel = 0; pixel < fillRegionMap.length; pixel += 1) {
+    const regionNumber = fillRegionMap[pixel];
+    if (regionNumber) visibleCounts.set(String(regionNumber), (visibleCounts.get(String(regionNumber)) ?? 0) + 1);
+  }
+  const visibleRegions = regions
+    .map((region) => ({
+      ...region,
+      cellCount: visibleCounts.get(region.id) ?? 0,
+      color: fillColorForRegion(settings, region.id, region.kind),
+    }))
+    .filter((region) => region.cellCount > 0);
+
+  outputContext.fillStyle = settings.backgroundColor || "#ffffff";
+  outputContext.fillRect(0, 0, output.width, output.height);
+  if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
+  drawFillRegions(outputContext, fillRegionMap, visibleRegions, output.width, output.height, settings, 0.8);
+  if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
+  drawMaskLayer(outputContext, outlineMask, output.width, output.height, settings.outlineColor || settings.lineColor, 255, 0.12 * maxLineThickness);
+
+  const outlineHex = rgbToHex(hexToRgb(settings.outlineColor || settings.lineColor));
+  const outlineCount = outlineMask.reduce((sum, value) => sum + value, 0);
+  const fillCountsByColor = new Map<string, number>();
+  const visibleRegionById = new Map(visibleRegions.map((region) => [region.id, region] as const));
+  for (const [regionId, cellCount] of visibleCounts) {
+    const region = visibleRegionById.get(regionId);
+    if (!region) continue;
+    const color = fillColorForRegion(settings, region.id, region.kind);
+    if (isTransparentFillColor(color)) continue;
+    const hex = rgbToHex(hexToRgb(color));
+    fillCountsByColor.set(hex, (fillCountsByColor.get(hex) ?? 0) + cellCount);
+  }
+
+  return {
+    canvas: output,
+    palette: [
+      { name: "Outline", hex: outlineHex, locked: true, cellCount: outlineCount, sortOrder: 0 },
+      ...Array.from(fillCountsByColor.entries()).map(([hex, cellCount], index) => ({
+        name: index === 0 ? "Fill" : `Fill ${index + 1}`,
+        hex,
+        locked: true,
+        cellCount,
+        sortOrder: index + 1,
+      })),
+    ],
+    fillRegions: visibleRegions,
+    fillRegionMap,
+  };
+}
+
 export function generateGridOverlay(canvas: HTMLCanvasElement, settings: GraphSettings) {
   drawGraphPaperGrid(canvas, settings);
 }
@@ -501,6 +629,11 @@ export async function pixelateImageWithWorker(
   sourceCanvas: HTMLCanvasElement,
   settings: GraphSettings,
   _palette: PaletteColor[],
+  options: { sourceIsFitted?: boolean } = {},
 ) {
-  return pixelateImage(sourceCanvas, settings);
+  return pixelateImage(sourceCanvas, settings, options);
+}
+
+export async function pixelateLayeredImagesWithWorker(layers: FittedImageLayer[], settings: GraphSettings) {
+  return pixelateLayeredImages(layers, settings);
 }

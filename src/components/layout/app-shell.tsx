@@ -19,7 +19,7 @@ export function AppShell({ session, children }: { session: CurrentSession; child
     <div className="min-h-dvh bg-[var(--panel)]">
       <header className="sticky top-0 z-30 border-b border-[var(--line)] bg-white/95 backdrop-blur">
         <div className="mx-auto flex max-w-[1480px] items-center justify-between gap-3 px-3 py-3 sm:px-4">
-          <Link href="/dashboard" aria-label="Graph Pixel Maker dashboard">
+          <Link href="/dashboard" prefetch={false} aria-label="Graph Pixel Maker dashboard">
             <BrandMark />
           </Link>
           <nav className="hidden items-center gap-1 md:flex">
@@ -30,6 +30,7 @@ export function AppShell({ session, children }: { session: CurrentSession; child
                 <Link
                   key={item.href}
                   href={item.href}
+                  prefetch={false}
                   className={`inline-flex h-10 items-center gap-2 rounded-md px-3 text-sm font-semibold transition ${
                     active ? "bg-teal-50 text-[var(--teal)]" : "text-slate-600 hover:bg-slate-100"
                   }`}
@@ -68,6 +69,7 @@ export function AppShell({ session, children }: { session: CurrentSession; child
             <Link
               key={item.href}
               href={item.href}
+              prefetch={false}
               className={`flex h-16 flex-col items-center justify-center gap-1 text-xs font-semibold ${
                 active ? "text-[var(--teal)]" : "text-slate-500"
               }`}

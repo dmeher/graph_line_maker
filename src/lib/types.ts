@@ -31,12 +31,32 @@ export type PaletteColor = {
   sortOrder: number;
 };
 
+export type GraphSourceImage = {
+  id: string;
+  name: string;
+  path: string | null;
+  url?: string | null;
+  width: number;
+  height: number;
+  measurementUnit: MeasurementUnit;
+  imageLineThickness: number;
+  sourceFillThreshold: number;
+  sourceFillMinStrokePixels: number;
+  strokeGapClosePixels: number;
+  x: number;
+  topPadding: number;
+  bottomPadding: number;
+};
+
+export type MeasurementUnit = "cm" | "in";
+
 export type GraphSettings = {
   graphWidth: number;
   graphHeight: number;
   cellWidth: number;
   cellHeight: number;
   cellSizeCm: number;
+  measurementUnit: MeasurementUnit;
   printPaperSize: PrintPaperSize;
   printOrientation: PrintOrientation;
   printHorizontalAlignment: PrintHorizontalAlignment;
@@ -63,6 +83,7 @@ export type GraphSettings = {
   majorGridEvery: 5 | 10;
   imageWidth: number;
   imageHeight: number;
+  sourceImages: GraphSourceImage[];
   imagePadding: number;
   imageOffsetX: number;
   imageOffsetY: number;

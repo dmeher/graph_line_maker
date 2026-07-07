@@ -21,7 +21,6 @@ import {
   DEFAULT_SOURCE_FILL_THRESHOLD,
   DEFAULT_STROKE_GAP_CLOSE_PIXELS,
   GRAPH_MAJOR_CELL_PIXELS,
-  MAX_IMAGE_PADDING_PIXELS,
   TRANSPARENT_FILL_COLOR,
   isGraphLineLayer,
   isFillColor,
@@ -35,9 +34,10 @@ import {
   clampSourceFillThreshold,
   clampStrokeGapClosePixels,
 } from "@/lib/graph-paper";
-import type { GraphSettings, PaletteColor, Project, ProjectSummary } from "@/lib/types";
+import type { GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSummary } from "@/lib/types";
 
-const MAX_CANVAS_DIMENSION = 6000;
+const MAX_CANVAS_DIMENSION = 24000;
+const MAX_SOURCE_IMAGES = 12;
 type StoredGraphSettings = Partial<GraphSettings> & {
   cellSizeInches?: number;
 };
@@ -49,6 +49,7 @@ export const defaultGraphSettings: GraphSettings = {
   cellWidth: GRAPH_MAJOR_CELL_PIXELS,
   cellHeight: GRAPH_MAJOR_CELL_PIXELS,
   cellSizeCm: DEFAULT_CELL_SIZE_CM,
+  measurementUnit: "in",
   printPaperSize: DEFAULT_PRINT_PAPER_SIZE,
   printOrientation: DEFAULT_PRINT_ORIENTATION,
   printHorizontalAlignment: DEFAULT_PRINT_HORIZONTAL_ALIGNMENT,
@@ -75,6 +76,7 @@ export const defaultGraphSettings: GraphSettings = {
   majorGridEvery: 5,
   imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
   imageHeight: DEFAULT_IMAGE_HEIGHT_CELLS,
+  sourceImages: [],
   imagePadding: 0,
   imageOffsetX: 0,
   imageOffsetY: 0,
@@ -123,12 +125,12 @@ function mapPalette(row: DbPalette): PaletteColor {
   };
 }
 
-function roundCm(value: number) {
-  return Math.round(value * 1000) / 1000;
-}
-
 function roundCells(value: number) {
   return Math.round(value * 100) / 100;
+}
+
+function isMeasurementUnit(value: unknown): value is GraphSettings["measurementUnit"] {
+  return value === "cm" || value === "in";
 }
 
 function clampImageCells(value: unknown, maxCells: number, fallback: number) {
@@ -138,12 +140,85 @@ function clampImageCells(value: unknown, maxCells: number, fallback: number) {
   return roundCells(Math.max(0.01, Math.min(maxCells, numeric)));
 }
 
+function clampPaddingCells(value: unknown, maxCells: number, fallback: number) {
+  const numeric = Number(value);
+  const limit = Math.max(1, maxCells);
+  const safeFallback = Math.max(-limit, Math.min(limit, fallback));
+  if (!Number.isFinite(numeric)) return roundCells(safeFallback);
+  return roundCells(Math.max(-limit, Math.min(limit, numeric)));
+}
+
+function defaultSourceX(graphWidth: number, width: number) {
+  return roundCells(Math.max(0, (graphWidth - width) / 2));
+}
+
+function clampSourceX(value: unknown, graphWidth: number, width: number) {
+  const maxX = Math.max(0, graphWidth - width);
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return defaultSourceX(graphWidth, width);
+  return roundCells(Math.max(0, Math.min(maxX, numeric)));
+}
+
 function normalizeFillRegions(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const entries = Object.entries(value)
     .filter(([regionId, color]) => /^\d+$/.test(regionId) && isFillColor(color))
     .slice(0, 500);
   return Object.fromEntries(entries);
+}
+
+function normalizeSourceImages(
+  value: unknown,
+  graphWidth: number,
+  graphHeight: number,
+  defaults: Pick<
+    GraphSettings,
+    "measurementUnit" | "imageLineThickness" | "sourceFillThreshold" | "sourceFillMinStrokePixels" | "strokeGapClosePixels"
+  >,
+): GraphSourceImage[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((source, index) => {
+      if (!source || typeof source !== "object" || Array.isArray(source)) return [];
+      const record = source as Partial<GraphSourceImage>;
+      const id = typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 80) : `source-${index + 1}`;
+      const name = typeof record.name === "string" && record.name.trim() ? record.name.trim().slice(0, 160) : `Source ${index + 1}`;
+      const path = typeof record.path === "string" && record.path.trim() ? record.path.trim().slice(0, 1024) : null;
+      const url = typeof record.url === "string" && record.url.trim() ? record.url.trim().slice(0, 4096) : null;
+      const width = clampImageCells(record.width, graphWidth, Math.min(defaultGraphSettings.imageWidth, graphWidth));
+      const height = clampImageCells(record.height, graphHeight, Math.min(defaultGraphSettings.imageHeight, graphHeight));
+      const measurementUnit = isMeasurementUnit(record.measurementUnit) ? record.measurementUnit : defaults.measurementUnit;
+      const imageLineThickness = clampImageLineThickness(record.imageLineThickness ?? defaults.imageLineThickness);
+      const sourceFillThreshold = clampSourceFillThreshold(record.sourceFillThreshold ?? defaults.sourceFillThreshold);
+      const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(record.sourceFillMinStrokePixels ?? defaults.sourceFillMinStrokePixels);
+      const strokeGapClosePixels = clampStrokeGapClosePixels(record.strokeGapClosePixels ?? defaults.strokeGapClosePixels);
+      const x = clampSourceX(record.x, graphWidth, width);
+      const topPadding = clampPaddingCells(record.topPadding, graphHeight, 0);
+      const bottomPadding = clampPaddingCells(record.bottomPadding, graphHeight, 0);
+      return [
+        {
+          id,
+          name,
+          path,
+          url,
+          width,
+          height,
+          measurementUnit,
+          imageLineThickness,
+          sourceFillThreshold,
+          sourceFillMinStrokePixels,
+          strokeGapClosePixels,
+          x,
+          topPadding,
+          bottomPadding,
+        },
+      ];
+    })
+    .slice(0, MAX_SOURCE_IMAGES);
+}
+
+function sourceNameFromPath(path: string | null) {
+  return path?.split("/").pop() || "Original image";
 }
 
 export function normalizeGraphSettings(settings?: StoredGraphSettings | null): GraphSettings {
@@ -163,9 +238,6 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const graphHeight = hasBrokenLegacyArtworkWidth ? defaultGraphSettings.graphHeight : rawGraphHeight;
   const imageAreaWidth = graphWidth * cellWidth;
   const imageAreaHeight = graphHeight * cellHeight;
-  const maxImagePadding = Math.max(0, Math.min(MAX_IMAGE_PADDING_PIXELS, Math.floor((Math.min(imageAreaWidth, imageAreaHeight) - 1) / 2)));
-  const legacyImagePadding = Math.max(0, Math.min(MAX_IMAGE_PADDING_PIXELS, maxImagePadding, Math.round(cleanMerged.imagePadding ?? 0)));
-  const legacyPaddingCells = legacyImagePadding / GRAPH_MAJOR_CELL_PIXELS;
   const legacyPixelSizedImageWidth =
     Number(cleanMerged.imageWidth) > graphWidth && Number(cleanMerged.imageWidth) <= imageAreaWidth
       ? Number(cleanMerged.imageWidth) / GRAPH_MAJOR_CELL_PIXELS
@@ -174,12 +246,14 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     Number(cleanMerged.imageHeight) > graphHeight && Number(cleanMerged.imageHeight) <= imageAreaHeight
       ? Number(cleanMerged.imageHeight) / GRAPH_MAJOR_CELL_PIXELS
       : cleanMerged.imageHeight;
+  const defaultImageWidth = Math.min(defaultGraphSettings.imageWidth, graphWidth);
+  const defaultImageHeight = Math.min(defaultGraphSettings.imageHeight, graphHeight);
   const imageWidth = hasBrokenLegacyArtworkWidth
-    ? clampImageCells(defaultGraphSettings.imageWidth, graphWidth, defaultGraphSettings.imageWidth)
-    : clampImageCells(legacyPixelSizedImageWidth, graphWidth, Math.max(0.01, graphWidth - legacyPaddingCells * 2));
+    ? clampImageCells(defaultImageWidth, graphWidth, defaultImageWidth)
+    : clampImageCells(legacyPixelSizedImageWidth, graphWidth, defaultImageWidth);
   const imageHeight = hasBrokenLegacyArtworkWidth
-    ? clampImageCells(defaultGraphSettings.imageHeight, graphHeight, defaultGraphSettings.imageHeight)
-    : clampImageCells(legacyPixelSizedImageHeight, graphHeight, Math.max(0.01, graphHeight - legacyPaddingCells * 2));
+    ? clampImageCells(defaultImageHeight, graphHeight, defaultImageHeight)
+    : clampImageCells(legacyPixelSizedImageHeight, graphHeight, defaultImageHeight);
   const imagePadding = 0;
   const outputWidth = imageAreaWidth;
   const outputHeight = imageAreaHeight;
@@ -198,7 +272,16 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     : isGraphLineLayer(cleanMerged.gridLineLayer)
       ? cleanMerged.gridLineLayer
       : DEFAULT_GRAPH_LINE_LAYER;
-  const cellSizeCm = roundCm(Math.max(0.05, Math.min(100, Number(cleanMerged.cellSizeCm || legacyCellSizeInches || DEFAULT_CELL_SIZE_CM))));
+  void legacyCellSizeInches;
+  const cellSizeCm = DEFAULT_CELL_SIZE_CM;
+  const measurementUnit = isMeasurementUnit(cleanMerged.measurementUnit) ? cleanMerged.measurementUnit : defaultGraphSettings.measurementUnit;
+  const sourceImages = normalizeSourceImages(cleanMerged.sourceImages, graphWidth, graphHeight, {
+    measurementUnit,
+    imageLineThickness,
+    sourceFillThreshold,
+    sourceFillMinStrokePixels,
+    strokeGapClosePixels,
+  });
   const printPaperSize = isPrintPaperSize(cleanMerged.printPaperSize) ? cleanMerged.printPaperSize : DEFAULT_PRINT_PAPER_SIZE;
   const printOrientation = isPrintOrientation(cleanMerged.printOrientation) ? cleanMerged.printOrientation : DEFAULT_PRINT_ORIENTATION;
   const printHorizontalAlignment = isPrintHorizontalAlignment(cleanMerged.printHorizontalAlignment)
@@ -215,6 +298,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     cellWidth,
     cellHeight,
     cellSizeCm,
+    measurementUnit,
     printPaperSize,
     printOrientation,
     printHorizontalAlignment,
@@ -235,6 +319,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     gridLineLayer,
     imageWidth,
     imageHeight,
+    sourceImages,
     imagePadding,
     imageOffsetX,
     imageOffsetY,
@@ -251,12 +336,60 @@ async function signedImageUrl(bucket: string, path?: string | null) {
   return data.signedUrl;
 }
 
+async function signedSourceImages(
+  sourceImages: GraphSourceImage[],
+  signedImageUrlMode: SignedImageUrlMode,
+  originalImagePath: string | null,
+  originalImageUrl: string | null,
+) {
+  if (signedImageUrlMode === "none") {
+    return sourceImages.map(({ url: _url, ...source }) => ({ ...source, url: null }));
+  }
+
+  return Promise.all(
+    sourceImages.map(async (source) => ({
+      ...source,
+      url: source.path === originalImagePath ? originalImageUrl : await signedImageUrl(ORIGINAL_IMAGES_BUCKET, source.path),
+    })),
+  );
+}
+
 async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImageUrlMode: SignedImageUrlMode = "all"): Promise<Project> {
-  const settings = normalizeGraphSettings(row.settings);
+  const baseSettings = normalizeGraphSettings(row.settings);
   const [originalImageUrl, processedImageUrl] = await Promise.all([
     signedImageUrlMode === "none" ? Promise.resolve(null) : signedImageUrl(ORIGINAL_IMAGES_BUCKET, row.original_image_path),
     signedImageUrlMode === "all" ? signedImageUrl(PROCESSED_IMAGES_BUCKET, row.processed_image_path) : Promise.resolve(null),
   ]);
+  const fallbackSourceImages = row.original_image_path
+    ? [
+        {
+          id: "original",
+          name: sourceNameFromPath(row.original_image_path),
+          path: row.original_image_path,
+          url: originalImageUrl,
+          width: baseSettings.imageWidth,
+          height: baseSettings.imageHeight,
+          measurementUnit: baseSettings.measurementUnit,
+          imageLineThickness: baseSettings.imageLineThickness,
+          sourceFillThreshold: baseSettings.sourceFillThreshold,
+          sourceFillMinStrokePixels: baseSettings.sourceFillMinStrokePixels,
+          strokeGapClosePixels: baseSettings.strokeGapClosePixels,
+          x: defaultSourceX(baseSettings.graphWidth, baseSettings.imageWidth),
+          topPadding: 0,
+          bottomPadding: 0,
+        },
+      ]
+    : [];
+  const sourceImages = await signedSourceImages(
+    baseSettings.sourceImages.length ? baseSettings.sourceImages : fallbackSourceImages,
+    signedImageUrlMode,
+    row.original_image_path,
+    originalImageUrl,
+  );
+  const settings = {
+    ...baseSettings,
+    sourceImages,
+  };
 
   return {
     id: row.id,
@@ -287,7 +420,7 @@ export async function getProjectSummaries(query?: string): Promise<ProjectSummar
   let request = supabase
     .from("projects")
     .select(
-      "id, user_id, title, description, original_image_path, processed_image_path, settings, width, height, pixel_size, grid_cell_size, color_count, created_at, updated_at",
+      "id, user_id, title, description, original_image_path, processed_image_path, width, height, pixel_size, grid_cell_size, color_count, created_at, updated_at",
     )
     .eq("user_id", session.userId)
     .order("updated_at", { ascending: false });
@@ -300,7 +433,7 @@ export async function getProjectSummaries(query?: string): Promise<ProjectSummar
   const { data, error } = await request;
   if (error) throw new Error(error.message);
 
-  const rows = (data ?? []) as DbProject[];
+  const rows = (data ?? []) as Array<Omit<DbProject, "settings">>;
   const ids = rows.map((row) => row.id);
   const paletteByProject = new Map<string, DbPalette[]>();
 
@@ -319,17 +452,27 @@ export async function getProjectSummaries(query?: string): Promise<ProjectSummar
     }
   }
 
-  return Promise.all(
-    rows.map(async (row) => {
-      const project = await mapProject(row, paletteByProject.get(row.id) ?? [], "none");
-      const { settings: _settings, palettes, ...summary } = project;
-      void _settings;
-      return {
-        ...summary,
-        palettePreview: palettes.slice(0, 6),
-      };
-    }),
-  );
+  return rows.map((row) => {
+    const palettes = (paletteByProject.get(row.id) ?? []).map(mapPalette).sort((a, b) => a.sortOrder - b.sortOrder);
+    return {
+      id: row.id,
+      userId: row.user_id,
+      title: row.title,
+      description: row.description,
+      originalImagePath: row.original_image_path,
+      processedImagePath: row.processed_image_path,
+      width: Number(row.width ?? defaultGraphSettings.outputWidth),
+      height: Number(row.height ?? defaultGraphSettings.outputHeight),
+      pixelSize: Number(row.pixel_size ?? defaultGraphSettings.pixelSize),
+      gridCellSize: Number(row.grid_cell_size ?? defaultGraphSettings.gridCellSize),
+      colorCount: Number(row.color_count ?? palettes.length),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      originalImageUrl: null,
+      processedImageUrl: null,
+      palettePreview: palettes.slice(0, 6),
+    };
+  });
 }
 
 export async function getProjectForCurrentUser(projectId: string) {
@@ -384,6 +527,12 @@ export async function assertProjectOwner(projectId: string) {
 export function imagePath(userId: string, projectId: string, kind: "original" | "processed", extension: string) {
   const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
   return `${userId}/${projectId}/${kind}.${safeExtension}`;
+}
+
+export function sourceImagePath(userId: string, projectId: string, imageId: string, extension: string) {
+  const safeImageId = imageId.toLowerCase().replace(/[^a-z0-9-]/g, "") || crypto.randomUUID();
+  const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
+  return `${userId}/${projectId}/sources/${safeImageId}.${safeExtension}`;
 }
 
 export async function replaceProjectPalettes(projectId: string, palettes: PaletteColor[]) {

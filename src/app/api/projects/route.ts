@@ -9,7 +9,7 @@ import {
   isAllowedImageFile,
 } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
-import { defaultGraphSettings, imagePath, normalizeGraphSettings } from "@/lib/projects";
+import { defaultGraphSettings, imagePath, normalizeGraphSettings, sourceImagePath } from "@/lib/projects";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 
 function getExtension(file: File) {
@@ -45,21 +45,32 @@ function settingsForImage() {
   });
 }
 
+function roundCells(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function defaultSourceX(graphWidth: number, width: number) {
+  return roundCells(Math.max(0, (graphWidth - width) / 2));
+}
+
 export async function POST(request: NextRequest) {
   try {
     const session = await requireSession();
     const formData = await request.formData();
     const title = String(formData.get("title") || "").trim();
     const description = String(formData.get("description") || "").trim();
-    const file = formData.get("file");
+    const files = [...formData.getAll("files"), ...formData.getAll("file")].filter((value): value is File => value instanceof File);
 
     if (!title) return NextResponse.json({ message: "Project title is required." }, { status: 400 });
-    if (!(file instanceof File)) return NextResponse.json({ message: "Source file is required." }, { status: 400 });
-    if (!isAllowedImageFile(file)) {
-      return NextResponse.json({ message: `Upload ${ALLOWED_IMAGE_LABEL} only.` }, { status: 400 });
-    }
-    if (file.size > MAX_UPLOAD_BYTES) {
-      return NextResponse.json({ message: "File is too large." }, { status: 400 });
+    if (!files.length) return NextResponse.json({ message: "At least one source file is required." }, { status: 400 });
+    if (files.length > 12) return NextResponse.json({ message: "Upload up to 12 source files." }, { status: 400 });
+    for (const file of files) {
+      if (!isAllowedImageFile(file)) {
+        return NextResponse.json({ message: `Upload ${ALLOWED_IMAGE_LABEL} only.` }, { status: 400 });
+      }
+      if (file.size > MAX_UPLOAD_BYTES) {
+        return NextResponse.json({ message: "File is too large." }, { status: 400 });
+      }
     }
 
     const supabase = getSupabaseAdmin();
@@ -81,18 +92,50 @@ export async function POST(request: NextRequest) {
 
     if (error) throw new Error(error.message);
 
-    const path = imagePath(session.userId, project.id, "original", getExtension(file));
-    const { error: uploadError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).upload(path, file, {
-      cacheControl: "3600",
-      contentType: getAllowedImageContentType(file) || file.type,
-      upsert: true,
-    });
+    const uploadedImages = await Promise.all(
+      files.map(async (file, index) => {
+        const imageId = index === 0 ? "original" : crypto.randomUUID();
+        const path =
+          index === 0
+            ? imagePath(session.userId, project.id, "original", getExtension(file))
+            : sourceImagePath(session.userId, project.id, imageId, getExtension(file));
+        const { error: uploadError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).upload(path, file, {
+          cacheControl: "3600",
+          contentType: getAllowedImageContentType(file) || file.type,
+          upsert: index === 0,
+        });
 
-    if (uploadError) throw new Error(uploadError.message);
+        if (uploadError) throw new Error(uploadError.message);
+        return {
+          id: imageId,
+          name: file.name || `Source ${index + 1}`,
+          path,
+        };
+      }),
+    );
+
+    const sourceHeight = files.length > 1 ? roundCells(settings.graphHeight / files.length) : settings.imageHeight;
+    const sourceImages = uploadedImages.map((image) => ({
+      ...image,
+      width: settings.imageWidth,
+      height: sourceHeight,
+      measurementUnit: settings.measurementUnit,
+      imageLineThickness: settings.imageLineThickness,
+      sourceFillThreshold: settings.sourceFillThreshold,
+      sourceFillMinStrokePixels: settings.sourceFillMinStrokePixels,
+      strokeGapClosePixels: settings.strokeGapClosePixels,
+      x: defaultSourceX(settings.graphWidth, settings.imageWidth),
+      topPadding: 0,
+      bottomPadding: 0,
+    }));
+    const settingsWithSources = normalizeGraphSettings({
+      ...settings,
+      sourceImages,
+    });
 
     const { error: updateError } = await supabase
       .from("projects")
-      .update({ original_image_path: path })
+      .update({ original_image_path: uploadedImages[0]?.path ?? null, settings: settingsWithSources })
       .eq("id", project.id)
       .eq("user_id", session.userId);
 

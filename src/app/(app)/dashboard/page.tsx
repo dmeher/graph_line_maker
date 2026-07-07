@@ -22,6 +22,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
           </div>
           <Link
             href="/projects/new"
+            prefetch={false}
             className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-[var(--teal)] px-4 text-sm font-semibold text-white shadow-sm"
           >
             <Plus size={16} aria-hidden="true" />
@@ -66,7 +67,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
                 {projects.map((project) => (
                   <tr key={project.id} className="hover:bg-slate-50">
                     <td className="border-b border-[var(--line)] px-4 py-3">
-                      <Link href={`/projects/${project.id}`} className="font-semibold text-slate-950 hover:text-[var(--teal)]">
+                      <Link href={`/projects/${project.id}`} prefetch={false} className="font-semibold text-slate-950 hover:text-[var(--teal)]">
                         {project.title}
                       </Link>
                       <p className="mt-1 max-w-sm truncate text-xs text-slate-500">{project.description || "No description"}</p>
@@ -122,6 +123,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
               </p>
               <Link
                 href="/projects/new"
+                prefetch={false}
                 className="mt-5 inline-flex h-10 items-center justify-center rounded-md bg-[var(--teal)] px-4 text-sm font-semibold text-white"
               >
                 Create project
@@ -135,7 +137,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             {projects.map((project) => (
               <article key={project.id} className="space-y-3 p-4">
                 <div>
-                  <Link href={`/projects/${project.id}`} className="font-semibold text-slate-950">
+                  <Link href={`/projects/${project.id}`} prefetch={false} className="font-semibold text-slate-950">
                     {project.title}
                   </Link>
                   <p className="mt-1 text-sm text-slate-600">{project.description || "No description"}</p>
@@ -172,4 +174,3 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
     </div>
   );
 }
-

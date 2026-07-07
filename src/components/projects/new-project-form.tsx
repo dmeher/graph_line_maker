@@ -105,7 +105,7 @@ export function NewProjectForm() {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [croppedArea, setCroppedArea] = useState<CropPixels | null>(null);
   const [useCrop, setUseCrop] = useState(false);
@@ -127,20 +127,26 @@ export function NewProjectForm() {
   }, []);
 
   const fileIssue = useMemo(() => {
-    return fileIssueFor(file);
-  }, [file]);
+    for (const selectedFile of files) {
+      const issue = fileIssueFor(selectedFile);
+      if (issue) return issue;
+    }
+    return null;
+  }, [files]);
 
-  function selectFile(nextFile: File | null) {
+  function selectFiles(nextFiles: FileList | File[] | null) {
     const previewToken = previewTokenRef.current + 1;
     previewTokenRef.current = previewToken;
+    const selectedFiles = Array.from(nextFiles ?? []);
+    const nextFile = selectedFiles[0] ?? null;
     setMessage(null);
-    setFile(nextFile);
+    setFiles(selectedFiles);
     setUseCrop(false);
     setCroppedArea(null);
     setImageUrl(null);
     setPreviewPending(false);
     if (nextFile && !title) setTitle(nextFile.name.replace(/\.[^.]+$/, ""));
-    if (!nextFile || fileIssueFor(nextFile)) return;
+    if (!nextFile || selectedFiles.some((selectedFile) => fileIssueFor(selectedFile))) return;
 
     if (!isPdfFile(nextFile)) {
       setImageUrl(URL.createObjectURL(nextFile));
@@ -159,7 +165,7 @@ export function NewProjectForm() {
       .catch(() => {
         if (previewTokenRef.current === previewToken) {
           setMessage("Unable to render the PDF preview.");
-          setFile(null);
+          setFiles([]);
         }
       })
       .finally(() => {
@@ -169,19 +175,19 @@ export function NewProjectForm() {
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file || fileIssue) return;
+    if (!files.length || fileIssue) return;
     setPending(true);
     setMessage(null);
 
     try {
-      const uploadFile = await cropFile(file, imageUrl || "", useCrop ? croppedArea : null);
-      const size = await readImageSize(uploadFile);
+      const uploadFiles = files.length === 1 ? [await cropFile(files[0], imageUrl || "", useCrop ? croppedArea : null)] : files;
+      const size = await readImageSize(uploadFiles[0]);
       const formData = new FormData();
       formData.set("title", title);
       formData.set("description", description);
       formData.set("width", String(size.width));
       formData.set("height", String(size.height));
-      formData.set("file", uploadFile);
+      for (const uploadFile of uploadFiles) formData.append("files", uploadFile);
 
       const response = await fetch("/api/projects", {
         method: "POST",
@@ -190,7 +196,6 @@ export function NewProjectForm() {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.message || "Unable to create project.");
       router.push(payload.redirectTo || `/projects/${payload.projectId}`);
-      router.refresh();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Unable to create project.");
       setPending(false);
@@ -231,21 +236,32 @@ export function NewProjectForm() {
           </div>
           <label className="flex min-h-40 cursor-pointer flex-col items-center justify-center rounded-md border border-dashed border-slate-300 bg-[var(--panel)] p-4 text-center hover:bg-slate-100">
             <ImageUp size={26} className="text-[var(--teal)]" aria-hidden="true" />
-            <span className="mt-3 text-sm font-semibold text-slate-950">Upload file</span>
+            <span className="mt-3 text-sm font-semibold text-slate-950">Upload files</span>
             <span className="mt-1 text-xs text-slate-500">{ALLOWED_IMAGE_LABEL} up to {bytesToSize(MAX_UPLOAD_BYTES)}</span>
             <input
               type="file"
               accept={IMAGE_ACCEPT}
+              multiple
               className="sr-only"
-              onChange={(event) => selectFile(event.target.files?.[0] ?? null)}
+              onChange={(event) => {
+                const selectedFiles = Array.from(event.target.files ?? []);
+                event.target.value = "";
+                selectFiles(selectedFiles);
+              }}
             />
           </label>
-          {file ? (
+          {files.length ? (
             <div className="rounded-md border border-[var(--line)] bg-white p-3 text-sm">
-              <p className="font-semibold text-slate-950">{file.name}</p>
-              <p className="mt-1 text-xs text-slate-500">
-                {file.type || "Unknown type"} - {bytesToSize(file.size)}
+              <p className="font-semibold text-slate-950">
+                {files.length} file{files.length === 1 ? "" : "s"} selected
               </p>
+              <div className="mt-2 space-y-1">
+                {files.map((selectedFile) => (
+                  <p key={`${selectedFile.name}-${selectedFile.size}-${selectedFile.lastModified}`} className="truncate text-xs text-slate-500">
+                    {selectedFile.name} / {selectedFile.type || "Unknown type"} / {bytesToSize(selectedFile.size)}
+                  </p>
+                ))}
+              </div>
             </div>
           ) : null}
           {fileIssue ? (
@@ -256,7 +272,7 @@ export function NewProjectForm() {
           ) : null}
           {message ? <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{message}</p> : null}
           <button
-            disabled={pending || previewPending || !file || Boolean(fileIssue) || !title.trim()}
+            disabled={pending || previewPending || !files.length || Boolean(fileIssue) || !title.trim()}
             className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-md bg-[var(--teal)] text-sm font-semibold text-white disabled:opacity-60"
           >
             {pending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : null}
@@ -275,25 +291,34 @@ export function NewProjectForm() {
           ) : imageUrl ? (
             <div className="flex h-full flex-col gap-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <button
-                  type="button"
-                  onClick={() => setUseCrop((value) => !value)}
-                  className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-semibold ${
-                    useCrop ? "border-teal-200 bg-teal-50 text-[var(--teal)]" : "border-[var(--line)] bg-white text-slate-700"
-                  }`}
-                >
-                  <Crop size={16} aria-hidden="true" />
-                  Crop
-                </button>
-                {useCrop ? (
-                  <button
-                    type="button"
-                    onClick={() => setCroppedArea(null)}
-                    className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 text-sm font-semibold text-slate-700"
-                  >
-                    <Maximize2 size={16} aria-hidden="true" />
-                    Full image
-                  </button>
+                {files.length === 1 ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setUseCrop((value) => !value)}
+                      className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-semibold ${
+                        useCrop ? "border-teal-200 bg-teal-50 text-[var(--teal)]" : "border-[var(--line)] bg-white text-slate-700"
+                      }`}
+                    >
+                      <Crop size={16} aria-hidden="true" />
+                      Crop
+                    </button>
+                    {useCrop ? (
+                      <button
+                        type="button"
+                        onClick={() => setCroppedArea(null)}
+                        className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 text-sm font-semibold text-slate-700"
+                      >
+                        <Maximize2 size={16} aria-hidden="true" />
+                        Full image
+                      </button>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="text-sm font-semibold text-slate-600">Showing first file preview</p>
+                )}
+                {files.length > 1 ? (
+                  <p className="text-xs text-slate-500">Crop is available when one file is selected.</p>
                 ) : null}
               </div>
               <div className="relative h-[min(70vh,36rem)] min-h-[340px] flex-1 overflow-hidden rounded-md border border-slate-200 bg-white">

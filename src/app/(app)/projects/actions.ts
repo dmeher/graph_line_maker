@@ -24,11 +24,27 @@ import {
 import { assertProjectOwner, defaultGraphSettings, imagePath, normalizeGraphSettings, replaceProjectPalettes } from "@/lib/projects";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 
+const MAX_CANVAS_DIMENSION = 24000;
 const hexSchema = z.string().regex(/^#[0-9A-Fa-f]{6}$/);
 const fillColorSchema = z.union([hexSchema, z.literal(TRANSPARENT_FILL_COLOR)]);
 const fillRegionsSchema = z
   .record(z.string().regex(/^\d+$/), fillColorSchema)
   .refine((value) => Object.keys(value).length <= 500, "Too many custom fill regions.");
+const sourceImageSchema = z.object({
+  id: z.string().min(1).max(80),
+  name: z.string().min(1).max(160),
+  path: z.string().min(1).max(1024).nullable(),
+  width: z.number().min(0.01).max(1000),
+  height: z.number().min(0.01).max(1000),
+  measurementUnit: z.enum(["cm", "in"]),
+  imageLineThickness: z.number().min(MIN_IMAGE_LINE_THICKNESS).max(MAX_IMAGE_LINE_THICKNESS),
+  sourceFillThreshold: z.number().min(MIN_SOURCE_FILL_THRESHOLD).max(MAX_SOURCE_FILL_THRESHOLD),
+  sourceFillMinStrokePixels: z.number().int().min(MIN_SOURCE_FILL_MIN_STROKE_PIXELS).max(MAX_SOURCE_FILL_MIN_STROKE_PIXELS),
+  strokeGapClosePixels: z.number().int().min(MIN_STROKE_GAP_CLOSE_PIXELS).max(MAX_STROKE_GAP_CLOSE_PIXELS),
+  x: z.number().min(0).max(1000),
+  topPadding: z.number().min(-1000).max(1000),
+  bottomPadding: z.number().min(-1000).max(1000),
+});
 
 const graphSettingsSchema = z.object({
   graphWidth: z.number().int().min(1).max(1000),
@@ -36,14 +52,15 @@ const graphSettingsSchema = z.object({
   cellWidth: z.number().int().min(1).max(240),
   cellHeight: z.number().int().min(1).max(240),
   cellSizeCm: z.number().min(0.05).max(100),
+  measurementUnit: z.enum(["cm", "in"]),
   printPaperSize: z.enum(PRINT_PAPER_SIZE_KEYS),
   printOrientation: z.enum(PRINT_ORIENTATION_KEYS),
   printHorizontalAlignment: z.enum(PRINT_HORIZONTAL_ALIGNMENT_KEYS),
   printVerticalAlignment: z.enum(PRINT_VERTICAL_ALIGNMENT_KEYS),
   pixelSize: z.number().int().min(1).max(240),
   gridCellSize: z.number().int().min(1).max(240),
-  outputWidth: z.number().int().min(1).max(6000),
-  outputHeight: z.number().int().min(1).max(6000),
+  outputWidth: z.number().int().min(1).max(MAX_CANVAS_DIMENSION),
+  outputHeight: z.number().int().min(1).max(MAX_CANVAS_DIMENSION),
   backgroundColor: hexSchema,
   lineColor: hexSchema,
   outlineColor: hexSchema,
@@ -62,9 +79,10 @@ const graphSettingsSchema = z.object({
   majorGridEvery: z.union([z.literal(5), z.literal(10)]),
   imageWidth: z.number().min(0.01).max(1000),
   imageHeight: z.number().min(0.01).max(1000),
+  sourceImages: z.array(sourceImageSchema).max(12),
   imagePadding: z.number().int().min(0).max(MAX_IMAGE_PADDING_PIXELS),
-  imageOffsetX: z.number().int().min(-6000).max(6000),
-  imageOffsetY: z.number().int().min(-6000).max(6000),
+  imageOffsetX: z.number().int().min(-MAX_CANVAS_DIMENSION).max(MAX_CANVAS_DIMENSION),
+  imageOffsetY: z.number().int().min(-MAX_CANVAS_DIMENSION).max(MAX_CANVAS_DIMENSION),
   spotPadding: z.number().int().min(0).max(48),
   spotShape: z.union([z.literal("round"), z.literal("square")]),
   pageMargin: z.number().int().min(0).max(400),
@@ -86,8 +104,8 @@ const saveProjectSchema = z.object({
   title: z.string().min(1).max(160),
   description: z.string().max(2000).optional(),
   settings: graphSettingsSchema,
-  width: z.number().int().min(0).max(6000),
-  height: z.number().int().min(0).max(6000),
+  width: z.number().int().min(0).max(MAX_CANVAS_DIMENSION),
+  height: z.number().int().min(0).max(MAX_CANVAS_DIMENSION),
   colorCount: z.number().int().min(0).max(256),
   palettes: z.array(paletteSchema).max(256),
 });

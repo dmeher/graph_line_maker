@@ -27,25 +27,25 @@ test("test2 PDF export layout keeps centimeter print size", () => {
   assert.equal(plan.pageWidthMm, 210);
   assert.equal(plan.pageHeightMm, 297);
   assert.equal(plan.pagesX, 3);
-  assert.equal(plan.pagesY, 3);
-  assert.equal(plan.totalPages, 9);
+  assert.equal(plan.pagesY, 4);
+  assert.equal(plan.totalPages, 12);
 
   const firstTile = plan.tiles[0];
-  assert.equal(firstTile.destinationXMm, 65);
-  assert.equal(firstTile.destinationYMm, 45.5);
-  assert.equal(firstTile.destinationWidthMm, 145);
-  assert.equal(firstTile.destinationHeightMm, 251.5);
+  assert.equal(firstTile.destinationXMm, 0);
+  assert.equal(firstTile.destinationYMm, 0);
+  assert.equal(firstTile.destinationWidthMm, 200);
+  assert.equal(firstTile.destinationHeightMm, 200);
 
   const lastTile = plan.tiles.at(-1);
   assert.ok(lastTile);
   assert.equal(lastTile.destinationXMm, 0);
   assert.equal(lastTile.destinationYMm, 0);
-  assert.equal(lastTile.destinationWidthMm, 145);
-  assert.equal(lastTile.destinationHeightMm, 251.5);
-  assert.equal(lastTile.sourceX, 568);
-  assert.equal(lastTile.sourceY, 878);
-  assert.equal(lastTile.sourceWidth, 232);
-  assert.equal(lastTile.sourceHeight, 402);
+  assert.equal(lastTile.destinationWidthMm, 100);
+  assert.equal(lastTile.destinationHeightMm, 200);
+  assert.equal(lastTile.sourceX, 640);
+  assert.equal(lastTile.sourceY, 960);
+  assert.equal(lastTile.sourceWidth, 160);
+  assert.equal(lastTile.sourceHeight, 320);
 });
 
 test("single-page PDF export centers graph on paper", () => {
@@ -147,4 +147,33 @@ test("PDF export can force landscape orientation", () => {
   assert.equal(plan.pageHeightMm, 210);
   assert.equal(plan.tiles[0].destinationXMm, 123.5);
   assert.equal(plan.tiles[0].destinationYMm, 80);
+});
+
+test("multi-page PDF export splits on whole graph-cell boundaries", () => {
+  const plan = createPdfExportPlan({
+    settings: {
+      graphWidth: 10,
+      graphHeight: 112,
+      cellSizeCm: 1,
+      printHorizontalAlignment: "center",
+      printVerticalAlignment: "center",
+    },
+    paper: A4_PAPER,
+    canvasWidth: 400,
+    canvasHeight: 4480,
+  });
+
+  assert.equal(plan.pagesX, 1);
+  assert.equal(plan.pagesY, 4);
+  assert.equal(plan.tiles[0].destinationXMm, 55);
+  assert.equal(plan.tiles[0].destinationYMm, 0);
+
+  for (const tile of plan.tiles) {
+    assert.equal(tile.sourceY % 40, 0);
+    assert.equal(tile.sourceHeight % 40, 0);
+    assert.equal(tile.destinationHeightMm % 10, 0);
+  }
+
+  assert.equal(plan.tiles[0].destinationHeightMm, 290);
+  assert.equal(plan.tiles.at(-1)?.destinationHeightMm, 250);
 });

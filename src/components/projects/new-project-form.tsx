@@ -112,7 +112,25 @@ export function NewProjectForm() {
   const [message, setMessage] = useState<string | null>(null);
   const [previewPending, setPreviewPending] = useState(false);
   const [pending, setPending] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
   const previewTokenRef = useRef(0);
+
+  useEffect(() => {
+    setIsOnline(navigator.onLine);
+    const handleOnline = () => {
+      setIsOnline(true);
+      setMessage((current) =>
+        current === "Creating a new project needs a connection because source files must be uploaded." ? null : current,
+      );
+    };
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -176,6 +194,10 @@ export function NewProjectForm() {
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!files.length || fileIssue) return;
+    if (!isOnline) {
+      setMessage("Creating a new project needs a connection because source files must be uploaded.");
+      return;
+    }
     setPending(true);
     setMessage(null);
 
@@ -270,9 +292,15 @@ export function NewProjectForm() {
               {fileIssue}
             </p>
           ) : null}
+          {!isOnline ? (
+            <p className="flex gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              <AlertTriangle size={16} aria-hidden="true" />
+              Creating a new project needs a connection because source files must be uploaded.
+            </p>
+          ) : null}
           {message ? <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{message}</p> : null}
           <button
-            disabled={pending || previewPending || !files.length || Boolean(fileIssue) || !title.trim()}
+            disabled={pending || previewPending || !isOnline || !files.length || Boolean(fileIssue) || !title.trim()}
             className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-md bg-[var(--teal)] text-sm font-semibold text-white disabled:opacity-60"
           >
             {pending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : null}

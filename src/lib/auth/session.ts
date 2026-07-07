@@ -8,12 +8,14 @@ import { tryGetSupabaseAdmin } from "@/lib/supabase/server";
 import type { AppRole, AppUser, CurrentSession } from "@/lib/types";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+const OFFLINE_SESSION_KIND = "offline-session";
 
 type SessionPayload = {
   userId: string;
   email: string;
   role: AppRole;
   exp: number;
+  kind?: string;
 };
 
 type DbUser = {
@@ -50,6 +52,22 @@ export function createSessionToken(input: Pick<SessionPayload, "userId" | "email
   });
 }
 
+export function createOfflineSessionTicket(input: CurrentSession) {
+  const exp = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+  const token = signPayload({
+    kind: OFFLINE_SESSION_KIND,
+    userId: input.userId,
+    email: normalizeEmail(input.email),
+    role: input.role,
+    exp,
+  });
+
+  return {
+    token,
+    expiresAt: new Date(exp * 1000).toISOString(),
+  };
+}
+
 export function getSessionCookieOptions() {
   return {
     httpOnly: true,
@@ -63,6 +81,7 @@ export function getSessionCookieOptions() {
 function parseSessionToken(token?: string | null) {
   const payload = verifySignedPayload<SessionPayload>(token);
   if (!payload || payload.exp <= Math.floor(Date.now() / 1000)) return null;
+  if (payload.kind === OFFLINE_SESSION_KIND) return null;
   return payload;
 }
 

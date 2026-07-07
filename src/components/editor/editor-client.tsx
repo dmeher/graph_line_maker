@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   ArrowDown,
@@ -42,12 +43,17 @@ import {
   PanelRightOpen,
 } from "lucide-react";
 import { saveProjectState } from "@/app/(app)/projects/actions";
-import { ManualCropper } from "@/components/projects/manual-cropper";
 import { cropCanvasToFile, fullCrop, type CropPixels } from "@/lib/canvas/crop";
-import { exportCanvasAsPDF, exportCanvasAsPNG, exportSettingsAsJSON, printCanvas } from "@/lib/canvas/exports";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
 import { findContentBounds, loadImageToCanvas, pixelateLayeredImagesWithWorker, resizeImage, type FillRegion } from "@/lib/canvas/processor";
 import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
+import {
+  createEditorSessionDraft,
+  hasEditorSessionDraft,
+  readEditorSessionDraft,
+  removeEditorSessionDraft,
+  writeEditorSessionDraft,
+} from "@/lib/editor/session-draft";
 import { ROTATION_STEP_DEGREES, sourceLayouts, snapCellToGrid, sourceProcessingCacheKey, stackEndCell, normalizeRotationDegrees, type SourceLayout } from "@/lib/editor/source-layout";
 import {
   DEFAULT_CELL_SIZE_CM,
@@ -160,6 +166,15 @@ type SourceImagesUploadResponse = {
   message?: unknown;
 };
 
+const ManualCropper = dynamic(() => import("@/components/projects/manual-cropper").then((module) => module.ManualCropper), {
+  ssr: false,
+  loading: () => (
+    <div className="grid h-full min-h-64 place-items-center text-sm font-semibold text-slate-500">
+      Preparing crop
+    </div>
+  ),
+});
+
 const MAX_CANVAS_DIMENSION = 24000;
 const MAX_SETTINGS_HISTORY = 80;
 const MIN_SIDE_PANEL_WIDTH = 280;
@@ -236,6 +251,23 @@ function isUploadedSourceImage(value: unknown): value is UploadedSourceImage {
 
 async function canvasToObjectUrl(canvas: HTMLCanvasElement) {
   return URL.createObjectURL(await canvasToBlob(canvas));
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item: T, index: number) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+
+  async function runNext() {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, runNext));
+  return results;
 }
 
 function clampImageOffset(value: number) {
@@ -924,6 +956,9 @@ export function EditorClient({ project }: { project: Project }) {
   const [description, setDescription] = useState(project.description ?? "");
   const [settings, setSettings] = useState<GraphSettings>(() => initialEditorSettings(project));
   const [palette, setPalette] = useState<PaletteColor[]>(project.palettes);
+  const [draftChecked, setDraftChecked] = useState(false);
+  const [hasSessionDraft, setHasSessionDraft] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
   const [sourceReady, setSourceReady] = useState(false);
   const [sourceStatus, setSourceStatus] = useState<Record<string, SourceStatus>>({});
   const [sourceCropMode, setSourceCropMode] = useState(false);
@@ -983,6 +1018,47 @@ export function EditorClient({ project }: { project: Project }) {
   const fillRegionMapRef = useRef<Uint16Array | null>(null);
   const settingsHistoryRef = useRef<SettingsHistory>({ undo: [], redo: [] });
   const spacePressedRef = useRef(false);
+
+  useEffect(() => {
+    const baseSettings = initialEditorSettings(project);
+    const draft = readEditorSessionDraft(project.id, project.updatedAt, baseSettings);
+    if (draft) {
+      const nextSettings = deriveGraphSettings(draft.settings);
+      settingsRef.current = nextSettings;
+      setTitle(draft.title);
+      setDescription(draft.description);
+      setSettings(nextSettings);
+      setPalette(draft.palette);
+      setHasSessionDraft(true);
+      setNotice({ tone: "info", text: "Restored an offline draft from this browser session. Press Save while online to sync it." });
+    } else {
+      setHasSessionDraft(hasEditorSessionDraft(project.id));
+    }
+    setDraftChecked(true);
+  }, [project]);
+
+  useEffect(() => {
+    function syncOnlineState() {
+      const nextOnline = typeof navigator === "undefined" ? true : navigator.onLine;
+      setIsOnline(nextOnline);
+      if (!nextOnline) {
+        setNotice({ tone: "info", text: "You are offline. Save will store a draft in this browser session." });
+        return;
+      }
+      if (readEditorSessionDraft(project.id, project.updatedAt, initialEditorSettings(project))) {
+        setHasSessionDraft(true);
+        setNotice({ tone: "info", text: "Back online. Press Save to sync the session draft to the database." });
+      }
+    }
+
+    syncOnlineState();
+    window.addEventListener("online", syncOnlineState);
+    window.addEventListener("offline", syncOnlineState);
+    return () => {
+      window.removeEventListener("online", syncOnlineState);
+      window.removeEventListener("offline", syncOnlineState);
+    };
+  }, [project]);
 
   const filename = useMemo(() => slug(title), [title]);
   const primarySource = settings.sourceImages[0] ?? null;
@@ -1972,6 +2048,7 @@ export function EditorClient({ project }: { project: Project }) {
   }, []);
 
   useEffect(() => {
+    if (!draftChecked) return;
     const sources = settingsRef.current.sourceImages;
     let cancelled = false;
     setSourceReady(false);
@@ -2007,8 +2084,10 @@ export function EditorClient({ project }: { project: Project }) {
     const hasPdf = sources.some((source) => isPdfFile({ name: source.name }));
     setNotice({ tone: "info", text: hasPdf ? "Rendering source files..." : "Loading source files..." });
 
-    void Promise.all(
-      sources.map(async (source) => {
+    void mapWithConcurrency(
+      sources,
+      2,
+      async (source) => {
         try {
           if (!source.url) throw new Error(`${source.name} is not available. Save and reopen the project, then try again.`);
           const canvas = resizeImage(await loadImageToCanvas(source.url, source.name), 2200, 2200);
@@ -2022,7 +2101,7 @@ export function EditorClient({ project }: { project: Project }) {
             error: error instanceof Error ? error.message : "Unable to load this source image.",
           };
         }
-      }),
+      },
     )
       .then((loadedSources) => {
         if (cancelled) {
@@ -2060,11 +2139,13 @@ export function EditorClient({ project }: { project: Project }) {
     return () => {
       cancelled = true;
     };
-  }, [sourceLoadKey]);
+  }, [draftChecked, sourceLoadKey]);
 
   useEffect(() => {
+    if (!draftChecked) return;
     if (settings.sourceImages.length && !sourceReady) return;
     let cancelled = false;
+    const controller = new AbortController();
     setProcessing(true);
 
     const timer = window.setTimeout(() => {
@@ -2094,7 +2175,7 @@ export function EditorClient({ project }: { project: Project }) {
         imageWidth: settings.graphWidth,
         imageHeight: settings.graphHeight,
       });
-      void pixelateLayeredImagesWithWorker(layers, renderSettings)
+      void pixelateLayeredImagesWithWorker(layers, renderSettings, { signal: controller.signal })
         .then((result) => {
           if (cancelled) return;
           processedCanvasRef.current = result.canvas;
@@ -2107,6 +2188,7 @@ export function EditorClient({ project }: { project: Project }) {
           setProcessing(false);
         })
         .catch((error) => {
+          if (controller.signal.aborted) return;
           if (!cancelled) {
             setProcessing(false);
             setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to process image." });
@@ -2116,9 +2198,10 @@ export function EditorClient({ project }: { project: Project }) {
 
     return () => {
       cancelled = true;
+      controller.abort();
       window.clearTimeout(timer);
     };
-  }, [drawPreview, settings, sourceReady]);
+  }, [draftChecked, drawPreview, settings, sourceReady]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -2173,6 +2256,13 @@ export function EditorClient({ project }: { project: Project }) {
 
   async function uploadSourceImages(filesInput: File[] | FileList, successText = "Source images added.", replaceSourceId?: string) {
     setNotice(null);
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setNotice({
+        tone: "error",
+        text: "Adding, replacing, or cropping source images needs a connection. You can keep editing loaded images and save an offline draft.",
+      });
+      return false;
+    }
     const files = Array.from(filesInput);
     if (!files.length) return false;
     if (replaceSourceId && files.length !== 1) {
@@ -2325,7 +2415,13 @@ export function EditorClient({ project }: { project: Project }) {
       message: error instanceof Error ? error.message : "Unable to save source images to the project.",
     }));
 
-    setNotice(result.ok ? { tone: "ok", text: successText } : { tone: "error", text: result.message });
+    if (result.ok) {
+      removeEditorSessionDraft(project.id);
+      setHasSessionDraft(false);
+      setNotice({ tone: "ok", text: successText });
+    } else {
+      setNotice({ tone: "error", text: result.message });
+    }
     setUploadingSources(false);
     setReplacingSourceId(null);
     return true;
@@ -2371,8 +2467,39 @@ export function EditorClient({ project }: { project: Project }) {
     }
   }
 
+  function saveSessionDraft(message: string, tone: Notice["tone"] = "ok") {
+    try {
+      const canvas = processedCanvasRef.current;
+      const currentSettings = settingsRef.current;
+      const draft = createEditorSessionDraft({
+        projectId: project.id,
+        title,
+        description,
+        settings: currentSettings,
+        palette,
+        width: canvas?.width ?? currentSettings.outputWidth,
+        height: canvas?.height ?? currentSettings.outputHeight,
+        colorCount: palette.length,
+      });
+      writeEditorSessionDraft(draft);
+      setHasSessionDraft(true);
+      setNotice({ tone, text: message });
+      return true;
+    } catch (error) {
+      setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to save offline draft." });
+      return false;
+    }
+  }
+
   function saveProject() {
     const canvas = processedCanvasRef.current;
+    const online = typeof navigator === "undefined" ? true : navigator.onLine;
+    if (!online) {
+      setIsOnline(false);
+      saveSessionDraft("Offline draft saved in this browser session.");
+      return;
+    }
+
     startTransition(async () => {
       try {
         const result = await saveProjectState({
@@ -2387,14 +2514,17 @@ export function EditorClient({ project }: { project: Project }) {
         });
 
         if (!result.ok) {
-          setNotice({ tone: "error", text: result.message });
+          saveSessionDraft(`Database save failed. A session draft was saved instead. ${result.message}`, "info");
           return;
         }
 
         await saveProcessedImage();
+        removeEditorSessionDraft(project.id);
+        setHasSessionDraft(false);
         setNotice({ tone: "ok", text: "Project saved." });
       } catch (error) {
-        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to save project." });
+        const detail = error instanceof Error ? error.message : "Unable to save project.";
+        saveSessionDraft(`Could not reach the database. Offline draft saved in this browser session. ${detail}`, "info");
       }
     });
   }
@@ -2402,33 +2532,49 @@ export function EditorClient({ project }: { project: Project }) {
   function exportPNG() {
     const canvas = processedCanvasRef.current;
     if (!canvas) return;
-    exportCanvasAsPNG(canvas, `${filename}.png`);
+    void import("@/lib/canvas/exports")
+      .then(({ exportCanvasAsPNG }) => exportCanvasAsPNG(canvas, `${filename}.png`))
+      .catch((error) => {
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to export PNG." });
+      });
   }
 
   function exportPDF() {
     const canvas = processedCanvasRef.current;
     if (!canvas) return;
-    void exportCanvasAsPDF(canvas, `${filename}.pdf`, settings);
+    void import("@/lib/canvas/exports")
+      .then(({ exportCanvasAsPDF }) => exportCanvasAsPDF(canvas, `${filename}.pdf`, settings))
+      .catch((error) => {
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to export PDF." });
+      });
   }
 
   function printGraph() {
     const canvas = processedCanvasRef.current;
     if (!canvas) return;
-    try {
-      printCanvas(canvas, settings, title || "Graph pixel chart");
-    } catch (error) {
-      setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to open print view." });
-    }
+    void import("@/lib/canvas/exports")
+      .then(({ printCanvas }) => {
+        printCanvas(canvas, settings, title || "Graph pixel chart");
+      })
+      .catch((error) => {
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to open print view." });
+      });
   }
 
   function exportJSON() {
-    exportSettingsAsJSON(`${filename}.json`, settings, palette, {
-      projectId: project.id,
-      title,
-      description,
-      sourceName,
-      exportedAt: new Date().toISOString(),
-    });
+    void import("@/lib/canvas/exports")
+      .then(({ exportSettingsAsJSON }) => {
+        exportSettingsAsJSON(`${filename}.json`, settings, palette, {
+          projectId: project.id,
+          title,
+          description,
+          sourceName,
+          exportedAt: new Date().toISOString(),
+        });
+      })
+      .catch((error) => {
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to export JSON." });
+      });
   }
 
   const sourcePanel = (
@@ -3538,7 +3684,13 @@ export function EditorClient({ project }: { project: Project }) {
             <button type="button" onClick={() => setZoom((value) => Math.min(2.5, value + 0.15))} className="grid h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600" title="Zoom in">
               <ZoomIn size={16} aria-hidden="true" />
             </button>
-            <button type="button" onClick={saveProject} disabled={isPending || processing || !title.trim()} className="inline-flex h-10 items-center gap-2 rounded-md bg-[var(--teal)] px-4 text-sm font-semibold text-white disabled:opacity-60">
+            <button
+              type="button"
+              onClick={saveProject}
+              disabled={isPending || processing || !title.trim()}
+              title={!isOnline ? "Save an offline session draft" : hasSessionDraft ? "Sync session draft to the database" : "Save project"}
+              className="inline-flex h-10 items-center gap-2 rounded-md bg-[var(--teal)] px-4 text-sm font-semibold text-white disabled:opacity-60"
+            >
               {isPending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Save size={16} aria-hidden="true" />}
               Save
             </button>

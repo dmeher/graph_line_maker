@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
-import { ServiceWorkerRegistration } from "@/components/layout/service-worker-registration";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -28,6 +27,32 @@ export const metadata: Metadata = {
   },
 };
 
+const serviceWorkerRegistrationScript = `
+(() => {
+  if (!("serviceWorker" in navigator)) return;
+
+  const register = () => {
+    navigator.serviceWorker
+      .register("/sw.js", { scope: "/", updateViaCache: "none" })
+      .then((registration) => {
+        registration.addEventListener("updatefound", () => {
+          const worker = registration.installing;
+          if (!worker) return;
+          worker.addEventListener("statechange", () => {
+            if (worker.state === "installed" && navigator.serviceWorker.controller) {
+              worker.postMessage({ type: "SKIP_WAITING" });
+            }
+          });
+        });
+      })
+      .catch(() => {});
+  };
+
+  if (document.readyState === "complete") register();
+  else window.addEventListener("load", register, { once: true });
+})();
+`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -40,7 +65,7 @@ export default function RootLayout({
     >
       <body className="min-h-full bg-background text-foreground antialiased">
         {children}
-        <ServiceWorkerRegistration />
+        <script dangerouslySetInnerHTML={{ __html: serviceWorkerRegistrationScript }} />
       </body>
     </html>
   );

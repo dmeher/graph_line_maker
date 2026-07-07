@@ -14,12 +14,17 @@ import {
 } from "@/lib/graph-paper";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 
-export type ProcessedGraph = {
-  canvas: HTMLCanvasElement;
+type CanvasLike = HTMLCanvasElement | OffscreenCanvas;
+type ProcessingContext2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+
+type ProcessedGraphFor<TCanvas extends CanvasLike> = {
+  canvas: TCanvas;
   palette: PaletteColor[];
   fillRegions: FillRegion[];
   fillRegionMap: Uint16Array;
 };
+
+export type ProcessedGraph = ProcessedGraphFor<HTMLCanvasElement>;
 
 export type FillRegion = {
   id: string;
@@ -44,12 +49,38 @@ export type FittedImageLayer = {
   settings: GraphSettings;
 };
 
+export type WorkerFittedImageLayer = {
+  canvas: OffscreenCanvas;
+  settings: GraphSettings;
+};
+
+type AnyFittedImageLayer = {
+  canvas: CanvasLike;
+  settings: GraphSettings;
+};
+
 type FillMaskLayer = {
   mask: Uint8Array;
   kind: FillRegionKind;
 };
 
-const contentBoundsCache = new WeakMap<HTMLCanvasElement, ContentBounds>();
+const contentBoundsCache = new WeakMap<CanvasLike, ContentBounds>();
+
+function createProcessingCanvas(width: number, height: number) {
+  const safeWidth = Math.max(1, Math.round(width));
+  const safeHeight = Math.max(1, Math.round(height));
+  if (typeof document !== "undefined") {
+    const canvas = document.createElement("canvas");
+    canvas.width = safeWidth;
+    canvas.height = safeHeight;
+    return canvas;
+  }
+  return new OffscreenCanvas(safeWidth, safeHeight);
+}
+
+function getProcessingContext(canvas: CanvasLike, options?: CanvasRenderingContext2DSettings) {
+  return canvas.getContext("2d", options) as ProcessingContext2D | null;
+}
 
 function graphDimensions(settings: GraphSettings) {
   const graphWidth = Math.max(1, Math.round(settings.graphWidth || 1));
@@ -121,15 +152,13 @@ export function resizeImage(canvas: HTMLCanvasElement, maxWidth: number, maxHeig
   return output;
 }
 
-function fitCanvas(canvas: HTMLCanvasElement, settings: GraphSettings) {
+function fitCanvas(canvas: CanvasLike, settings: GraphSettings) {
   const dimensions = graphDimensions(settings);
   const width = dimensions.outputWidth;
   const height = dimensions.outputHeight;
   const contentBounds = findContentBounds(canvas);
-  const output = document.createElement("canvas");
-  output.width = width;
-  output.height = height;
-  const context = output.getContext("2d", { willReadFrequently: true });
+  const output = createProcessingCanvas(width, height);
+  const context = getProcessingContext(output, { willReadFrequently: true });
   if (!context) throw new Error("Canvas is not available.");
   context.clearRect(0, 0, width, height);
   context.imageSmoothingEnabled = true;
@@ -153,11 +182,11 @@ function fitCanvas(canvas: HTMLCanvasElement, settings: GraphSettings) {
   return output;
 }
 
-export function findContentBounds(canvas: HTMLCanvasElement): ContentBounds {
+export function findContentBounds(canvas: CanvasLike): ContentBounds {
   const cached = contentBoundsCache.get(canvas);
   if (cached) return cached;
 
-  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const context = getProcessingContext(canvas, { willReadFrequently: true });
   if (!context) throw new Error("Canvas is not available.");
   const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
   const data = imageData.data;
@@ -300,10 +329,8 @@ function createMaskLayer(
   color: string,
   alpha = 255,
 ) {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const canvas = createProcessingCanvas(width, height);
+  const context = getProcessingContext(canvas, { willReadFrequently: true });
   if (!context) throw new Error("Canvas is not available.");
 
   const rgb = hexToRgb(color);
@@ -321,7 +348,7 @@ function createMaskLayer(
 }
 
 function drawFillRegions(
-  context: CanvasRenderingContext2D,
+  context: ProcessingContext2D,
   fillRegionMap: Uint16Array,
   regions: FillRegion[],
   width: number,
@@ -329,10 +356,8 @@ function drawFillRegions(
   settings: GraphSettings,
   blurRadius: number,
 ) {
-  const layer = document.createElement("canvas");
-  layer.width = width;
-  layer.height = height;
-  const layerContext = layer.getContext("2d", { willReadFrequently: true });
+  const layer = createProcessingCanvas(width, height);
+  const layerContext = getProcessingContext(layer, { willReadFrequently: true });
   if (!layerContext) throw new Error("Canvas is not available.");
 
   const colorCache = new Map<string, ReturnType<typeof hexToRgb>>();
@@ -365,10 +390,8 @@ function drawFillRegions(
     return;
   }
 
-  const softened = document.createElement("canvas");
-  softened.width = width;
-  softened.height = height;
-  const softenedContext = softened.getContext("2d");
+  const softened = createProcessingCanvas(width, height);
+  const softenedContext = getProcessingContext(softened);
   if (!softenedContext) throw new Error("Canvas is not available.");
   softenedContext.filter = `blur(${blurRadius}px)`;
   softenedContext.drawImage(layer, 0, 0);
@@ -376,7 +399,7 @@ function drawFillRegions(
 }
 
 function drawMaskLayer(
-  context: CanvasRenderingContext2D,
+  context: ProcessingContext2D,
   mask: Uint8Array,
   width: number,
   height: number,
@@ -390,18 +413,16 @@ function drawMaskLayer(
     return;
   }
 
-  const softened = document.createElement("canvas");
-  softened.width = width;
-  softened.height = height;
-  const softenedContext = softened.getContext("2d");
+  const softened = createProcessingCanvas(width, height);
+  const softenedContext = getProcessingContext(softened);
   if (!softenedContext) throw new Error("Canvas is not available.");
   softenedContext.filter = `blur(${blurRadius}px)`;
   softenedContext.drawImage(layer, 0, 0);
   context.drawImage(softened, 0, 0);
 }
 
-function drawGraphPaperGrid(canvas: HTMLCanvasElement, settings: GraphSettings) {
-  const context = canvas.getContext("2d");
+function drawGraphPaperGrid(canvas: CanvasLike, settings: GraphSettings) {
+  const context = getProcessingContext(canvas);
   if (!context) throw new Error("Canvas is not available.");
 
   const dimensions = graphDimensions(settings);
@@ -446,9 +467,9 @@ function drawGraphPaperGrid(canvas: HTMLCanvasElement, settings: GraphSettings) 
   context.restore();
 }
 
-function drawGridNumbers(canvas: HTMLCanvasElement, settings: GraphSettings) {
+function drawGridNumbers(canvas: CanvasLike, settings: GraphSettings) {
   if (!settings.showNumbers || settings.gridNumberPlacement === "outside") return;
-  const context = canvas.getContext("2d");
+  const context = getProcessingContext(canvas);
   if (!context) throw new Error("Canvas is not available.");
   const ctx = context;
 
@@ -482,8 +503,8 @@ function drawGridNumbers(canvas: HTMLCanvasElement, settings: GraphSettings) {
   ctx.restore();
 }
 
-function drawManualGraphArtwork(canvas: HTMLCanvasElement, settings: GraphSettings) {
-  const context = canvas.getContext("2d");
+function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
+  const context = getProcessingContext(canvas);
   if (!context) throw new Error("Canvas is not available.");
   const cellWidth = GRAPH_MAJOR_CELL_PIXELS;
   const cellHeight = GRAPH_MAJOR_CELL_PIXELS;
@@ -593,9 +614,9 @@ function drawManualGraphArtwork(canvas: HTMLCanvasElement, settings: GraphSettin
   context.restore();
 }
 
-export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSettings, options: { sourceIsFitted?: boolean } = {}) {
+function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, options: { sourceIsFitted?: boolean } = {}) {
   const fitted = options.sourceIsFitted ? sourceCanvas : fitCanvas(sourceCanvas, settings);
-  const fittedContext = fitted.getContext("2d", { willReadFrequently: true });
+  const fittedContext = getProcessingContext(fitted, { willReadFrequently: true });
   if (!fittedContext) throw new Error("Canvas is not available.");
 
   const sourceData = fittedContext.getImageData(0, 0, fitted.width, fitted.height);
@@ -610,10 +631,8 @@ export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSe
     settings,
   );
 
-  const output = document.createElement("canvas");
-  output.width = fitted.width;
-  output.height = fitted.height;
-  const outputContext = output.getContext("2d", { willReadFrequently: true });
+  const output = createProcessingCanvas(fitted.width, fitted.height);
+  const outputContext = getProcessingContext(output, { willReadFrequently: true });
   if (!outputContext) throw new Error("Canvas is not available.");
 
   outputContext.fillStyle = settings.backgroundColor || "#ffffff";
@@ -652,14 +671,16 @@ export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSe
   };
 }
 
-export function pixelateLayeredImages(layers: FittedImageLayer[], settings: GraphSettings) {
+export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSettings, options: { sourceIsFitted?: boolean } = {}) {
+  return pixelateCanvas(sourceCanvas, settings, options) as ProcessedGraph;
+}
+
+export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings: GraphSettings) {
   const dimensions = graphDimensions(settings);
   const width = dimensions.outputWidth;
   const height = dimensions.outputHeight;
-  const output = document.createElement("canvas");
-  output.width = width;
-  output.height = height;
-  const outputContext = output.getContext("2d", { willReadFrequently: true });
+  const output = createProcessingCanvas(width, height);
+  const outputContext = getProcessingContext(output, { willReadFrequently: true });
   if (!outputContext) throw new Error("Canvas is not available.");
 
   const fillRegionMap = new Uint16Array(width * height);
@@ -673,15 +694,13 @@ export function pixelateLayeredImages(layers: FittedImageLayer[], settings: Grap
       layer.canvas.width === width && layer.canvas.height === height
         ? layer.canvas
         : (() => {
-            const canvas = document.createElement("canvas");
-            canvas.width = width;
-            canvas.height = height;
-            const context = canvas.getContext("2d", { willReadFrequently: true });
+            const canvas = createProcessingCanvas(width, height);
+            const context = getProcessingContext(canvas, { willReadFrequently: true });
             if (!context) throw new Error("Canvas is not available.");
             context.drawImage(layer.canvas, 0, 0, width, height);
             return canvas;
           })();
-    const fittedContext = fitted.getContext("2d", { willReadFrequently: true });
+    const fittedContext = getProcessingContext(fitted, { willReadFrequently: true });
     if (!fittedContext) throw new Error("Canvas is not available.");
 
     const sourceData = fittedContext.getImageData(0, 0, width, height);
@@ -774,6 +793,10 @@ export function pixelateLayeredImages(layers: FittedImageLayer[], settings: Grap
   };
 }
 
+export function pixelateLayeredImages(layers: FittedImageLayer[], settings: GraphSettings) {
+  return pixelateLayeredCanvases(layers, settings) as ProcessedGraph;
+}
+
 export function generateGridOverlay(canvas: HTMLCanvasElement, settings: GraphSettings) {
   drawGraphPaperGrid(canvas, settings);
 }
@@ -787,6 +810,120 @@ export async function pixelateImageWithWorker(
   return pixelateImage(sourceCanvas, settings, options);
 }
 
-export async function pixelateLayeredImagesWithWorker(layers: FittedImageLayer[], settings: GraphSettings) {
-  return pixelateLayeredImages(layers, settings);
+function supportsCanvasWorker() {
+  return (
+    typeof window !== "undefined" &&
+    typeof Worker !== "undefined" &&
+    typeof OffscreenCanvas !== "undefined" &&
+    typeof createImageBitmap === "function"
+  );
+}
+
+function processingAbortError() {
+  const error = new Error("Image processing was cancelled.");
+  error.name = "AbortError";
+  return error;
+}
+
+async function pixelateLayeredImagesInWorker(
+  layers: FittedImageLayer[],
+  settings: GraphSettings,
+  signal?: AbortSignal,
+): Promise<ProcessedGraph> {
+  if (signal?.aborted) throw processingAbortError();
+
+  const bitmaps = await Promise.all(layers.map((layer) => createImageBitmap(layer.canvas)));
+  if (signal?.aborted) {
+    bitmaps.forEach((bitmap) => bitmap.close());
+    throw processingAbortError();
+  }
+
+  const worker = new Worker(new URL("./processor.worker.ts", import.meta.url), { type: "module" });
+  const workerLayers = layers.map((layer, index) => ({
+    bitmap: bitmaps[index],
+    settings: layer.settings,
+  }));
+
+  return new Promise<ProcessedGraph>((resolve, reject) => {
+    let settled = false;
+    let postedToWorker = false;
+
+    function cleanup() {
+      signal?.removeEventListener("abort", abort);
+      worker.terminate();
+    }
+
+    function abort() {
+      if (settled) return;
+      settled = true;
+      if (!postedToWorker) bitmaps.forEach((bitmap) => bitmap.close());
+      cleanup();
+      reject(processingAbortError());
+    }
+
+    worker.onmessage = (event: MessageEvent<{
+      ok: boolean;
+      error?: string;
+      bitmap?: ImageBitmap;
+      width?: number;
+      height?: number;
+      palette?: PaletteColor[];
+      fillRegions?: FillRegion[];
+      fillRegionMap?: Uint16Array;
+    }>) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+
+      const data = event.data;
+      if (!data.ok || !data.bitmap || !data.fillRegionMap || !data.palette || !data.fillRegions) {
+        reject(new Error(data.error || "Unable to process image."));
+        return;
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = data.width ?? data.bitmap.width;
+      canvas.height = data.height ?? data.bitmap.height;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) {
+        data.bitmap.close();
+        reject(new Error("Canvas is not available."));
+        return;
+      }
+      context.drawImage(data.bitmap, 0, 0);
+      data.bitmap.close();
+      resolve({
+        canvas,
+        palette: data.palette,
+        fillRegions: data.fillRegions,
+        fillRegionMap: data.fillRegionMap,
+      });
+    };
+
+    worker.onerror = (event) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(event.message || "Unable to process image."));
+    };
+
+    signal?.addEventListener("abort", abort, { once: true });
+    postedToWorker = true;
+    worker.postMessage({ layers: workerLayers, settings }, bitmaps as Transferable[]);
+  });
+}
+
+export async function pixelateLayeredImagesWithWorker(
+  layers: FittedImageLayer[],
+  settings: GraphSettings,
+  options: { signal?: AbortSignal } = {},
+) {
+  if (!supportsCanvasWorker()) return pixelateLayeredImages(layers, settings);
+
+  try {
+    return await pixelateLayeredImagesInWorker(layers, settings, options.signal);
+  } catch (error) {
+    if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
+    return pixelateLayeredImages(layers, settings);
+  }
 }

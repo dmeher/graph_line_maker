@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Mail, ShieldCheck } from "lucide-react";
 import { BrandMark } from "@/components/layout/brand-mark";
+import { OFFLINE_SESSION_CLEAR_MESSAGE, OFFLINE_SESSION_STORAGE_KEY } from "@/lib/auth/offline-session";
 
 export function LoginForm() {
   const router = useRouter();
@@ -13,6 +14,23 @@ export function LoginForm() {
   const [message, setMessage] = useState<string | null>(null);
   const [debugOtp, setDebugOtp] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+
+  useEffect(() => {
+    try {
+      window.sessionStorage.removeItem(OFFLINE_SESSION_STORAGE_KEY);
+    } catch {
+      // Session storage can be unavailable in private or restricted browser modes.
+    }
+
+    if (!("serviceWorker" in navigator)) return;
+    const message = { type: OFFLINE_SESSION_CLEAR_MESSAGE };
+    navigator.serviceWorker.controller?.postMessage(message);
+    navigator.serviceWorker.ready
+      .then((registration) => {
+        registration.active?.postMessage(message);
+      })
+      .catch(() => {});
+  }, []);
 
   async function sendOtp(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -138,4 +156,3 @@ export function LoginForm() {
     </main>
   );
 }
-

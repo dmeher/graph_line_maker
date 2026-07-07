@@ -2,11 +2,22 @@ import { DEFAULT_PRINT_PAPER_SIZE, PRINT_PAPER_SIZES } from "@/lib/graph-paper";
 import { createPdfExportPlan, MAX_PAGES_PER_PDF_FILE } from "@/lib/canvas/pdf-layout";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 
-export function exportCanvasAsPNG(canvas: HTMLCanvasElement, filename: string) {
+function canvasToObjectUrl(canvas: HTMLCanvasElement, type = "image/png") {
+  return new Promise<string>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(URL.createObjectURL(blob));
+      else reject(new Error("Unable to export canvas."));
+    }, type);
+  });
+}
+
+export async function exportCanvasAsPNG(canvas: HTMLCanvasElement, filename: string) {
+  const url = await canvasToObjectUrl(canvas);
   const link = document.createElement("a");
   link.download = filename.endsWith(".png") ? filename : `${filename}.png`;
-  link.href = canvas.toDataURL("image/png");
+  link.href = url;
   link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function pdfFilename(filename: string, part?: number) {

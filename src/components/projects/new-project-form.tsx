@@ -1,11 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
-  Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -16,7 +15,6 @@ import {
   ImageIcon,
   Loader2,
   Maximize2,
-  MoreVertical,
   RotateCcw,
   RotateCw,
   Scissors,
@@ -24,8 +22,8 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
-import type { CropPixels } from "@/lib/canvas/crop";
-import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
+import { fullCrop, type CropPixels } from "@/lib/canvas/crop";
+import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
 import { cropQueueItemId, cropQueueStatus, shouldCropQueuedFile } from "@/lib/projects/crop-queue";
 import { bytesToSize } from "@/lib/utils/format";
 
@@ -45,14 +43,17 @@ type CropQueueItem = {
   issue: string | null;
 };
 
-const placeholderRows = [
-  ["tulip_01.png", "1024 x 1280", "Cropped"],
-  ["tulip_02.png", "1200 x 1500", "Needs crop"],
-  ["leaves.svg", "800 x 800", "Cropped"],
-  ["pot.png", "1024 x 768", "Cropped"],
-  ["border.pdf", "1 page", "Needs crop"],
-  ["details_01.png", "900 x 900", "Needs crop"],
-] as const;
+type AspectPresetKey = "free" | "square" | "4:3" | "16:9" | "3:4" | "2:3" | "custom";
+
+const ASPECT_PRESETS: { key: AspectPresetKey; label: string; ratio: number | null }[] = [
+  { key: "free", label: "Free", ratio: null },
+  { key: "square", label: "1:1", ratio: 1 },
+  { key: "4:3", label: "4:3", ratio: 4 / 3 },
+  { key: "16:9", label: "16:9", ratio: 16 / 9 },
+  { key: "3:4", label: "3:4", ratio: 3 / 4 },
+  { key: "2:3", label: "2:3", ratio: 2 / 3 },
+  { key: "custom", label: "Custom", ratio: null },
+];
 
 function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
@@ -110,9 +111,23 @@ async function previewUrlFor(file: File) {
 
 async function cropFile(file: File, imageUrl: string, cropPixels: CropPixels | null) {
   if (!cropPixels) return file;
-  const outputType = file.type === "image/svg+xml" || isPdfFile(file) ? "image/png" : file.type || "image/png";
-  const { cropImageUrlToFile } = await import("@/lib/canvas/crop");
-  return cropImageUrlToFile(imageUrl, cropPixels, file.name, outputType);
+  const { transformImageUrlToFile } = await import("@/lib/canvas/crop");
+  return transformImageUrlToFile({
+    imageUrl,
+    crop: cropPixels,
+    fileName: file.name,
+    type: transformedOutputType(file),
+  });
+}
+
+async function rotateFile(file: File, imageUrl: string, rotationDegrees: number) {
+  const { transformImageUrlToFile } = await import("@/lib/canvas/crop");
+  return transformImageUrlToFile({
+    imageUrl,
+    rotationDegrees,
+    fileName: file.name,
+    type: "image/png",
+  });
 }
 
 async function readImageSize(file: File) {
@@ -138,36 +153,63 @@ function revokeCropItem(item: CropQueueItem) {
   if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
 }
 
-function PlaceholderLineArt() {
-  return (
-    <svg viewBox="0 0 640 760" className="h-full w-full bg-white" role="img" aria-label="Tulip crop placeholder">
-      <path d="M312 430c-6-88-2-156 12-204" stroke="#3f3f46" strokeWidth="9" fill="none" />
-      <path d="M320 218c-70-22-112-88-102-160 54 23 91 60 102 160Z" fill="none" stroke="#3f3f46" strokeWidth="7" />
-      <path d="M326 220c56-52 102-84 162-58-8 70-72 109-162 58Z" fill="none" stroke="#3f3f46" strokeWidth="7" />
-      <path d="M318 214c-22-82 6-146 72-184 31 80 3 146-72 184Z" fill="none" stroke="#3f3f46" strokeWidth="7" />
-      <path d="M307 454c-86-118-165-126-250-110 54 95 135 132 250 110Z" fill="none" stroke="#3f3f46" strokeWidth="8" />
-      <path d="M332 450c82-122 165-132 253-94-66 92-147 123-253 94Z" fill="none" stroke="#3f3f46" strokeWidth="8" />
-      <path d="M158 540h320l-24 126H184z" fill="none" stroke="#3f3f46" strokeWidth="9" />
-      <path d="M140 510h356v40H140z" fill="none" stroke="#3f3f46" strokeWidth="9" />
-      <path d="M180 602h270M195 636h240" stroke="#8a8a8a" strokeWidth="3" fill="none" />
-      <path d="M74 380h498M74 540h498M216 40v640M416 40v640" stroke="#c7cdd4" strokeDasharray="8 8" strokeWidth="2" />
-    </svg>
-  );
-}
-
 function formatDimensions(item: CropQueueItem) {
   return item.width && item.height ? `${item.width} x ${item.height}` : "Preparing size";
 }
 
+function activeAspectRatio(preset: AspectPresetKey, customRatio: number | null) {
+  const presetRatio = ASPECT_PRESETS.find((item) => item.key === preset)?.ratio ?? null;
+  return preset === "custom" ? customRatio : presetRatio;
+}
+
+function centeredAspectCrop(width: number | null, height: number | null, ratio: number | null) {
+  if (!width || !height) return null;
+  if (!ratio) return fullCrop(width, height);
+  let cropWidth = width;
+  let cropHeight = Math.round(width / ratio);
+  if (cropHeight > height) {
+    cropHeight = height;
+    cropWidth = Math.round(height * ratio);
+  }
+  return {
+    x: Math.max(0, Math.round((width - cropWidth) / 2)),
+    y: Math.max(0, Math.round((height - cropHeight) / 2)),
+    width: Math.max(1, cropWidth),
+    height: Math.max(1, cropHeight),
+  };
+}
+
+function cropSizeLabel(item: CropQueueItem | null) {
+  if (!item) return "No selection";
+  if (item.crop) return `${item.crop.width} x ${item.crop.height}`;
+  return "Full image";
+}
+
+function selectionStatus(item: CropQueueItem | null) {
+  if (!item) return "No file";
+  if (item.previewPending) return "Preparing";
+  if (item.issue) return "Needs attention";
+  return item.crop ? "Crop active" : "Full image";
+}
+
+function transformedOutputType(file: File) {
+  return file.type === "image/svg+xml" || isPdfFile(file) ? "image/png" : file.type || "image/png";
+}
+
 export function NewProjectForm() {
   const router = useRouter();
-  const [title, setTitle] = useState("Flower Pattern");
-  const [description, setDescription] = useState("Tulip flower pattern for cross stitch");
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
   const [cropItems, setCropItems] = useState<CropQueueItem[]>([]);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
+  const [zoom, setZoom] = useState(1);
+  const [aspectPreset, setAspectPreset] = useState<AspectPresetKey>("free");
+  const [customAspectRatio, setCustomAspectRatio] = useState<number | null>(null);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const [rotatingItemId, setRotatingItemId] = useState<string | null>(null);
   const previewTokenRef = useRef(0);
   const cropItemsRef = useRef<CropQueueItem[]>([]);
 
@@ -194,18 +236,125 @@ export function NewProjectForm() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!cropItems.length) {
+      if (selectedItemId) setSelectedItemId(null);
+      return;
+    }
+    if (!cropItems.some((item) => item.id === selectedItemId)) setSelectedItemId(cropItems[0].id);
+  }, [cropItems, selectedItemId]);
+
   const fileIssue = useMemo(() => cropItems.find((item) => item.issue)?.issue ?? null, [cropItems]);
   const previewPending = useMemo(() => cropItems.some((item) => item.previewPending), [cropItems]);
   const croppedCount = useMemo(() => cropItems.filter((item) => item.crop).length, [cropItems]);
   const selectedIndex = cropItems.findIndex((item) => item.id === selectedItemId);
   const selectedItem = selectedIndex >= 0 ? cropItems[selectedIndex] : cropItems[0] ?? null;
-  const progressTotal = cropItems.length || 8;
-  const progressCropped = cropItems.length ? croppedCount : 3;
+  const selectedAspectRatio = activeAspectRatio(aspectPreset, customAspectRatio);
+  const progressTotal = cropItems.length;
+  const progressCropped = croppedCount;
   const progressRemaining = Math.max(0, progressTotal - progressCropped);
-  const progressPercent = Math.round((progressCropped / progressTotal) * 100);
+  const progressPercent = progressTotal ? Math.round((progressCropped / progressTotal) * 100) : 0;
 
   function updateItemCrop(itemId: string, crop: CropPixels | null) {
     setCropItems((current) => current.map((item) => (item.id === itemId ? { ...item, crop } : item)));
+  }
+
+  function updateItemSize(itemId: string, size: { width: number; height: number }) {
+    setCropItems((current) =>
+      current.map((item) =>
+        item.id === itemId && (item.width !== size.width || item.height !== size.height) ? { ...item, ...size } : item,
+      ),
+    );
+  }
+
+  function clearCropItems() {
+    previewTokenRef.current += 1;
+    setMessage(null);
+    setCropItems((current) => {
+      current.forEach(revokeCropItem);
+      return [];
+    });
+    setSelectedItemId(null);
+  }
+
+  function removeCropItem(itemId: string) {
+    previewTokenRef.current += 1;
+    setMessage(null);
+    setCropItems((current) => {
+      const removed = current.find((item) => item.id === itemId);
+      if (removed) revokeCropItem(removed);
+      return current.filter((item) => item.id !== itemId);
+    });
+  }
+
+  function applyCropToSelected(crop: CropPixels | null) {
+    if (!selectedItem) return;
+    updateItemCrop(selectedItem.id, crop);
+  }
+
+  function fitSelectedCrop() {
+    if (!selectedItem) return;
+    const nextCrop = centeredAspectCrop(selectedItem.width, selectedItem.height, selectedAspectRatio);
+    if (nextCrop) updateItemCrop(selectedItem.id, nextCrop);
+  }
+
+  function applyAspectPreset(nextPreset: AspectPresetKey) {
+    const currentCrop = selectedItem?.crop;
+    const currentRatio = currentCrop ? currentCrop.width / currentCrop.height : selectedItem?.width && selectedItem.height ? selectedItem.width / selectedItem.height : null;
+    const nextCustomRatio = nextPreset === "custom" && currentRatio ? currentRatio : customAspectRatio;
+    const ratio = activeAspectRatio(nextPreset, nextCustomRatio);
+    setAspectPreset(nextPreset);
+    if (nextPreset === "custom") setCustomAspectRatio(nextCustomRatio);
+    if (selectedItem && ratio) {
+      const nextCrop = centeredAspectCrop(selectedItem.width, selectedItem.height, ratio);
+      if (nextCrop) updateItemCrop(selectedItem.id, nextCrop);
+    }
+  }
+
+  function handleUploadDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    setIsDraggingFiles(false);
+    selectFiles(event.dataTransfer.files);
+  }
+
+  function viewSelectedOriginal() {
+    if (!selectedItem?.previewUrl) return;
+    window.open(selectedItem.previewUrl, "_blank", "noopener,noreferrer");
+  }
+
+  async function rotateSelectedItem(rotationDegrees: number) {
+    const previewUrlForRotation = selectedItem?.previewUrl;
+    if (!selectedItem || !previewUrlForRotation || selectedItem.previewPending || selectedItem.issue) return;
+    const item = selectedItem;
+    setRotatingItemId(item.id);
+    setMessage(null);
+    setCropItems((current) => current.map((currentItem) => (currentItem.id === item.id ? { ...currentItem, previewPending: true } : currentItem)));
+
+    try {
+      const rotatedFile = await rotateFile(item.file, previewUrlForRotation, rotationDegrees);
+      const [previewUrl, size] = await Promise.all([previewUrlFor(rotatedFile), readImageSize(rotatedFile)]);
+      setCropItems((current) =>
+        current.map((currentItem) => {
+          if (currentItem.id !== item.id) return currentItem;
+          if (currentItem.previewUrl) URL.revokeObjectURL(currentItem.previewUrl);
+          return {
+            ...currentItem,
+            file: rotatedFile,
+            previewUrl,
+            width: size.width,
+            height: size.height,
+            crop: null,
+            previewPending: false,
+            issue: null,
+          };
+        }),
+      );
+    } catch (error) {
+      setCropItems((current) => current.map((currentItem) => (currentItem.id === item.id ? { ...currentItem, previewPending: false } : currentItem)));
+      setMessage(error instanceof Error ? error.message : "Unable to rotate this image.");
+    } finally {
+      setRotatingItemId(null);
+    }
   }
 
   function selectRelativeItem(direction: -1 | 1) {
@@ -218,13 +367,14 @@ export function NewProjectForm() {
   function selectFiles(nextFiles: FileList | File[] | null) {
     const previewToken = previewTokenRef.current + 1;
     previewTokenRef.current = previewToken;
-    const selectedFiles = Array.from(nextFiles ?? []);
+    const incomingFiles = Array.from(nextFiles ?? []);
+    const selectedFiles = incomingFiles.slice(0, MAX_PROJECT_UPLOAD_FILES);
     const baseItems = selectedFiles.map((file, index) => {
       const issue = fileIssueFor(file);
       return { id: cropQueueItemId(file, index), file, previewUrl: null, width: null, height: null, crop: null, previewPending: !issue, issue };
     });
 
-    setMessage(null);
+    setMessage(incomingFiles.length > MAX_PROJECT_UPLOAD_FILES ? `Only the first ${MAX_PROJECT_UPLOAD_FILES} files were added.` : null);
     setCropItems((current) => {
       current.forEach(revokeCropItem);
       return baseItems;
@@ -289,8 +439,8 @@ export function NewProjectForm() {
   }
 
   return (
-    <form onSubmit={submit} className="create-workbench fixed inset-x-0 bottom-0 top-16 z-20 grid grid-rows-[1fr_144px] bg-white md:left-[128px]">
-      <div className="create-workbench-main grid min-h-0 grid-cols-[330px_160px_minmax(0,1fr)] border-t border-[#d7dde5]">
+    <form onSubmit={submit} className="create-workbench fixed inset-x-0 bottom-0 top-16 z-20 grid grid-rows-[minmax(0,1fr)_76px] bg-white md:left-[128px]">
+      <div className="create-workbench-main grid min-h-0 grid-cols-[330px_minmax(0,1fr)] border-t border-[#d7dde5]">
         <aside className="create-workbench-details min-h-0 overflow-y-auto border-r border-[#d7dde5] bg-white p-5">
           <h2 className="text-lg font-semibold text-[#101828]">Project details</h2>
           <label className="mt-4 block text-sm font-medium text-[#344054]" htmlFor="title">Title *</label>
@@ -300,93 +450,189 @@ export function NewProjectForm() {
           <p className="mt-1 text-right text-xs text-[#667085]">{description.length} / 500</p>
 
           <h2 className="mt-5 text-lg font-semibold text-[#101828]">Upload files</h2>
-          <p className="mt-1 text-sm text-[#667085]">Up to 12 images/PDF/SVG (line art recommended)</p>
-          <label className="mt-4 grid h-[116px] cursor-pointer place-items-center rounded-lg border border-dashed border-[#cfd7df] bg-white text-center hover:border-[#008c8f]">
-            <span>
+          <p className="mt-1 text-sm leading-5 text-[#667085]">Images, PDF, or SVG line art. Up to {MAX_PROJECT_UPLOAD_FILES} files.</p>
+          <label
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setIsDraggingFiles(true);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setIsDraggingFiles(true);
+            }}
+            onDragLeave={() => setIsDraggingFiles(false)}
+            onDrop={handleUploadDrop}
+            className={`mt-4 grid min-h-[112px] cursor-pointer place-items-center rounded-lg border border-dashed bg-white px-3 py-3 text-center hover:border-[#008c8f] ${
+              isDraggingFiles ? "border-[#008c8f] bg-[#f0fafa]" : "border-[#cfd7df]"
+            }`}
+          >
+            <span className="grid w-full min-w-0 place-items-center leading-tight">
               <CloudUpload size={26} className="mx-auto text-[#101828]" strokeWidth={1.8} />
               <span className="mt-2 block text-sm font-medium text-[#101828]">Drag & drop files here</span>
               <span className="text-sm font-medium text-[#008c8f]">or click to browse</span>
-              <span className="mt-3 block text-xs text-[#667085]">PNG, JPG, SVG, PDF - Max 12 files - Max 50MB each</span>
+              <span className="mt-2 block text-xs leading-4 text-[#667085]">
+                <span className="block">PNG, JPG, SVG, PDF</span>
+                <span className="block">Max {MAX_PROJECT_UPLOAD_FILES} files, 50MB each</span>
+              </span>
             </span>
             <input type="file" accept={IMAGE_ACCEPT} multiple className="sr-only" onChange={(event) => { const selectedFiles = Array.from(event.target.files ?? []); event.target.value = ""; selectFiles(selectedFiles); }} />
           </label>
 
           <div className="mt-5 flex items-center justify-between">
-            <p className="text-sm font-semibold text-[#101828]">Files ({cropItems.length || 8} / 12)</p>
-            <button type="button" className="text-sm font-semibold text-[#008c8f]" onClick={() => setCropItems([])}>Clear all</button>
+            <p className="text-sm font-semibold text-[#101828]">Files ({cropItems.length})</p>
+            <button type="button" className="text-sm font-semibold text-[#008c8f] disabled:text-[#98a2b3]" onClick={clearCropItems} disabled={!cropItems.length}>Clear all</button>
           </div>
           <div className="mt-3 divide-y divide-[#e8edf2] overflow-hidden rounded-md border border-[#d7dde5]">
-            {cropItems.length
-              ? cropItems.map((item) => {
-                  const selected = selectedItem?.id === item.id;
-                  return (
-                    <button key={item.id} type="button" onClick={() => setSelectedItemId(item.id)} className={`grid w-full grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-3 p-2 text-left ${selected ? "bg-[#f0fafa] ring-1 ring-inset ring-[#008c8f]" : "bg-white"}`}>
+            {cropItems.length ? (
+              cropItems.map((item) => {
+                const selected = selectedItem?.id === item.id;
+                return (
+                  <div key={item.id} className={`grid grid-cols-[44px_minmax(0,1fr)_auto_auto] items-center gap-3 p-2 ${selected ? "bg-[#f0fafa] ring-1 ring-inset ring-[#008c8f]" : "bg-white"}`}>
+                    <button type="button" onClick={() => setSelectedItemId(item.id)} className="contents text-left">
                       {item.previewUrl ? <img src={item.previewUrl} alt="" className="h-10 w-10 rounded border border-[#d7dde5] object-contain p-1" /> : <span className="grid h-10 w-10 place-items-center rounded border border-[#d7dde5]"><ImageIcon size={17} /></span>}
-                      <span className="min-w-0"><span className="block truncate text-sm font-medium text-[#101828]">{item.file.name}</span><span className="text-xs text-[#667085]">{formatDimensions(item)}</span></span>
-                      <span className={`min-w-0 truncate rounded px-2 py-0.5 text-xs font-medium ${item.crop ? "bg-[#dcfce7] text-[#15803d]" : "bg-[#ffedd5] text-[#c2410c]"}`}>{cropQueueStatus(item.crop)}</span>
+                      <span className="min-w-0"><span className="block truncate text-sm font-medium text-[#101828]">{item.file.name}</span><span className="text-xs text-[#667085]">{item.issue ?? formatDimensions(item)}</span></span>
+                      <span className={`min-w-0 truncate rounded px-2 py-0.5 text-xs font-medium ${item.issue ? "bg-red-50 text-red-700" : item.crop ? "bg-[#dcfce7] text-[#15803d]" : "bg-[#f2f4f7] text-[#344054]"}`}>{item.issue ? "Issue" : cropQueueStatus(item.crop)}</span>
                     </button>
-                  );
-                })
-              : placeholderRows.map(([name, size, status], index) => (
-                  <div key={name} className={`grid grid-cols-[44px_minmax(0,1fr)_auto] items-center gap-3 p-2 ${index === 0 ? "bg-[#f0fafa] ring-1 ring-inset ring-[#008c8f]" : "bg-white"}`}>
-                    <span className="grid h-10 w-10 place-items-center rounded border border-[#d7dde5] bg-white text-[#667085]">{name.endsWith(".pdf") ? <FileText size={18} /> : <PlaceholderLineArt />}</span>
-                    <span className="min-w-0"><span className="block truncate text-sm font-medium text-[#101828]">{name}</span><span className="text-xs text-[#667085]">{size}</span></span>
-                    <span className="flex min-w-0 items-center gap-2"><span className={`truncate rounded px-2 py-0.5 text-xs font-medium ${status === "Cropped" ? "bg-[#dcfce7] text-[#15803d]" : "bg-[#ffedd5] text-[#c2410c]"}`}>{status}</span>{status === "Cropped" ? <Check size={16} className="shrink-0 text-[#15803d]" /> : <MoreVertical size={16} className="shrink-0" />}</span>
+                    <button type="button" onClick={() => removeCropItem(item.id)} className="grid h-8 w-8 place-items-center rounded text-[#667085] hover:bg-[#f2f4f7] hover:text-[#101828]" title="Remove file">
+                      <Trash2 size={15} aria-hidden="true" />
+                    </button>
                   </div>
-                ))}
+                );
+              })
+            ) : (
+              <div className="grid min-h-[112px] place-items-center bg-white p-4 text-center text-sm text-[#667085]">
+                <span><ImageIcon size={22} className="mx-auto mb-2" />Select files to start crop review.</span>
+              </div>
+            )}
           </div>
           {fileIssue ? <p className="mt-3 flex gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"><AlertTriangle size={16} />{fileIssue}</p> : null}
           {message ? <p className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{message}</p> : null}
-        </aside>
-
-        <aside className="create-workbench-tools min-h-0 overflow-y-auto border-r border-[#d7dde5] bg-white p-5">
-          <div className="grid gap-2">
-            <div className="rounded-lg border border-[#d7dde5] p-3 text-center">
-              <p className="mb-2 text-sm font-medium text-[#101828]">Zoom</p>
-              <button type="button" className="mock-btn h-9 w-full"><ZoomIn size={16} /> </button>
-              <p className="py-2 text-sm text-[#344054]">100%</p>
-              <button type="button" className="mock-btn h-9 w-full"><ZoomOut size={16} /> </button>
-            </div>
-            <button type="button" className="mock-btn h-[76px] flex-col"><Crop size={20} />Fit</button>
-            <button type="button" className="mock-btn h-[76px] flex-col"><Maximize2 size={20} />Full image</button>
-            <button type="button" onClick={() => selectedItem && updateItemCrop(selectedItem.id, null)} className="mock-btn h-[76px] flex-col"><RotateCcw size={20} />Reset crop</button>
-            <p className="pt-2 text-sm font-medium text-[#344054]">Rotate</p>
-            <div className="grid grid-cols-2 gap-2"><button type="button" className="mock-btn h-9 px-0"><RotateCcw size={16} /></button><button type="button" className="mock-btn h-9 px-0"><RotateCw size={16} /></button></div>
-            <div className="rounded-lg border border-[#d7dde5] p-3 text-sm leading-6 text-[#344054]">
-              <p>Original<br /><span className="font-medium text-[#101828]">{selectedItem ? formatDimensions(selectedItem) : "1024 x 1280"}</span></p>
-              <p className="mt-2">Crop<br /><span className="font-medium text-[#101828]">{selectedItem?.crop ? `${selectedItem.crop.width} x ${selectedItem.crop.height}` : "860 x 1060"}</span></p>
-              <p className="mt-2">Aspect<br /><span className="font-medium text-[#101828]">Auto</span></p>
-              <p className="mt-2">Selection<br /><span className="font-medium text-[#15803d]">Active</span></p>
-            </div>
-          </div>
         </aside>
 
         <main className="create-workbench-stage grid min-h-0 grid-rows-[64px_minmax(0,1fr)_72px]">
           <div className="flex items-center justify-between border-b border-[#d7dde5] bg-white px-6">
             <div className="flex items-center gap-2"><h1 className="text-lg font-semibold text-[#101828]">Crop review</h1><span className="text-sm text-[#667085]">Crop each image for best results</span></div>
             <div className="flex items-center gap-4">
-              <div className="min-w-0 text-sm"><p className="truncate font-semibold text-[#101828]">{selectedItem?.file.name || "tulip_01.png"}</p><p className="truncate text-[#667085]">{selectedItem ? `${formatDimensions(selectedItem)} - ${selectedItem.file.type || "File"} - ${bytesToSize(selectedItem.file.size)}` : "1024 x 1280 - PNG - 248 KB"}</p></div>
-              <button type="button" className="mock-btn">View original <ExternalLink size={15} /></button>
+              <div className="min-w-0 text-sm"><p className="truncate font-semibold text-[#101828]">{selectedItem?.file.name || "No file selected"}</p><p className="truncate text-[#667085]">{selectedItem ? `${formatDimensions(selectedItem)} - ${selectedItem.file.type || "File"} - ${bytesToSize(selectedItem.file.size)}` : "Upload a source image to begin"}</p></div>
+              <button type="button" onClick={viewSelectedOriginal} disabled={!selectedItem?.previewUrl} className="mock-btn">View original <ExternalLink size={15} /></button>
             </div>
           </div>
 
-          <div className="mock-checker relative min-h-0 overflow-hidden p-10">
-            <div className="relative mx-auto h-full max-h-[760px] max-w-[560px] border-2 border-[#008c8f] bg-white">
+          <div className="mock-checker create-crop-review relative grid min-h-0 grid-rows-[minmax(0,1fr)_auto] gap-3 overflow-hidden">
+            <div className="create-crop-tooldock" aria-label="Crop tools">
+              <button
+                type="button"
+                onClick={() => setZoom((value) => Math.min(3, Math.round((value + 0.1) * 10) / 10))}
+                className="create-crop-icon-button"
+                disabled={!selectedItem}
+                title={`Zoom in (${Math.round(zoom * 100)}%)`}
+                aria-label={`Zoom in (${Math.round(zoom * 100)}%)`}
+              >
+                <ZoomIn size={15} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoom((value) => Math.max(0.5, Math.round((value - 0.1) * 10) / 10))}
+                className="create-crop-icon-button"
+                disabled={!selectedItem}
+                title={`Zoom out (${Math.round(zoom * 100)}%)`}
+                aria-label={`Zoom out (${Math.round(zoom * 100)}%)`}
+              >
+                <ZoomOut size={15} aria-hidden="true" />
+              </button>
+              <span className="create-crop-tool-separator" aria-hidden="true" />
+              <button
+                type="button"
+                onClick={fitSelectedCrop}
+                disabled={!selectedItem || !selectedItem.width || !selectedItem.height}
+                className="create-crop-icon-button"
+                title="Fit crop"
+                aria-label="Fit crop"
+              >
+                <Crop size={15} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                onClick={() => applyCropToSelected(null)}
+                disabled={!selectedItem}
+                className="create-crop-icon-button"
+                title="Use full image"
+                aria-label="Use full image"
+              >
+                <Maximize2 size={15} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAspectPreset("free");
+                  applyCropToSelected(null);
+                }}
+                disabled={!selectedItem}
+                className="create-crop-icon-button"
+                title="Reset crop"
+                aria-label="Reset crop"
+              >
+                <RotateCcw size={15} aria-hidden="true" />
+              </button>
+              <span className="create-crop-tool-separator" aria-hidden="true" />
+              <button
+                type="button"
+                onClick={() => void rotateSelectedItem(270)}
+                disabled={!selectedItem?.previewUrl || selectedItem.previewPending || rotatingItemId === selectedItem.id}
+                className="create-crop-icon-button"
+                title="Rotate left"
+                aria-label="Rotate left"
+              >
+                {rotatingItemId === selectedItem?.id ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <RotateCcw size={15} aria-hidden="true" />}
+              </button>
+              <button
+                type="button"
+                onClick={() => void rotateSelectedItem(90)}
+                disabled={!selectedItem?.previewUrl || selectedItem.previewPending || rotatingItemId === selectedItem.id}
+                className="create-crop-icon-button"
+                title="Rotate right"
+                aria-label="Rotate right"
+              >
+                {rotatingItemId === selectedItem?.id ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <RotateCw size={15} aria-hidden="true" />}
+              </button>
+              <span className="create-crop-tool-separator" aria-hidden="true" />
+              <span className="create-crop-status-icon" title={`Original: ${selectedItem ? formatDimensions(selectedItem) : "No file"}`} aria-label={`Original: ${selectedItem ? formatDimensions(selectedItem) : "No file"}`}>
+                <ImageIcon size={15} aria-hidden="true" />
+              </span>
+              <span className="create-crop-status-icon" title={`Crop: ${cropSizeLabel(selectedItem)}`} aria-label={`Crop: ${cropSizeLabel(selectedItem)}`}>
+                <Crop size={15} aria-hidden="true" />
+              </span>
+              <span className="create-crop-status-icon" title={`Aspect: ${ASPECT_PRESETS.find((item) => item.key === aspectPreset)?.label ?? "Free"}`} aria-label={`Aspect: ${ASPECT_PRESETS.find((item) => item.key === aspectPreset)?.label ?? "Free"}`}>
+                <Maximize2 size={15} aria-hidden="true" />
+              </span>
+              <span className="create-crop-status-icon" title={`Selection: ${selectionStatus(selectedItem)}`} aria-label={`Selection: ${selectionStatus(selectedItem)}`}>
+                <CheckCircle2 size={15} aria-hidden="true" />
+              </span>
+            </div>
+            <div className="create-crop-frame relative mx-auto h-full min-h-0 w-full max-h-[760px] max-w-[560px] border-2 border-[#008c8f] bg-white">
               {selectedItem?.previewPending ? (
                 <div className="grid h-full place-items-center"><Loader2 className="animate-spin text-[#008c8f]" /></div>
               ) : selectedItem?.previewUrl ? (
-                <ManualCropper key={selectedItem.id} imageUrl={selectedItem.previewUrl} crop={selectedItem.crop} onCropChange={(crop) => updateItemCrop(selectedItem.id, crop)} className="h-full" />
+                <ManualCropper
+                  key={selectedItem.id}
+                  imageUrl={selectedItem.previewUrl}
+                  crop={selectedItem.crop}
+                  aspectRatio={selectedAspectRatio}
+                  zoom={zoom}
+                  onImageSizeChange={(size) => updateItemSize(selectedItem.id, size)}
+                  onCropChange={(crop) => updateItemCrop(selectedItem.id, crop)}
+                  className="h-full"
+                />
               ) : (
-                <PlaceholderLineArt />
+                <div className="grid h-full place-items-center p-8 text-center text-sm text-[#667085]">
+                  <span><ImageIcon size={34} className="mx-auto mb-3" />Upload a file to activate crop review.</span>
+                </div>
               )}
-              {["-top-2 -left-2", "-top-2 left-1/2 -translate-x-1/2", "-top-2 -right-2", "top-1/2 -left-2 -translate-y-1/2", "top-1/2 -right-2 -translate-y-1/2", "-bottom-2 -left-2", "-bottom-2 left-1/2 -translate-x-1/2", "-bottom-2 -right-2"].map((position) => (
-                <span key={position} className={`absolute h-4 w-4 border-2 border-[#008c8f] bg-[#e6ffff] ${position}`} />
+            </div>
+            <div className="create-aspect-toolbar flex justify-self-center overflow-x-auto rounded-md bg-[#17202a] p-1.5 text-sm font-medium text-white shadow-lg">
+              {ASPECT_PRESETS.map((item) => (
+                <button key={item.key} type="button" onClick={() => applyAspectPreset(item.key)} disabled={!selectedItem} className={`h-8 shrink-0 px-4 disabled:opacity-45 ${aspectPreset === item.key ? "rounded bg-[#008c8f]" : ""}`}>{item.label}</button>
               ))}
-              <div className="absolute bottom-[-64px] left-1/2 flex -translate-x-1/2 overflow-hidden rounded-md bg-[#17202a] p-2 text-sm font-medium text-white shadow-lg">
-                {["Free", "1:1", "4:3", "16:9", "3:4", "2:3", "Custom"].map((item, index) => (
-                  <button key={item} type="button" className={`h-9 px-5 ${index === 0 ? "rounded bg-[#008c8f]" : ""}`}>{item}</button>
-                ))}
-              </div>
             </div>
           </div>
 
@@ -398,22 +644,29 @@ export function NewProjectForm() {
         </main>
       </div>
 
-      <div className="create-workbench-footer grid grid-cols-[360px_minmax(0,1fr)] gap-5 border-t border-[#d7dde5] bg-white p-6">
-        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-          <p className="flex gap-2 font-semibold"><AlertTriangle size={18} />{isOnline ? "Crop review ready." : "Needs connection to upload source files."}</p>
-          <p className="mt-1">{isOnline ? "Project creation uploads source files when you start conversion." : "Project creation is disabled while offline."}</p>
+      <div className="create-workbench-footer grid grid-cols-[300px_minmax(0,1fr)] gap-2 border-t border-[#d7dde5] bg-white p-2">
+        <div className="create-workbench-notice rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+          <p className="flex gap-2 font-semibold"><AlertTriangle size={18} />{isOnline ? (cropItems.length ? "Crop review ready." : "Add source files to begin.") : "Needs connection to upload source files."}</p>
+          <p className="mt-1">{isOnline ? "Project creation uploads the reviewed source files when you start conversion." : "Project creation is disabled while offline."}</p>
         </div>
-        <div className="create-workbench-progress mock-card flex items-center justify-between p-4">
-          <div className="flex items-center gap-5">
-            <div className="grid h-14 w-14 place-items-center rounded-full border-4 border-[#e5e7eb]" style={{ borderRightColor: "#008c8f", borderTopColor: "#008c8f" }}><span className="text-sm font-semibold">{progressPercent}%</span></div>
-            <div><p className="font-semibold text-[#101828]">{progressCropped} of {progressTotal} cropped</p><p className="text-sm text-[#667085]">Crop optional before conversion</p></div>
-            <div className="text-center text-sm"><FileText size={18} className="mx-auto" /><p className="font-semibold">{progressTotal}</p><p className="text-[#667085]">Total files</p></div>
-            <div className="text-center text-sm text-[#15803d]"><CheckCircle2 size={18} className="mx-auto" /><p className="font-semibold">{progressCropped}</p><p className="text-[#667085]">Cropped</p></div>
-            <div className="text-center text-sm text-[#f97316]"><CloudUpload size={18} className="mx-auto" /><p className="font-semibold">{progressRemaining}</p><p className="text-[#667085]">Remaining</p></div>
+        <div className="create-workbench-progress mock-card flex items-center justify-between gap-3 p-2">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-full p-1" style={{ background: `conic-gradient(#008c8f ${progressPercent * 3.6}deg, #e5e7eb 0deg)` }}>
+              <span className="grid h-8 w-8 place-items-center rounded-full bg-white text-xs font-semibold text-[#101828]">{progressPercent}%</span>
+            </div>
+            <div className="min-w-[136px]">
+              <p className="text-sm font-semibold leading-5 text-[#101828]">{progressCropped} of {progressTotal} cropped</p>
+              <p className="text-xs leading-4 text-[#667085]">Crop optional</p>
+            </div>
+            <div className="create-footer-stats flex min-w-0 flex-wrap items-center gap-2 text-xs text-[#475467]">
+              <span className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#d7dde5] bg-white px-2"><FileText size={14} aria-hidden="true" /><strong className="text-[#101828]">{progressTotal}</strong>Files</span>
+              <span className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#d7dde5] bg-white px-2 text-[#15803d]"><CheckCircle2 size={14} aria-hidden="true" /><strong>{progressCropped}</strong>Cropped</span>
+              <span className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#d7dde5] bg-white px-2 text-[#f97316]"><CloudUpload size={14} aria-hidden="true" /><strong>{progressRemaining}</strong>Remaining</span>
+            </div>
           </div>
-          <div className="create-workbench-actions flex gap-4">
-            <button type="button" onClick={() => setCropItems((current) => current.map((item) => ({ ...item, crop: null })))} className="mock-btn h-12"><Trash2 size={16} />Clear all crops</button>
-            <button disabled={pending || previewPending || !isOnline || !cropItems.length || Boolean(fileIssue) || !title.trim()} className="mock-btn mock-btn-primary h-14 min-w-0 sm:min-w-[250px] text-base">
+          <div className="create-workbench-actions flex shrink-0 gap-3">
+            <button type="button" onClick={() => setCropItems((current) => current.map((item) => ({ ...item, crop: null })))} disabled={!croppedCount} className="mock-btn h-10"><Trash2 size={16} />Clear all crops</button>
+            <button disabled={pending || previewPending || !isOnline || !cropItems.length || Boolean(fileIssue) || !title.trim()} className="mock-btn mock-btn-primary h-11 min-w-0 sm:min-w-[220px] text-base">
               {pending ? <Loader2 size={18} className="animate-spin" /> : <Scissors size={18} />}
               Start conversion -&gt;
             </button>

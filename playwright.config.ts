@@ -19,9 +19,6 @@ export default defineConfig({
     url: "http://localhost:3000",
     reuseExistingServer: true,
     timeout: 120_000,
-    env: {
-      DISABLE_AUTH_FOR_TESTING: "true",
-    },
   },
   projects: [
     {

@@ -75,7 +75,7 @@ export const defaultGraphSettings: GraphSettings = {
   showBorder: true,
   transparentBackground: false,
   showNumbers: true,
-  gridNumberPlacement: "inside",
+  gridNumberPlacement: "outside",
   showPageBreaks: true,
   majorGridEvery: 5,
   imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
@@ -465,7 +465,8 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
       ? cleanMerged.gridLineLayer
       : DEFAULT_GRAPH_LINE_LAYER;
   const showNumbers = typeof cleanMerged.showNumbers === "boolean" ? cleanMerged.showNumbers : true;
-  const gridNumberPlacement = cleanMerged.gridNumberPlacement === "outside" ? "outside" : "inside";
+  const gridNumberPlacement =
+    cleanMerged.gridNumberPlacement === "outside" ? "outside" : defaultGraphSettings.gridNumberPlacement;
   const showPageBreaks = typeof cleanMerged.showPageBreaks === "boolean" ? cleanMerged.showPageBreaks : true;
   void legacyCellSizeInches;
   const cellSizeCm = DEFAULT_CELL_SIZE_CM;

@@ -4,7 +4,6 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { BOOTSTRAP_ADMIN_EMAIL, GRAPH_PIXEL_SESSION_COOKIE } from "@/lib/constants";
 import { normalizeEmail, signPayload, verifySignedPayload } from "@/lib/auth/security";
-import { getTestingSession, isAuthDisabledForTesting } from "@/lib/auth/testing";
 import { tryGetSupabaseAdmin } from "@/lib/supabase/server";
 import type { AppRole, AppUser, CurrentSession } from "@/lib/types";
 
@@ -54,19 +53,23 @@ export function createSessionToken(input: Pick<SessionPayload, "userId" | "email
 }
 
 export function createOfflineSessionTicket(input: CurrentSession) {
-  const exp = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
-  const token = signPayload({
-    kind: OFFLINE_SESSION_KIND,
-    userId: input.userId,
-    email: normalizeEmail(input.email),
-    role: input.role,
-    exp,
-  });
+  try {
+    const exp = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+    const token = signPayload({
+      kind: OFFLINE_SESSION_KIND,
+      userId: input.userId,
+      email: normalizeEmail(input.email),
+      role: input.role,
+      exp,
+    });
 
-  return {
-    token,
-    expiresAt: new Date(exp * 1000).toISOString(),
-  };
+    return {
+      token,
+      expiresAt: new Date(exp * 1000).toISOString(),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function getSessionCookieOptions() {
@@ -102,8 +105,6 @@ export async function getActiveUserByEmail(email: string) {
 }
 
 export async function getCurrentSession(): Promise<CurrentSession | null> {
-  if (isAuthDisabledForTesting()) return getTestingSession();
-
   const cookieStore = await cookies();
   const payload = parseSessionToken(cookieStore.get(GRAPH_PIXEL_SESSION_COOKIE)?.value);
   if (!payload) return null;

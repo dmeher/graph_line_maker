@@ -252,6 +252,8 @@ canvas {
   min-height: 100dvh;
   background: var(--mock-bg);
   color: var(--mock-text);
+  position: relative;
+  isolation: isolate;
 }
 
 .mock-topbar {
@@ -272,14 +274,54 @@ canvas {
 .mock-sidebar {
   position: fixed;
   left: 0;
-  top: 64px;
+  top: 0;
   bottom: 0;
-  z-index: 30;
+  transform: translateX(-100%);
+  z-index: 120;
   display: flex;
-  width: 128px;
+  width: 250px;
   flex-direction: column;
   border-right: 1px solid var(--mock-border);
   background: var(--mock-sidebar);
+  transition:
+    transform 180ms ease,
+    visibility 180ms ease;
+  visibility: hidden;
+}
+
+.mock-sidebar-head {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 8px 4px;
+  border-bottom: 1px solid var(--mock-border-soft);
+  flex-shrink: 0;
+}
+
+.mock-sidebar-close {
+  display: grid;
+  height: 32px;
+  width: 32px;
+  place-items: center;
+  border: 1px solid var(--mock-border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: #344054;
+}
+
+.mock-sidebar-close:hover {
+  background: #f2f4f7;
+}
+
+.mock-sidebar--open {
+  transform: translateX(0);
+  visibility: visible;
+}
+
+.mock-nav-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  background: rgb(15 23 42 / 0.25);
 }
 
 .mock-main {
@@ -289,10 +331,8 @@ canvas {
   padding: 16px;
 }
 
-@media (min-width: 768px) {
-  .mock-main {
-    margin-left: 128px;
-  }
+.mock-main-editor {
+  padding-top: 0;
 }
 
 .mock-card {
@@ -383,12 +423,12 @@ canvas {
 }
 
 .editor-dark-shell {
-  position: fixed;
-  inset: 0;
+  position: relative;
   z-index: 100;
   display: flex;
   min-width: 0;
-  overflow: hidden;
+  min-height: 0;
+  overflow: visible;
   flex-direction: column;
   background: #e9eef3;
   color: #101828;
@@ -398,6 +438,8 @@ canvas {
   display: flex;
   height: 58px;
   flex-shrink: 0;
+  position: sticky;
+  top: 0;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -406,7 +448,9 @@ canvas {
   padding: 0 14px;
   color: #ffffff;
   overflow-x: auto;
+  overflow-y: visible;
   scrollbar-width: thin;
+  z-index: 320;
 }
 
 .editor-dark-btn {
@@ -426,8 +470,50 @@ canvas {
   white-space: nowrap;
 }
 
+.editor-export-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 9999;
+  min-width: 152px;
+  border: 1px solid #2d3642;
+  border-radius: 6px;
+  background: #141d27;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.28);
+}
+
+.editor-export-menu--portal {
+  position: fixed;
+  right: auto;
+  z-index: 10000;
+}
+
+.editor-export-option {
+  display: inline-flex;
+  min-height: 2rem;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  background: #10242d;
+  color: #f8fafc;
+  padding: 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.editor-export-option:hover {
+  background: #17313d;
+}
+
 .editor-workspace {
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   flex: 1;
   grid-template-columns: var(--editor-grid-columns, 320px minmax(0, 1fr) 300px);
@@ -439,7 +525,6 @@ canvas {
 .editor-workspace > * {
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
 }
 
 .editor-panel {
@@ -501,13 +586,99 @@ canvas {
   min-width: 0;
 }
 
-@media (max-width: 1023px) {
-  .mock-sidebar {
-    display: none;
-  }
+.create-crop-review {
+  padding: 24px;
+}
 
+.create-crop-tooldock {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  z-index: 6;
+  display: flex;
+  width: 44px;
+  max-height: calc(100% - 24px);
+  transform: translateY(-50%);
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  border: 1px solid #d7dde5;
+  border-radius: 8px;
+  background: rgb(255 255 255 / 94%);
+  padding: 6px;
+  box-shadow: 0 8px 24px rgb(16 24 40 / 14%);
+  backdrop-filter: blur(8px);
+  scrollbar-width: thin;
+}
+
+.create-crop-icon-button,
+.create-crop-status-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid #d7dde5;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #344054;
+}
+
+.create-crop-icon-button:hover:not(:disabled) {
+  border-color: #008c8f;
+  color: #008c8f;
+}
+
+.create-crop-icon-button:disabled {
+  opacity: 0.42;
+}
+
+.create-crop-status-icon {
+  background: #f8fafc;
+  color: #667085;
+}
+
+.create-crop-tool-separator {
+  width: 100%;
+  height: 1px;
+  flex: 0 0 auto;
+  background: #e8edf2;
+}
+
+.create-crop-frame {
+  height: 100%;
+}
+
+.create-aspect-toolbar {
+  max-width: min(100%, 720px);
+  scrollbar-width: thin;
+}
+
+.create-workbench-footer {
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.create-workbench-notice,
+.create-workbench-progress {
+  min-height: 0;
+}
+
+.create-workbench-progress > div:first-child {
+  min-width: 0;
+}
+
+@media (max-width: 1023px) {
   .mock-main {
     padding-bottom: 78px;
+  }
+
+  .mock-sidebar {
+    width: min(92vw, 380px);
+    box-shadow: 0 16px 48px rgb(15 23 42 / 0.22);
+    max-height: 100dvh;
+    overflow-y: auto;
+    scrollbar-width: thin;
   }
 
   .editor-workspace {
@@ -540,6 +711,7 @@ canvas {
     grid-template-columns: 1fr;
     gap: 12px;
     padding: 12px;
+    overflow: visible;
   }
 
   .create-workbench-progress {
@@ -555,6 +727,10 @@ canvas {
 
   .mock-main {
     padding: 10px;
+  }
+
+  .mock-main-editor {
+    padding-top: 0;
   }
 
   .create-workbench {
@@ -589,7 +765,33 @@ canvas {
   }
 
   .create-workbench-stage .mock-checker {
-    padding: 18px;
+    padding: 14px;
+  }
+
+  .create-crop-review {
+    gap: 10px;
+  }
+
+  .create-crop-tooldock {
+    top: 10px;
+    right: 10px;
+    left: 10px;
+    width: auto;
+    max-height: none;
+    transform: none;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .create-crop-tool-separator {
+    width: 1px;
+    height: 30px;
+  }
+
+  .create-aspect-toolbar {
+    width: 100%;
+    justify-self: stretch;
   }
 
   .create-workbench-stage > div:last-child {
@@ -621,4 +823,5 @@ canvas {
     flex: 1 1 180px;
   }
 }
+
 }

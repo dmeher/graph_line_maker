@@ -39,11 +39,17 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-function cropFromPoints(startX: number, startY: number, endX: number, endY: number, box: ImageBox) {
+function cropFromPoints(startX: number, startY: number, endX: number, endY: number, box: ImageBox, aspectRatio: number | null) {
   const x = clamp(Math.min(startX, endX), 0, box.naturalWidth - 1);
   const y = clamp(Math.min(startY, endY), 0, box.naturalHeight - 1);
-  const width = clamp(Math.abs(endX - startX), 1, box.naturalWidth - x);
-  const height = clamp(Math.abs(endY - startY), 1, box.naturalHeight - y);
+  let width = clamp(Math.abs(endX - startX), 1, box.naturalWidth - x);
+  let height = clamp(Math.abs(endY - startY), 1, box.naturalHeight - y);
+  if (aspectRatio) {
+    if (width / height > aspectRatio) width = Math.max(1, Math.round(height * aspectRatio));
+    else height = Math.max(1, Math.round(width / aspectRatio));
+    width = clamp(width, 1, box.naturalWidth - x);
+    height = clamp(height, 1, box.naturalHeight - y);
+  }
   return normalizeCrop({ x, y, width, height }, box.naturalWidth, box.naturalHeight);
 }
 
@@ -59,7 +65,7 @@ function cropFromMove(startCrop: CropPixels, deltaX: number, deltaY: number, box
   );
 }
 
-function cropFromResize(startCrop: CropPixels, handle: CropHandle, deltaX: number, deltaY: number, box: ImageBox) {
+function cropFromResize(startCrop: CropPixels, handle: CropHandle, deltaX: number, deltaY: number, box: ImageBox, aspectRatio: number | null) {
   let left = startCrop.x;
   let top = startCrop.y;
   let right = startCrop.x + startCrop.width;
@@ -70,33 +76,46 @@ function cropFromResize(startCrop: CropPixels, handle: CropHandle, deltaX: numbe
   if (handle.includes("n")) top = clamp(startCrop.y + deltaY, 0, bottom - 1);
   if (handle.includes("s")) bottom = clamp(startCrop.y + startCrop.height + deltaY, top + 1, box.naturalHeight);
 
-  return normalizeCrop(
-    {
-      x: left,
-      y: top,
-      width: right - left,
-      height: bottom - top,
-    },
-    box.naturalWidth,
-    box.naturalHeight,
-  );
+  let width = right - left;
+  let height = bottom - top;
+  if (aspectRatio) {
+    if (width / height > aspectRatio) width = Math.max(1, Math.round(height * aspectRatio));
+    else height = Math.max(1, Math.round(width / aspectRatio));
+    if (handle.includes("w")) left = right - width;
+    else right = left + width;
+    if (handle.includes("n")) top = bottom - height;
+    else bottom = top + height;
+  }
+
+  return normalizeCrop({ x: left, y: top, width: right - left, height: bottom - top }, box.naturalWidth, box.naturalHeight);
 }
 
 export function ManualCropper({
   imageUrl,
   crop,
   onCropChange,
+  aspectRatio = null,
+  zoom = 1,
+  onImageSizeChange,
   className = "",
 }: {
   imageUrl: string;
   crop: CropPixels | null;
   onCropChange: (crop: CropPixels) => void;
+  aspectRatio?: number | null;
+  zoom?: number;
+  onImageSizeChange?: (size: { width: number; height: number }) => void;
   className?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
+  const onImageSizeChangeRef = useRef(onImageSizeChange);
   const [imageBox, setImageBox] = useState<ImageBox | null>(null);
+
+  useEffect(() => {
+    onImageSizeChangeRef.current = onImageSizeChange;
+  }, [onImageSizeChange]);
 
   function measureImage() {
     const container = containerRef.current;
@@ -106,7 +125,7 @@ export function ManualCropper({
     const containerRect = container.getBoundingClientRect();
     if (containerRect.width <= 0 || containerRect.height <= 0) return null;
 
-    const scale = Math.min(containerRect.width / image.naturalWidth, containerRect.height / image.naturalHeight);
+    const scale = Math.min(containerRect.width / image.naturalWidth, containerRect.height / image.naturalHeight) * zoom;
     if (!Number.isFinite(scale) || scale <= 0) return null;
 
     const imageWidth = image.naturalWidth * scale;
@@ -120,6 +139,7 @@ export function ManualCropper({
       naturalHeight: image.naturalHeight,
     };
     setImageBox(nextBox);
+    onImageSizeChangeRef.current?.({ width: image.naturalWidth, height: image.naturalHeight });
     return nextBox;
   }
 
@@ -155,7 +175,7 @@ export function ManualCropper({
       startCrop,
       handle: handle ?? null,
     };
-    if (!handle && !moveElement) onCropChange(cropFromPoints(point.x, point.y, point.x + 1, point.y + 1, box));
+    if (!handle && !moveElement) onCropChange(cropFromPoints(point.x, point.y, point.x + 1, point.y + 1, box, aspectRatio));
   }
 
   function moveCrop(event: ReactPointerEvent<HTMLDivElement>) {
@@ -175,11 +195,11 @@ export function ManualCropper({
     }
 
     if (dragState.mode === "resize" && dragState.startCrop && dragState.handle) {
-      onCropChange(cropFromResize(dragState.startCrop, dragState.handle, deltaX, deltaY, box));
+      onCropChange(cropFromResize(dragState.startCrop, dragState.handle, deltaX, deltaY, box, aspectRatio));
       return;
     }
 
-    onCropChange(cropFromPoints(dragState.startX, dragState.startY, point.x, point.y, box));
+    onCropChange(cropFromPoints(dragState.startX, dragState.startY, point.x, point.y, box, aspectRatio));
   }
 
   function endCrop(event: ReactPointerEvent<HTMLDivElement>) {
@@ -193,7 +213,11 @@ export function ManualCropper({
 
   useEffect(() => {
     setImageBox(null);
-  }, [imageUrl]);
+    const frame = window.requestAnimationFrame(() => {
+      measureImage();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [imageUrl, zoom]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -204,7 +228,7 @@ export function ManualCropper({
     });
     observer.observe(container);
     return () => observer.disconnect();
-  }, [imageUrl]);
+  }, [imageUrl, zoom]);
 
   const normalizedCrop = imageBox && crop ? normalizeCrop(crop, imageBox.naturalWidth, imageBox.naturalHeight) : null;
   const cropStyle =

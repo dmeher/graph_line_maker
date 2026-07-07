@@ -19,7 +19,7 @@ export function AppNav({ variant }: { variant: "desktop" | "mobile" }) {
 
   if (variant === "desktop") {
     return (
-      <nav className="hidden flex-1 flex-col gap-1 md:flex" aria-label="Primary">
+      <nav className="flex flex-1 flex-col gap-1" aria-label="Primary">
         <div className="flex flex-1 flex-col gap-1 p-3">
           {navItems.map((item) => {
             const active = isActivePath(pathname, item.href) || (item.href === "/dashboard" && pathname.startsWith("/projects/") && pathname !== "/projects/new");

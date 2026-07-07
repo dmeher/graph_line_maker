@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
@@ -27,9 +28,10 @@ import {
   Loader2,
   Maximize2,
   Menu,
-  MoreVertical,
   MousePointer2,
+  MoreVertical,
   Pipette,
+  Plus,
   Printer,
   RefreshCw,
   Redo2,
@@ -115,7 +117,7 @@ import type { GraphCellLineSide, GraphCellPaint, GraphSettings, GraphShapeDrawin
 import { bytesToSize } from "@/lib/utils/format";
 
 type MobileTab = "source" | "canvas" | "controls";
-type InspectorTab = "graph" | "source" | "draw" | "palette" | "print";
+type InspectorTab = "graph" | "source" | "draw" | "palette";
 type Notice = { tone: "ok" | "error" | "info"; text: string };
 type CollapsibleKey = "parameters" | "drawing" | "outline" | "fill" | "selectedFill" | "graphLines";
 type FloatingPalette = { regionId: string; x: number; y: number } | null;
@@ -489,6 +491,9 @@ function NumberField({
   allowDecimalInput = false,
   wholeStep = false,
   disabled = false,
+  hideLabel = false,
+  wrapperClassName,
+  inputClassName,
   onChange,
 }: {
   label: string;
@@ -499,6 +504,9 @@ function NumberField({
   allowDecimalInput?: boolean;
   wholeStep?: boolean;
   disabled?: boolean;
+  hideLabel?: boolean;
+  wrapperClassName?: string;
+  inputClassName?: string;
   onChange: (value: number) => void;
 }) {
   const [draftValue, setDraftValue] = useState(() => String(value));
@@ -543,8 +551,8 @@ function NumberField({
   }
 
   return (
-    <label className="grid min-w-0 gap-1.5">
-      <span className="text-xs font-semibold text-slate-500">{label}</span>
+    <label className={wrapperClassName ?? "grid min-w-0 gap-1.5"}>
+      <span className={hideLabel ? "sr-only" : "text-xs font-semibold text-slate-500"}>{label}</span>
       <input
         type="number"
         inputMode={allowDecimalInput || step < 1 ? "decimal" : "numeric"}
@@ -566,7 +574,7 @@ function NumberField({
           if (normalized !== parsed) setDraftValue(String(normalized));
           onChange(normalized);
         }}
-        className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-400"
+        className={inputClassName ?? "h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-400"}
       />
     </label>
   );
@@ -679,6 +687,121 @@ function ColorSummary({ value }: { value: string }) {
   );
 }
 
+const inspectorControlClass =
+  "h-9 w-full min-w-0 rounded-md border border-[#d7dde5] bg-white px-2.5 text-[13px] font-medium text-[#101828] outline-none focus:border-[#008c8f] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-400";
+
+function paperSizeOptionLabel(key: GraphSettings["printPaperSize"]) {
+  const paper = PRINT_PAPER_SIZES[key] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
+  return `${paper.label} (${Math.round(paper.widthCm * 10)} x ${Math.round(paper.heightCm * 10)} mm)`;
+}
+
+function InspectorGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="border-t border-[#e8edf2] pt-4 first:border-t-0 first:pt-0">
+      <h3 className="mb-3 text-[12px] font-bold uppercase tracking-wide text-[#5b6675]">{title}</h3>
+      <div className="space-y-3">{children}</div>
+    </section>
+  );
+}
+
+function InspectorRow({ label, children, className = "" }: { label: string; children: ReactNode; className?: string }) {
+  return (
+    <div className={`grid min-w-0 grid-cols-[86px_minmax(0,1fr)] items-center gap-2 ${className}`}>
+      <span className="text-[12px] font-medium text-[#344054]">{label}</span>
+      <div className="min-w-0">{children}</div>
+    </div>
+  );
+}
+
+function InspectorSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: readonly { value: string; label: string }[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <select value={value} onChange={(event) => onChange(event.target.value)} aria-label={label} className={inspectorControlClass}>
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function InspectorCheckbox({
+  label,
+  checked,
+  onChange,
+  disabled = false,
+}: {
+  label: string;
+  checked: boolean;
+  onChange?: (checked: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <label className="inline-flex min-w-0 items-center gap-2 text-[13px] font-semibold text-[#344054]">
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        readOnly={disabled || !onChange}
+        onChange={(event) => onChange?.(event.target.checked)}
+        className="h-4 w-4 shrink-0 rounded accent-[#008c8f]"
+      />
+      <span className="min-w-0 truncate">{label}</span>
+    </label>
+  );
+}
+
+function InspectorColorControl({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return (
+    <label className={`${inspectorControlClass} flex cursor-pointer items-center gap-2 px-2`} title={`${label}: ${value}`}>
+      <input type="color" value={isHexColor(value) ? value : DEFAULT_GRID_LINE_COLOR} onChange={(event) => onChange(event.target.value)} className="sr-only" aria-label={label} />
+      <span className="h-5 w-5 shrink-0 rounded border border-[#cfd7df]" style={{ backgroundColor: value }} aria-hidden="true" />
+      <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{value.toUpperCase()}</span>
+      <ChevronDown size={14} className="shrink-0 text-[#667085]" aria-hidden="true" />
+    </label>
+  );
+}
+
+function InspectorSegmented({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: readonly { value: string; label: string; icon?: ReactNode }[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="grid grid-cols-3 rounded-md border border-[#d7dde5] bg-[#f8fafc] p-0.5" role="group" aria-label={label}>
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => onChange(option.value)}
+          className={`inline-flex h-8 min-w-0 items-center justify-center gap-1 rounded text-[12px] font-semibold ${
+            option.value === value ? "bg-[#008c8f] text-white shadow-sm" : "text-[#475467] hover:bg-white"
+          }`}
+        >
+          {option.icon}
+          <span className="truncate">{option.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function sourceResizeHandleClass(handle: SourceResizeHandle, locked: boolean | undefined) {
   const base = `pointer-events-auto absolute grid place-items-center text-slate-700 transition-colors ${
     locked ? "opacity-40" : "hover:text-slate-950"
@@ -736,7 +859,7 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const gridLineColor = isHexColor(settings.gridLineColor) && settings.gridLineColor.toLowerCase() !== "#cbd5e1" ? settings.gridLineColor : DEFAULT_GRID_LINE_COLOR;
   const gridLineLayer = isGraphLineLayer(settings.gridLineLayer) ? settings.gridLineLayer : DEFAULT_GRAPH_LINE_LAYER;
   const showNumbers = typeof settings.showNumbers === "boolean" ? settings.showNumbers : true;
-  const gridNumberPlacement = settings.gridNumberPlacement === "outside" ? "outside" : "inside";
+  const gridNumberPlacement = settings.gridNumberPlacement === "inside" ? "inside" : "outside";
   const showPageBreaks = typeof settings.showPageBreaks === "boolean" ? settings.showPageBreaks : true;
   const cellSizeCm = DEFAULT_CELL_SIZE_CM;
   const measurementUnit = isMeasurementUnit(settings.measurementUnit) ? settings.measurementUnit : "in";
@@ -832,7 +955,7 @@ function editorDefaultGraphSettings(current: GraphSettings): GraphSettings {
     gridLineColor: DEFAULT_GRID_LINE_COLOR,
     gridLineLayer: DEFAULT_GRAPH_LINE_LAYER,
     showNumbers: true,
-    gridNumberPlacement: "inside",
+    gridNumberPlacement: "outside",
     showPageBreaks: true,
     imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
     imageHeight: DEFAULT_IMAGE_HEIGHT_CELLS,
@@ -1014,6 +1137,12 @@ export function EditorClient({ project }: { project: Project }) {
   const [mobileTab, setMobileTab] = useState<MobileTab>("canvas");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("graph");
   const [isPending, startTransition] = useTransition();
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [exportMenuStyle, setExportMenuStyle] = useState<CSSProperties | null>(null);
+  const openMainMenu = useCallback(() => {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(new Event("graph-pixel-editor-menu"));
+  }, []);
   const settingsRef = useRef(settings);
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const sourceCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
@@ -1027,6 +1156,10 @@ export function EditorClient({ project }: { project: Project }) {
   const sourceLayerCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const dragStateRef = useRef<DragState | null>(null);
   const panelResizeStateRef = useRef<PanelResizeState | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const exportMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const exportMenuPortalRef = useRef<HTMLDivElement | null>(null);
+  const noticeDismissTimerRef = useRef<number | NodeJS.Timeout | null>(null);
   const fillRegionMapRef = useRef<Uint16Array | null>(null);
   const settingsHistoryRef = useRef<SettingsHistory>({ undo: [], redo: [] });
   const spacePressedRef = useRef(false);
@@ -1072,6 +1205,80 @@ export function EditorClient({ project }: { project: Project }) {
     };
   }, [project]);
 
+  useEffect(() => {
+    if (!isExportMenuOpen) return;
+
+    function closeMenu(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      const menuRoot = exportMenuRef.current;
+      const portalRoot = exportMenuPortalRef.current;
+      if (menuRoot?.contains(target) || (portalRoot && portalRoot.contains(target))) return;
+
+      setIsExportMenuOpen(false);
+    }
+
+    window.addEventListener("pointerdown", closeMenu, { capture: true });
+    return () => window.removeEventListener("pointerdown", closeMenu, { capture: true });
+  }, [isExportMenuOpen]);
+
+  useEffect(() => {
+    if (!isExportMenuOpen) {
+      setExportMenuStyle(null);
+      return;
+    }
+
+    const buttonElement = exportMenuButtonRef.current;
+    if (!buttonElement) return;
+
+    const updateMenuStyle = () => {
+      const rect = buttonElement.getBoundingClientRect();
+      const minimumWidth = 152;
+      const menuWidth = Math.max(minimumWidth, Math.ceil(rect.width));
+      const maxLeft = Math.max(8, window.innerWidth - menuWidth - 8);
+      const left = Math.max(8, Math.min(rect.right - menuWidth, maxLeft));
+      setExportMenuStyle({
+        position: "fixed",
+        left: `${left}px`,
+        top: `${rect.bottom + 6}px`,
+        minWidth: `${menuWidth}px`,
+      });
+    };
+
+    updateMenuStyle();
+    window.addEventListener("scroll", updateMenuStyle, true);
+    window.addEventListener("resize", updateMenuStyle);
+    return () => {
+      window.removeEventListener("scroll", updateMenuStyle, true);
+      window.removeEventListener("resize", updateMenuStyle);
+    };
+  }, [isExportMenuOpen]);
+
+  useEffect(() => {
+    if (!notice) {
+      if (noticeDismissTimerRef.current) {
+        window.clearTimeout(noticeDismissTimerRef.current);
+        noticeDismissTimerRef.current = null;
+      }
+      return;
+    }
+
+    if (noticeDismissTimerRef.current) {
+      window.clearTimeout(noticeDismissTimerRef.current);
+      noticeDismissTimerRef.current = null;
+    }
+
+    const timer = window.setTimeout(() => {
+      setNotice(null);
+    }, 5000);
+    noticeDismissTimerRef.current = timer;
+
+    return () => {
+      window.clearTimeout(timer);
+      if (noticeDismissTimerRef.current === timer) noticeDismissTimerRef.current = null;
+    };
+  }, [notice]);
+
   const filename = useMemo(() => slug(title), [title]);
   const primarySource = settings.sourceImages[0] ?? null;
   const sourceName = primarySource?.name ?? "Source image";
@@ -1087,6 +1294,7 @@ export function EditorClient({ project }: { project: Project }) {
     [fillRegions, selectedFillRegionId],
   );
   const fillRegionsById = useMemo(() => new Map(fillRegions.map((region) => [region.id, region] as const)), [fillRegions]);
+  const isPaletteSectionExpanded = !collapsedSections.outline || !collapsedSections.fill || !collapsedSections.graphLines || (!!selectedFillRegion && !collapsedSections.selectedFill);
   const pushUndoSettings = useCallback((snapshot: GraphSettings) => {
     const history = settingsHistoryRef.current;
     const previous = history.undo.at(-1);
@@ -2589,532 +2797,413 @@ export function EditorClient({ project }: { project: Project }) {
       });
   }
 
+  const selectedCellLayer =
+    selectedDrawingLayerId?.startsWith("cell:")
+      ? settings.cellPaints.find((cell) => selectedDrawingLayerId === drawingLayerKey("cell", cell.id)) ?? null
+      : null;
+  const selectedShapeLayer =
+    selectedDrawingLayerId?.startsWith("shape:")
+      ? settings.graphShapes.find((shape) => selectedDrawingLayerId === drawingLayerKey("shape", shape.id)) ?? null
+      : null;
+  const selectedSourceIndex = selectedSource ? settings.sourceImages.findIndex((source) => source.id === selectedSource.id) : -1;
+  const selectedCellIndex = selectedCellLayer ? settings.cellPaints.findIndex((cell) => cell.id === selectedCellLayer.id) : -1;
+  const selectedShapeIndex = selectedShapeLayer ? settings.graphShapes.findIndex((shape) => shape.id === selectedShapeLayer.id) : -1;
+  const selectedLayerLocked = Boolean(selectedSource?.locked || selectedCellLayer?.locked || selectedShapeLayer?.locked);
+  const hasSelectedLayer = Boolean(selectedSource || selectedCellLayer || selectedShapeLayer);
+  const sourceErrorCount = Object.values(sourceStatus).filter((status) => status.error).length;
+  const totalCells = Math.round(settings.graphWidth * settings.graphHeight);
+  const visibleLayerCount = settings.sourceImages.length + settings.cellPaints.length + settings.graphShapes.length;
+  const statusLabel = sourceErrorCount ? "Source needs attention" : processing ? "Processing graph" : sourceReady || !settings.sourceImages.length ? "Processing complete" : "Loading source files";
+  const statusMeta = sourceErrorCount ? `${sourceErrorCount} issue${sourceErrorCount === 1 ? "" : "s"}` : processing ? "Working" : sourceReady || !settings.sourceImages.length ? "Ready" : "Loading";
+
+  function formatCount(value: number) {
+    return Math.max(0, Math.round(value)).toLocaleString("en-US");
+  }
+
+  function selectedLayerCanMove(direction: -1 | 1) {
+    if (selectedSource) {
+      const next = selectedSourceIndex + direction;
+      return selectedSourceIndex >= 0 && next >= 0 && next < settings.sourceImages.length && !selectedSource.locked && !settings.sourceImages[next]?.locked;
+    }
+    if (selectedCellLayer) {
+      const next = selectedCellIndex + direction;
+      return selectedCellIndex >= 0 && next >= 0 && next < settings.cellPaints.length && !selectedCellLayer.locked && !settings.cellPaints[next]?.locked;
+    }
+    if (selectedShapeLayer) {
+      const next = selectedShapeIndex + direction;
+      return selectedShapeIndex >= 0 && next >= 0 && next < settings.graphShapes.length && !selectedShapeLayer.locked && !settings.graphShapes[next]?.locked;
+    }
+    return false;
+  }
+
+  function moveSelectedLayer(direction: -1 | 1) {
+    if (selectedSource) moveSourceImage(selectedSource.id, direction);
+    else if (selectedCellLayer) moveDrawingLayer("cell", selectedCellLayer.id, direction);
+    else if (selectedShapeLayer) moveDrawingLayer("shape", selectedShapeLayer.id, direction);
+  }
+
+  function toggleSelectedLayerLock() {
+    if (selectedSource) toggleSourceLock(selectedSource.id);
+    else if (selectedCellLayer) toggleDrawingLock("cell", selectedCellLayer.id);
+    else if (selectedShapeLayer) toggleDrawingLock("shape", selectedShapeLayer.id);
+  }
+
+  function deleteSelectedLayer() {
+    if (selectedSource) removeSourceImage(selectedSource.id);
+    else if (selectedCellLayer) removeDrawingLayer("cell", selectedCellLayer.id, selectedCellLayer.name, selectedCellLayer.locked);
+    else if (selectedShapeLayer) removeDrawingLayer("shape", selectedShapeLayer.id, selectedShapeLayer.name, selectedShapeLayer.locked);
+  }
+
+  function renderSourceThumbnail(source: GraphSourceImage, className = "h-12 w-12") {
+    const previewUrl = sourceStatus[source.id]?.previewUrl;
+    return previewUrl ? (
+      <img src={previewUrl} alt="" className={`${className} shrink-0 rounded border border-[#d7dde5] bg-white object-contain p-1`} />
+    ) : (
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#d7dde5] bg-[#f8fafc] text-[#98a2b3]`}>
+        <ImageIcon size={16} aria-hidden="true" />
+      </span>
+    );
+  }
+
+  function renderCellThumbnail(cell: GraphCellPaint, className = "h-12 w-12") {
+    return (
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#d7dde5] bg-white p-1`}>
+        <span className="h-[70%] w-[70%] border-2" style={{ borderColor: cell.lineColor, backgroundColor: isTransparentFillColor(cell.fillColor) ? "transparent" : cell.fillColor }} />
+      </span>
+    );
+  }
+
+  function renderShapeThumbnail(shape: GraphShapeDrawing, className = "h-12 w-12") {
+    return (
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#d7dde5] bg-white p-1 text-[#667085]`}>
+        <Maximize2 size={18} aria-hidden="true" />
+        <span className="sr-only">{GRAPH_SHAPE_KIND_LABELS[shape.kind]}</span>
+      </span>
+    );
+  }
+
+  function renderSourceAdvanced(source: GraphSourceImage) {
+    return (
+      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[#e8edf2] bg-[#f8fafc] p-3">
+        <NumberField label="Width (CM)" value={sourcePhysicalWidthCm(source)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={source.locked} onChange={(value) => updateSourceImagePhysicalWidthCm(source.id, value)} />
+        <NumberField label={`Height (${MEASUREMENT_UNIT_LABELS[source.measurementUnit]})`} value={sourcePhysicalHeight(source)} min={0.01} max={roundMeasure(cmToUnit(1000 * settings.cellSizeCm, source.measurementUnit))} step={0.1} allowDecimalInput disabled={source.locked} onChange={(value) => updateSourceImagePhysicalHeight(source.id, value)} />
+        <label className="grid min-w-0 gap-1.5">
+          <span className="text-xs font-semibold text-slate-500">Size unit</span>
+          <select value={source.measurementUnit} onChange={(event) => updateSourceImage(source.id, { measurementUnit: event.target.value as GraphSettings["measurementUnit"] })} className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100">
+            <option value="cm">CM</option>
+            <option value="in">IN</option>
+          </select>
+        </label>
+        <NumberField label="Line size" value={source.imageLineThickness} min={MIN_IMAGE_LINE_THICKNESS} max={MAX_IMAGE_LINE_THICKNESS} step={0.01} allowDecimalInput onChange={(value) => updateSourceImage(source.id, { imageLineThickness: value })} />
+        <NumberField label="Left padding (cells)" value={source.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={source.locked} onChange={(value) => updateSourceImage(source.id, { x: value })} />
+        <NumberField label="Right padding (cells)" value={sourceRightPadding(source)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={source.locked} onChange={(value) => updateSourceImage(source.id, { x: settings.graphWidth - source.width - value })} />
+        <NumberField label="Top padding (cells)" value={source.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={source.locked} onChange={(value) => updateSourceImage(source.id, { y: value })} />
+        <NumberField label="Bottom padding (cells)" value={sourceBottomPadding(source)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={source.locked} onChange={(value) => updateSourceImage(source.id, { y: settings.graphHeight - source.height - value })} />
+        <NumberField label="Fill detection" value={source.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} allowDecimalInput onChange={(value) => updateSourceImage(source.id, { sourceFillThreshold: value })} />
+        <NumberField label="Fill width" value={source.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSourceImage(source.id, { sourceFillMinStrokePixels: value })} />
+        <NumberField label="Gap closing" value={source.strokeGapClosePixels} min={MIN_STROKE_GAP_CLOSE_PIXELS} max={MAX_STROKE_GAP_CLOSE_PIXELS} onChange={(value) => updateSourceImage(source.id, { strokeGapClosePixels: value })} />
+        <div className="grid grid-cols-4 gap-1 col-span-2">
+          <button type="button" onClick={() => rotateSourceImage(source.id, -1)} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateSourceImage(source.id, 1)} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipSourceImage(source.id, "x")} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipSourceImage(source.id, "y")} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderCellAdvanced(cell: GraphCellPaint) {
+    return (
+      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[#e8edf2] bg-[#f8fafc] p-3">
+        <NumberField label="Width (cells)" value={cell.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { width: value })} />
+        <NumberField label="Height (cells)" value={cell.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { height: value })} />
+        <NumberField label="Left padding (cells)" value={cell.x} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: value })} />
+        <NumberField label="Right padding (cells)" value={drawingRightPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: settings.graphWidth - cell.width - value })} />
+        <NumberField label="Top padding (cells)" value={cell.y} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: value })} />
+        <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: settings.graphHeight - cell.height - value })} />
+        <NumberField label="Line size" value={cell.lineWidth} min={1} max={24} disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { lineWidth: value })} />
+        <ColorPresetField label="Line" value={cell.lineColor} onChange={(value) => updateCellPaint(cell.id, { lineColor: value })} />
+        <ColorPresetField label="Fill" value={cell.fillColor} onChange={(value) => updateCellPaint(cell.id, { fillColor: value })} allowTransparent />
+        <div className="grid grid-cols-2 gap-1">
+          {CELL_LINE_SIDE_KEYS.map((side) => (
+            <label key={side} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
+              <input type="checkbox" checked={cell.sides.includes(side)} disabled={cell.locked} onChange={() => updateCellPaint(cell.id, { sides: cell.sides.includes(side) ? cell.sides.filter((item) => item !== side) : [...cell.sides, side] })} className="h-4 w-4 accent-[var(--teal)]" />
+              {CELL_LINE_SIDE_LABELS[side]}
+            </label>
+          ))}
+        </div>
+        <div className="grid grid-cols-4 gap-1 col-span-2">
+          <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, -1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, 1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "x")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "y")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderShapeAdvanced(shape: GraphShapeDrawing) {
+    return (
+      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[#e8edf2] bg-[#f8fafc] p-3">
+        <label className="grid min-w-0 gap-1.5">
+          <span className="text-xs font-semibold text-slate-500">Shape</span>
+          <select value={shape.kind} disabled={shape.locked} onChange={(event) => updateGraphShape(shape.id, { kind: event.target.value as GraphShapeKind })} className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60">
+            {GRAPH_SHAPE_KIND_KEYS.map((kind) => <option key={kind} value={kind}>{GRAPH_SHAPE_KIND_LABELS[kind]}</option>)}
+          </select>
+        </label>
+        <NumberField label="Line size" value={shape.strokeWidth} min={1} max={24} disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { strokeWidth: value })} />
+        <NumberField label="Width (cells)" value={shape.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { width: value })} />
+        <NumberField label="Height (cells)" value={shape.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { height: value })} />
+        <NumberField label="Left padding (cells)" value={shape.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: value })} />
+        <NumberField label="Right padding (cells)" value={drawingRightPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: settings.graphWidth - shape.width - value })} />
+        <NumberField label="Top padding (cells)" value={shape.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: value })} />
+        <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: settings.graphHeight - shape.height - value })} />
+        <ColorPresetField label="Line" value={shape.strokeColor} onChange={(value) => updateGraphShape(shape.id, { strokeColor: value })} />
+        <ColorPresetField label="Fill" value={shape.fillColor} onChange={(value) => updateGraphShape(shape.id, { fillColor: value })} allowTransparent />
+        <div className="grid grid-cols-4 gap-1 col-span-2">
+          <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, -1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, 1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "x")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "y")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
+        </div>
+      </div>
+    );
+  }
+
   const sourcePanel = (
-    <aside className="editor-panel relative space-y-0">
-      <div className="flex h-11 items-center justify-between border-b border-[#d7dde5] px-3">
-        <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">
-          Sources
-        </h2>
-        <div className="flex gap-2">
-          {sourcePreviewUrl ? (
-            sourceCropMode ? (
-              <>
-                <button
-                  type="button"
-                  onClick={applySourceCrop}
-                  disabled={!sourceCropArea || sourceCropPending}
-                  className="ui-btn-icon disabled:opacity-50"
-                  title="Apply crop"
-                >
-                  {sourceCropPending ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={selectFullSourceCrop}
-                  className="ui-btn-icon"
-                  title="Full image"
-                >
-                  <Maximize2 size={15} aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSourceCropMode(false);
-                    setSourceCropArea(null);
-                  }}
-                  className="ui-btn-icon"
-                  title="Cancel crop"
-                >
-                  <X size={15} aria-hidden="true" />
-                </button>
-              </>
-            ) : (
+    <aside className="editor-panel relative flex min-h-0 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <section className="border-b border-[#d7dde5] bg-white">
+          <div className="flex h-10 items-center justify-between border-b border-[#d7dde5] px-3">
+            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">Sources</h2>
+            <div className="flex items-center gap-1">
+              <label className={`grid h-8 w-8 place-items-center rounded text-[#344054] hover:bg-[#f2f4f7] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add images">
+                {uploadingSources ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}
+                <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
+                  const files = Array.from(event.target.files ?? []);
+                  event.target.value = "";
+                  if (files.length) void uploadSourceImages(files);
+                }} />
+              </label>
               <button
                 type="button"
                 onClick={() => {
-                  setSourceCropMode(true);
-                  selectFullSourceCrop();
+                  if (!sourcePreviewUrl) return;
+                  if (sourceCropMode) {
+                    setSourceCropMode(false);
+                    setSourceCropArea(null);
+                  } else {
+                    setSourceCropMode(true);
+                    selectFullSourceCrop();
+                  }
                 }}
-                className="ui-btn-icon"
-                title="Crop source"
+                disabled={!sourcePreviewUrl}
+                className="grid h-8 w-8 place-items-center rounded text-[#344054] hover:bg-[#f2f4f7] disabled:opacity-35"
+                title={sourceCropMode ? "Close crop mode" : "Crop source"}
               >
-                <Crop size={15} aria-hidden="true" />
+                <MoreVertical size={18} aria-hidden="true" />
               </button>
-            )
+            </div>
+          </div>
+          {sourceCropMode && sourcePreviewUrl ? (
+            <div className="border-b border-[#d7dde5] bg-[#f8fafc] p-2">
+              <div className="mb-2 grid grid-cols-3 gap-1">
+                <button type="button" onClick={applySourceCrop} disabled={!sourceCropArea || sourceCropPending} className="ui-btn h-8 px-2 text-xs disabled:opacity-50">
+                  {sourceCropPending ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
+                  Apply
+                </button>
+                <button type="button" onClick={selectFullSourceCrop} className="ui-btn h-8 px-2 text-xs"><Maximize2 size={14} aria-hidden="true" />Full</button>
+                <button type="button" onClick={() => { setSourceCropMode(false); setSourceCropArea(null); }} className="ui-btn h-8 px-2 text-xs"><X size={14} aria-hidden="true" />Close</button>
+              </div>
+              <div className="overflow-hidden rounded border border-[#d7dde5] bg-white">
+                <ManualCropper imageUrl={sourcePreviewUrl} crop={sourceCropArea} onCropChange={setSourceCropArea} className="h-64 p-2" />
+              </div>
+            </div>
           ) : null}
-          <label className={`ui-btn-icon ${uploadingSources ? "cursor-wait opacity-70" : "cursor-pointer"}`} title="Add images">
-            {uploadingSources ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Upload size={15} aria-hidden="true" />}
-            <input
-              type="file"
-              accept={IMAGE_ACCEPT}
-              multiple
-              disabled={uploadingSources}
-              className="sr-only"
-              onChange={(event) => {
-                const files = Array.from(event.target.files ?? []);
-                event.target.value = "";
-                if (files.length) void uploadSourceImages(files);
-              }}
-            />
-          </label>
-        </div>
-      </div>
-
-      <div className="border-b border-[#d7dde5] bg-white p-3">
-        <p className="truncate text-sm font-semibold text-slate-950">{title || "Graph preview"}</p>
-        <p className="mt-1 text-xs text-slate-500">
-          {settings.sourceImages.length
-            ? sourceReady
-              ? `${settings.sourceImages.length} source${settings.sourceImages.length === 1 ? "" : "s"} ready`
-              : "Loading source files"
-            : settings.cellPaints.length || settings.graphShapes.length
-              ? `${settings.cellPaints.length + settings.graphShapes.length} drawing layer${settings.cellPaints.length + settings.graphShapes.length === 1 ? "" : "s"}`
-              : "Waiting for source files"}
-        </p>
-      </div>
-
-      {sourceCropMode && sourcePreviewUrl ? (
-        <div className="m-3 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)]">
-          <ManualCropper imageUrl={sourcePreviewUrl} crop={sourceCropArea} onCropChange={setSourceCropArea} className="h-[min(75vh,42rem)] p-3" />
-        </div>
-      ) : settings.sourceImages.length || settings.cellPaints.length || settings.graphShapes.length ? (
-        <div className="m-3 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
-          <canvas ref={overviewCanvasRef} className="max-h-72 w-full rounded bg-white object-contain shadow-sm" style={{ height: "auto" }} />
-        </div>
-      ) : (
-        <div className="m-3 grid min-h-40 place-items-center rounded-md border border-dashed border-slate-300 bg-[var(--panel)] text-center text-sm text-slate-500">
-          Upload source files
-        </div>
-      )}
-
-      {settings.sourceImages.length || settings.cellPaints.length || settings.graphShapes.length ? (
-        <div className="space-y-0 border-t border-[#d7dde5]">
-          {settings.sourceImages.map((source, index) => {
-            const status = sourceStatus[source.id];
-            const expanded = Boolean(expandedSourceIds[source.id]);
-            const selected = selectedSourceId === source.id;
-            const replacing = replacingSourceId === source.id;
-            const previousLocked = Boolean(settings.sourceImages[index - 1]?.locked);
-            const nextLocked = Boolean(settings.sourceImages[index + 1]?.locked);
-            return (
-              <div key={source.id} className={`space-y-3 overflow-hidden rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
-                <div className="grid gap-2">
+          {settings.sourceImages.length ? (
+            <div className="divide-y divide-[#e8edf2]">
+              {settings.sourceImages.map((source) => {
+                const status = sourceStatus[source.id];
+                const selected = selectedSourceId === source.id;
+                const ready = Boolean(status?.ready);
+                const pending = !ready && !status?.error;
+                return (
                   <button
+                    key={`source-list-${source.id}`}
                     type="button"
                     onClick={() => {
                       setSelectedSourceId(source.id);
                       setSelectedDrawingLayerId(null);
-                      toggleSourceCard(source.id);
                     }}
-                    className="grid w-full min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
+                    className={`grid w-full grid-cols-[64px_minmax(0,1fr)_32px] items-center gap-3 px-3 py-2 text-left ${selected ? "bg-[#ecfeff]" : "bg-white hover:bg-[#f8fafc]"}`}
                   >
-                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[var(--teal)] text-xs font-bold text-white">{index + 1}</span>
-                    {status?.previewUrl ? (
-                      <img src={status.previewUrl} alt="" className="h-12 w-12 shrink-0 rounded border border-[var(--line)] bg-[var(--panel)] object-contain p-1" />
-                    ) : (
-                      <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] text-slate-400">
-                        <ImageIcon size={16} aria-hidden="true" />
-                      </span>
-                    )}
+                    {renderSourceThumbnail(source, "h-16 w-16")}
                     <span className="min-w-0">
-                      <span className="block truncate text-sm font-semibold text-slate-950">{source.name}</span>
-                      <span className="mt-1 inline-flex items-center gap-1 text-xs text-slate-500">
-                        {source.locked ? <Lock size={12} aria-hidden="true" /> : <Unlock size={12} aria-hidden="true" />}
-                        {status?.ready ? "Ready" : status?.error || "Loading"}
-                      </span>
+                      <span className="block truncate text-[13px] font-semibold text-[#101828]">{source.name}</span>
+                      <span className="mt-1 block text-[12px] text-[#475467]">{roundCells(source.width)} x {roundCells(source.height)}</span>
                     </span>
-                    {expanded ? <ChevronDown size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" /> : <ChevronRight size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" />}
-                  </button>
-                  <div className="grid grid-cols-5 gap-1">
-                    <button
-                      type="button"
-                      onClick={() => moveSourceImage(source.id, -1)}
-                      disabled={source.locked || previousLocked || index === 0}
-                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                      title="Move up"
-                    >
-                      <ArrowUp size={14} aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => moveSourceImage(source.id, 1)}
-                      disabled={source.locked || nextLocked || index === settings.sourceImages.length - 1}
-                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                      title="Move down"
-                    >
-                      <ArrowDown size={14} aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => toggleSourceLock(source.id)}
-                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
-                      title={source.locked ? "Unlock image" : "Lock image"}
-                    >
-                      {source.locked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
-                    </button>
-                    <label
-                      className={`grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 ${
-                        uploadingSources ? "cursor-wait opacity-40" : "cursor-pointer"
-                      }`}
-                      title="Replace image and keep current position, size, and transform"
-                    >
-                      {replacing ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={14} aria-hidden="true" />}
-                      <input
-                        type="file"
-                        accept={IMAGE_ACCEPT}
-                        disabled={uploadingSources}
-                        className="sr-only"
-                        onChange={(event) => {
-                          const file = event.target.files?.[0] ?? null;
-                          event.target.value = "";
-                          if (file) void uploadSourceImages([file], `"${source.name}" replaced.`, source.id);
-                        }}
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => removeSourceImage(source.id)}
-                      disabled={source.locked}
-                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                      title="Remove source"
-                    >
-                      {deletingSourceId === source.id ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Trash2 size={14} aria-hidden="true" />}
-                    </button>
-                  </div>
-                </div>
-                {expanded ? (
-                <div className="grid min-w-0 grid-cols-2 gap-2">
-                  <NumberField
-                    label="Width (CM)"
-                    value={sourcePhysicalWidthCm(source)}
-                    min={0.01}
-                    max={1000}
-                    step={0.1}
-                    allowDecimalInput
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImagePhysicalWidthCm(source.id, value)}
-                  />
-                  <NumberField
-                    label={`Height (${MEASUREMENT_UNIT_LABELS[source.measurementUnit]})`}
-                    value={sourcePhysicalHeight(source)}
-                    min={0.01}
-                    max={roundMeasure(cmToUnit(1000 * settings.cellSizeCm, source.measurementUnit))}
-                    step={0.1}
-                    allowDecimalInput
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImagePhysicalHeight(source.id, value)}
-                  />
-                  <label className="grid min-w-0 gap-1.5">
-                    <span className="text-xs font-semibold text-slate-500">Size unit</span>
-                    <select
-                      value={source.measurementUnit}
-                      onChange={(event) => updateSourceImage(source.id, { measurementUnit: event.target.value as GraphSettings["measurementUnit"] })}
-                      className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-                    >
-                      <option value="cm">CM</option>
-                      <option value="in">IN</option>
-                    </select>
-                  </label>
-                  <NumberField
-                    label="Line size"
-                    value={source.imageLineThickness}
-                    min={MIN_IMAGE_LINE_THICKNESS}
-                    max={MAX_IMAGE_LINE_THICKNESS}
-                    step={0.01}
-                    allowDecimalInput
-                    onChange={(value) => updateSourceImage(source.id, { imageLineThickness: value })}
-                  />
-                  <NumberField
-                    label="Left padding (cells)"
-                    value={source.x}
-                    min={-1000}
-                    max={1000}
-                    step={1}
-                    allowDecimalInput
-                    wholeStep
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImage(source.id, { x: value })}
-                  />
-                  <NumberField
-                    label="Right padding (cells)"
-                    value={sourceRightPadding(source)}
-                    min={-1000}
-                    max={1000}
-                    step={1}
-                    allowDecimalInput
-                    wholeStep
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImage(source.id, { x: settings.graphWidth - source.width - value })}
-                  />
-                  <NumberField
-                    label="Top padding (cells)"
-                    value={source.y}
-                    min={-1000}
-                    max={1000}
-                    step={1}
-                    allowDecimalInput
-                    wholeStep
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImage(source.id, { y: value })}
-                  />
-                  <NumberField
-                    label="Bottom padding (cells)"
-                    value={sourceBottomPadding(source)}
-                    min={-1000}
-                    max={1000}
-                    step={1}
-                    allowDecimalInput
-                    wholeStep
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImage(source.id, { y: settings.graphHeight - source.height - value })}
-                  />
-                  <NumberField
-                    label="Fill detection"
-                    value={source.sourceFillThreshold}
-                    min={MIN_SOURCE_FILL_THRESHOLD}
-                    max={MAX_SOURCE_FILL_THRESHOLD}
-                    step={0.01}
-                    allowDecimalInput
-                    onChange={(value) => updateSourceImage(source.id, { sourceFillThreshold: value })}
-                  />
-                  <NumberField
-                    label="Fill width"
-                    value={source.sourceFillMinStrokePixels}
-                    min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS}
-                    max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS}
-                    onChange={(value) => updateSourceImage(source.id, { sourceFillMinStrokePixels: value })}
-                  />
-                  <NumberField
-                    label="Gap closing"
-                    value={source.strokeGapClosePixels}
-                    min={MIN_STROKE_GAP_CLOSE_PIXELS}
-                    max={MAX_STROKE_GAP_CLOSE_PIXELS}
-                    onChange={(value) => updateSourceImage(source.id, { strokeGapClosePixels: value })}
-                  />
-                  <button type="button" onClick={() => rotateSourceImage(source.id, -1)} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left">
-                    <RotateCcw size={15} aria-hidden="true" />
-                  </button>
-                  <button type="button" onClick={() => rotateSourceImage(source.id, 1)} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right">
-                    <RotateCw size={15} aria-hidden="true" />
-                  </button>
-                  <button type="button" onClick={() => flipSourceImage(source.id, "x")} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal">
-                    <FlipHorizontal size={15} aria-hidden="true" />
-                  </button>
-                  <button type="button" onClick={() => flipSourceImage(source.id, "y")} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical">
-                    <FlipVertical size={15} aria-hidden="true" />
-                  </button>
-                </div>
-                ) : null}
-              </div>
-            );
-          })}
-          {settings.cellPaints.map((cell, index) => {
-            const key = drawingLayerKey("cell", cell.id);
-            const expanded = Boolean(expandedDrawingLayerIds[key]);
-            const selected = selectedDrawingLayerId === key;
-            const previousLocked = Boolean(settings.cellPaints[index - 1]?.locked);
-            const nextLocked = Boolean(settings.cellPaints[index + 1]?.locked);
-            return (
-              <div key={key} className={`space-y-3 overflow-hidden rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
-                <div className="grid gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedSourceId(null);
-                      setSelectedDrawingLayerId(key);
-                      toggleDrawingLayerCard(key);
-                    }}
-                    className="grid w-full min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
-                  >
-                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-700 text-xs font-bold text-white">{settings.sourceImages.length + index + 1}</span>
-                    <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] p-1">
-                      <span className="h-8 w-8 border-2" style={{ borderColor: cell.lineColor, backgroundColor: isTransparentFillColor(cell.fillColor) ? "transparent" : cell.fillColor }} />
+                    <span className={`grid h-6 w-6 place-items-center rounded-full border ${status?.error ? "border-red-300 text-red-600" : selected && ready ? "border-[#22c55e] text-[#16a34a]" : "border-[#cfd7df] text-[#98a2b3]"}`}>
+                      {status?.error ? <X size={14} aria-hidden="true" /> : pending ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : selected ? <Check size={15} aria-hidden="true" /> : null}
                     </span>
-                    <span className="min-w-0">
-                      <span className="block truncate text-sm font-semibold text-slate-950">{cell.name}</span>
-                      <span className="mt-1 inline-flex items-center gap-1 text-xs text-slate-500">
-                        {cell.locked ? <Lock size={12} aria-hidden="true" /> : <Unlock size={12} aria-hidden="true" />}
-                        Painted cell
-                      </span>
-                    </span>
-                    {expanded ? <ChevronDown size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" /> : <ChevronRight size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" />}
                   </button>
-                  <div className="grid grid-cols-4 gap-1">
-                    <button type="button" onClick={() => moveDrawingLayer("cell", cell.id, -1)} disabled={cell.locked || previousLocked || index === 0} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move up">
-                      <ArrowUp size={14} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => moveDrawingLayer("cell", cell.id, 1)} disabled={cell.locked || nextLocked || index === settings.cellPaints.length - 1} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move down">
-                      <ArrowDown size={14} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => toggleDrawingLock("cell", cell.id)} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50" title={cell.locked ? "Unlock drawing" : "Lock drawing"}>
-                      {cell.locked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
-                    </button>
-                    <button type="button" onClick={() => removeDrawingLayer("cell", cell.id, cell.name, cell.locked)} disabled={cell.locked} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Remove drawing">
-                      <Trash2 size={14} aria-hidden="true" />
-                    </button>
-                  </div>
-                </div>
-                {expanded ? (
-                  <div className="grid min-w-0 grid-cols-2 gap-2">
-                    <NumberField label="Width (cells)" value={cell.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { width: value })} />
-                    <NumberField label="Height (cells)" value={cell.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { height: value })} />
-                    <NumberField label="Left padding (cells)" value={cell.x} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: value })} />
-                    <NumberField label="Right padding (cells)" value={drawingRightPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: settings.graphWidth - cell.width - value })} />
-                    <NumberField label="Top padding (cells)" value={cell.y} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: value })} />
-                    <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: settings.graphHeight - cell.height - value })} />
-                    <NumberField label="Line size" value={cell.lineWidth} min={1} max={24} disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { lineWidth: value })} />
-                    <ColorPresetField label="Line" value={cell.lineColor} onChange={(value) => updateCellPaint(cell.id, { lineColor: value })} />
-                    <ColorPresetField label="Fill" value={cell.fillColor} onChange={(value) => updateCellPaint(cell.id, { fillColor: value })} allowTransparent />
-                    <div className="grid grid-cols-2 gap-1">
-                      {CELL_LINE_SIDE_KEYS.map((side) => (
-                        <label key={side} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
-                          <input
-                            type="checkbox"
-                            checked={cell.sides.includes(side)}
-                            disabled={cell.locked}
-                            onChange={() => updateCellPaint(cell.id, { sides: cell.sides.includes(side) ? cell.sides.filter((item) => item !== side) : [...cell.sides, side] })}
-                            className="h-4 w-4 accent-[var(--teal)]"
-                          />
-                          {CELL_LINE_SIDE_LABELS[side]}
-                        </label>
-                      ))}
+                );
+              })}
+            </div>
+          ) : (
+            <div className="grid min-h-28 place-items-center px-4 py-6 text-center text-sm text-[#667085]">Upload source files</div>
+          )}
+        </section>
+
+        <section className="border-b border-[#d7dde5] bg-white">
+          <div className="flex h-10 items-center justify-between border-b border-[#d7dde5] px-3">
+            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">Layers</h2>
+            <label className={`grid h-8 w-8 place-items-center rounded text-[#344054] hover:bg-[#f2f4f7] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add layer image">
+              {uploadingSources ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}
+              <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
+                const files = Array.from(event.target.files ?? []);
+                event.target.value = "";
+                if (files.length) void uploadSourceImages(files, "Images added to the end.");
+              }} />
+            </label>
+          </div>
+          <div className="grid grid-cols-6 border-b border-[#e8edf2] bg-[#fbfcfd] text-[11px] font-semibold text-[#344054]">
+            <label className={`flex h-14 cursor-pointer flex-col items-center justify-center gap-1 border-r border-[#e8edf2] ${uploadingSources ? "opacity-50" : ""}`} title="Add images">
+              <Plus size={16} aria-hidden="true" />
+              <span>Add</span>
+              <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
+                const files = Array.from(event.target.files ?? []);
+                event.target.value = "";
+                if (files.length) void uploadSourceImages(files, "Images added to the end.");
+              }} />
+            </label>
+            <label className={`flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] ${!selectedSource || selectedSource.locked || uploadingSources ? "cursor-not-allowed opacity-40" : "cursor-pointer"}`} title="Replace selected source">
+              {replacingSourceId ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
+              <span>Replace</span>
+              <input type="file" accept={IMAGE_ACCEPT} disabled={!selectedSource || selectedSource.locked || uploadingSources} className="sr-only" onChange={(event) => {
+                const file = event.target.files?.[0] ?? null;
+                event.target.value = "";
+                if (file && selectedSource) void uploadSourceImages([file], `"${selectedSource.name}" replaced.`, selectedSource.id);
+              }} />
+            </label>
+            <button type="button" onClick={deleteSelectedLayer} disabled={!hasSelectedLayer || selectedLayerLocked} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] text-red-500 disabled:text-[#98a2b3]" title="Delete selected layer">
+              <Trash2 size={16} aria-hidden="true" />
+              <span>Delete</span>
+            </button>
+            <button type="button" onClick={toggleSelectedLayerLock} disabled={!hasSelectedLayer} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] disabled:text-[#98a2b3]" title="Lock selected layer">
+              {selectedLayerLocked ? <Unlock size={16} aria-hidden="true" /> : <Lock size={16} aria-hidden="true" />}
+              <span>{selectedLayerLocked ? "Unlock" : "Lock"}</span>
+            </button>
+            <button type="button" onClick={() => moveSelectedLayer(-1)} disabled={!selectedLayerCanMove(-1)} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] disabled:text-[#98a2b3]" title="Move selected layer up">
+              <ArrowUp size={16} aria-hidden="true" />
+              <span>Up</span>
+            </button>
+            <button type="button" onClick={() => moveSelectedLayer(1)} disabled={!selectedLayerCanMove(1)} className="flex h-14 flex-col items-center justify-center gap-1 disabled:text-[#98a2b3]" title="Move selected layer down">
+              <ArrowDown size={16} aria-hidden="true" />
+              <span>Down</span>
+            </button>
+          </div>
+          {visibleLayerCount ? (
+            <div className="divide-y divide-[#e8edf2]">
+              {settings.sourceImages.map((source) => {
+                const selected = selectedSourceId === source.id;
+                const expanded = Boolean(expandedSourceIds[source.id]);
+                return (
+                  <div key={`layer-source-${source.id}`} className={selected ? "bg-[#16a6aa] text-white" : "bg-white text-[#101828]"}>
+                    <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                      <button type="button" onClick={() => { setSelectedSourceId(source.id); setSelectedDrawingLayerId(null); }} className={selected ? "text-white/90" : "text-[#667085]"} title="Select layer"><Eye size={15} aria-hidden="true" /></button>
+                      {renderSourceThumbnail(source, "h-11 w-11")}
+                      <button type="button" onClick={() => { setSelectedSourceId(source.id); setSelectedDrawingLayerId(null); }} className="min-w-0 text-left">
+                        <span className="block truncate text-[13px] font-semibold">{source.name}</span>
+                        <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>Visible</span>
+                      </button>
+                      <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
+                      <button type="button" onClick={() => toggleSourceLock(source.id)} className={selected ? "text-white" : "text-[#667085]"} title={source.locked ? "Unlock layer" : "Lock layer"}>{source.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                      <button type="button" onClick={() => toggleSourceCard(source.id)} className={selected ? "text-white" : "text-[#667085]"} title="Layer settings"><Menu size={16} aria-hidden="true" /></button>
                     </div>
-                    <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, -1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left">
-                      <RotateCcw size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, 1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right">
-                      <RotateCw size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "x")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal">
-                      <FlipHorizontal size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "y")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical">
-                      <FlipVertical size={15} aria-hidden="true" />
-                    </button>
+                    {expanded ? renderSourceAdvanced(source) : null}
                   </div>
-                ) : null}
-              </div>
-            );
-          })}
-          {settings.graphShapes.map((shape, index) => {
-            const key = drawingLayerKey("shape", shape.id);
-            const expanded = Boolean(expandedDrawingLayerIds[key]);
-            const selected = selectedDrawingLayerId === key;
-            const previousLocked = Boolean(settings.graphShapes[index - 1]?.locked);
-            const nextLocked = Boolean(settings.graphShapes[index + 1]?.locked);
-            return (
-              <div key={key} className={`space-y-3 overflow-hidden rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
-                <div className="grid gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedSourceId(null);
-                      setSelectedDrawingLayerId(key);
-                      toggleDrawingLayerCard(key);
-                    }}
-                    className="grid w-full min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
-                  >
-                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-700 text-xs font-bold text-white">{settings.sourceImages.length + settings.cellPaints.length + index + 1}</span>
-                    <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] p-1 text-slate-500">
-                      <Maximize2 size={18} aria-hidden="true" />
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block truncate text-sm font-semibold text-slate-950">{shape.name}</span>
-                      <span className="mt-1 inline-flex items-center gap-1 text-xs text-slate-500">
-                        {shape.locked ? <Lock size={12} aria-hidden="true" /> : <Unlock size={12} aria-hidden="true" />}
-                        {GRAPH_SHAPE_KIND_LABELS[shape.kind]}
-                      </span>
-                    </span>
-                    {expanded ? <ChevronDown size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" /> : <ChevronRight size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" />}
-                  </button>
-                  <div className="grid grid-cols-4 gap-1">
-                    <button type="button" onClick={() => moveDrawingLayer("shape", shape.id, -1)} disabled={shape.locked || previousLocked || index === 0} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move up">
-                      <ArrowUp size={14} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => moveDrawingLayer("shape", shape.id, 1)} disabled={shape.locked || nextLocked || index === settings.graphShapes.length - 1} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move down">
-                      <ArrowDown size={14} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50" title={shape.locked ? "Unlock drawing" : "Lock drawing"}>
-                      {shape.locked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
-                    </button>
-                    <button type="button" onClick={() => removeDrawingLayer("shape", shape.id, shape.name, shape.locked)} disabled={shape.locked} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Remove drawing">
-                      <Trash2 size={14} aria-hidden="true" />
-                    </button>
+                );
+              })}
+              {settings.cellPaints.map((cell) => {
+                const key = drawingLayerKey("cell", cell.id);
+                const selected = selectedDrawingLayerId === key;
+                const expanded = Boolean(expandedDrawingLayerIds[key]);
+                return (
+                  <div key={`layer-cell-${cell.id}`} className={selected ? "bg-[#16a6aa] text-white" : "bg-white text-[#101828]"}>
+                    <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                      <button type="button" onClick={() => { setSelectedSourceId(null); setSelectedDrawingLayerId(key); }} className={selected ? "text-white/90" : "text-[#667085]"} title="Select layer"><Eye size={15} aria-hidden="true" /></button>
+                      {renderCellThumbnail(cell, "h-11 w-11")}
+                      <button type="button" onClick={() => { setSelectedSourceId(null); setSelectedDrawingLayerId(key); }} className="min-w-0 text-left">
+                        <span className="block truncate text-[13px] font-semibold">{cell.name}</span>
+                        <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>Visible</span>
+                      </button>
+                      <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
+                      <button type="button" onClick={() => toggleDrawingLock("cell", cell.id)} className={selected ? "text-white" : "text-[#667085]"} title={cell.locked ? "Unlock layer" : "Lock layer"}>{cell.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                      <button type="button" onClick={() => toggleDrawingLayerCard(key)} className={selected ? "text-white" : "text-[#667085]"} title="Layer settings"><Menu size={16} aria-hidden="true" /></button>
+                    </div>
+                    {expanded ? renderCellAdvanced(cell) : null}
                   </div>
-                </div>
-                {expanded ? (
-                  <div className="grid min-w-0 grid-cols-2 gap-2">
-                    <label className="grid min-w-0 gap-1.5">
-                      <span className="text-xs font-semibold text-slate-500">Shape</span>
-                      <select value={shape.kind} disabled={shape.locked} onChange={(event) => updateGraphShape(shape.id, { kind: event.target.value as GraphShapeKind })} className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60">
-                        {GRAPH_SHAPE_KIND_KEYS.map((kind) => (
-                          <option key={kind} value={kind}>{GRAPH_SHAPE_KIND_LABELS[kind]}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <NumberField label="Line size" value={shape.strokeWidth} min={1} max={24} disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { strokeWidth: value })} />
-                    <NumberField label="Width (cells)" value={shape.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { width: value })} />
-                    <NumberField label="Height (cells)" value={shape.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { height: value })} />
-                    <NumberField label="Left padding (cells)" value={shape.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: value })} />
-                    <NumberField label="Right padding (cells)" value={drawingRightPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: settings.graphWidth - shape.width - value })} />
-                    <NumberField label="Top padding (cells)" value={shape.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: value })} />
-                    <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: settings.graphHeight - shape.height - value })} />
-                    <ColorPresetField label="Line" value={shape.strokeColor} onChange={(value) => updateGraphShape(shape.id, { strokeColor: value })} />
-                    <ColorPresetField label="Fill" value={shape.fillColor} onChange={(value) => updateGraphShape(shape.id, { fillColor: value })} allowTransparent />
-                    <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, -1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left">
-                      <RotateCcw size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, 1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right">
-                      <RotateCw size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "x")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal">
-                      <FlipHorizontal size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "y")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical">
-                      <FlipVertical size={15} aria-hidden="true" />
-                    </button>
+                );
+              })}
+              {settings.graphShapes.map((shape) => {
+                const key = drawingLayerKey("shape", shape.id);
+                const selected = selectedDrawingLayerId === key;
+                const expanded = Boolean(expandedDrawingLayerIds[key]);
+                return (
+                  <div key={`layer-shape-${shape.id}`} className={selected ? "bg-[#16a6aa] text-white" : "bg-white text-[#101828]"}>
+                    <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                      <button type="button" onClick={() => { setSelectedSourceId(null); setSelectedDrawingLayerId(key); }} className={selected ? "text-white/90" : "text-[#667085]"} title="Select layer"><Eye size={15} aria-hidden="true" /></button>
+                      {renderShapeThumbnail(shape, "h-11 w-11")}
+                      <button type="button" onClick={() => { setSelectedSourceId(null); setSelectedDrawingLayerId(key); }} className="min-w-0 text-left">
+                        <span className="block truncate text-[13px] font-semibold">{shape.name}</span>
+                        <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>Visible</span>
+                      </button>
+                      <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
+                      <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className={selected ? "text-white" : "text-[#667085]"} title={shape.locked ? "Unlock layer" : "Lock layer"}>{shape.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                      <button type="button" onClick={() => toggleDrawingLayerCard(key)} className={selected ? "text-white" : "text-[#667085]"} title="Layer settings"><Menu size={16} aria-hidden="true" /></button>
+                    </div>
+                    {expanded ? renderShapeAdvanced(shape) : null}
                   </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
+                );
+              })}
+            </div>
+          ) : (
+            <div className="grid min-h-24 place-items-center px-4 py-6 text-center text-sm text-[#667085]">No layers yet</div>
+          )}
+        </section>
 
-      <label className={`inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-dashed border-slate-300 bg-[var(--panel)] px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100 ${uploadingSources ? "cursor-wait opacity-70" : "cursor-pointer"}`}>
-        {uploadingSources ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Upload size={15} aria-hidden="true" />}
-        {uploadingSources ? "Adding..." : "Add images"}
-        <input
-          type="file"
-          accept={IMAGE_ACCEPT}
-          multiple
-          disabled={uploadingSources}
-          className="sr-only"
-          onChange={(event) => {
-            const files = Array.from(event.target.files ?? []);
-            event.target.value = "";
-            if (files.length) void uploadSourceImages(files, "Images added to the end.");
-          }}
-        />
-      </label>
+        <section className="border-b border-[#d7dde5] bg-white">
+          <div className="flex h-10 items-center justify-between border-b border-[#d7dde5] px-3">
+            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">Status</h2>
+            <ChevronDown size={16} className="text-[#667085]" aria-hidden="true" />
+          </div>
+          <div className="space-y-3 p-3 text-[13px] text-[#475467]">
+            <div className="flex items-center justify-between gap-3">
+              <span className="inline-flex min-w-0 items-center gap-2 font-semibold text-[#344054]">
+                <span className={`grid h-5 w-5 place-items-center rounded-full ${sourceErrorCount ? "bg-red-500" : processing || (!sourceReady && settings.sourceImages.length) ? "bg-[#98a2b3]" : "bg-[#22c55e]"} text-white`}>
+                  {sourceErrorCount ? <X size={12} aria-hidden="true" /> : processing || (!sourceReady && settings.sourceImages.length) ? <Loader2 size={12} className="animate-spin" aria-hidden="true" /> : <Check size={12} aria-hidden="true" />}
+                </span>
+                <span className="truncate">{statusLabel}</span>
+              </span>
+              <span className="shrink-0 text-[#475467]">{statusMeta}</span>
+            </div>
+            <p>Cells: {settings.graphWidth} x {settings.graphHeight} ({formatCount(totalCells)})</p>
+            <p>Colors: {palette.length}</p>
+            <p>Stitches (est.): {formatCount(totalCells)}</p>
+            <p>Layers: {visibleLayerCount}</p>
+          </div>
+        </section>
 
-      <div className="space-y-3">
-        <label className="grid gap-1.5">
-          <span className="text-xs font-semibold text-slate-500">Project name</span>
-          <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-          />
-        </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-semibold text-slate-500">Description</span>
-          <textarea
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            className="min-h-24 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-          />
-        </label>
+        <section className="space-y-3 bg-white p-3">
+          <label className="grid gap-1.5">
+            <span className="text-xs font-semibold text-slate-500">Project name</span>
+            <input value={title} onChange={(event) => setTitle(event.target.value)} className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100" />
+          </label>
+          <label className="grid gap-1.5">
+            <span className="text-xs font-semibold text-slate-500">Description</span>
+            <textarea value={description} onChange={(event) => setDescription(event.target.value)} className="min-h-24 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100" />
+          </label>
+        </section>
       </div>
       <button
         type="button"
@@ -3126,7 +3215,10 @@ export function EditorClient({ project }: { project: Project }) {
         onPointerCancel={endPanelResize}
         className="group absolute inset-y-0 right-0 hidden w-3 cursor-col-resize touch-none place-items-center lg:grid"
       >
-        <span className="absolute inset-y-0 right-1.5 w-px bg-slate-200 transition-colors group-hover:bg-[var(--teal)]" aria-hidden="true" />
+        <span
+          className="absolute top-1/2 right-1.5 h-[80vh] w-px -translate-y-1/2 bg-slate-200 opacity-0 transition-colors transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-hover:bg-[var(--teal)]"
+          aria-hidden="true"
+        />
         <span
           className={`grid h-6 w-6 place-items-center rounded-full border border-[var(--line)] bg-white text-slate-500 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${
             resizingPanelSide === "left" ? "opacity-100" : "opacity-0"
@@ -3221,7 +3313,6 @@ export function EditorClient({ project }: { project: Project }) {
     { id: "source", label: "Source" },
     { id: "draw", label: "Draw" },
     { id: "palette", label: "Palette" },
-    { id: "print", label: "Print" },
   ];
 
   const selectedSourceInspector = (
@@ -3307,27 +3398,32 @@ export function EditorClient({ project }: { project: Project }) {
   );
 
   const settingsPanel = (
-    <aside className="editor-panel relative space-y-0">
+    <aside
+      className="editor-panel relative space-y-0"
+      style={{ overflowY: inspectorTab === "palette" && !isPaletteSectionExpanded ? "hidden" : "auto", overflowX: "hidden" }}
+    >
       <div className="flex h-11 items-center justify-between border-b border-[#d7dde5] px-3">
         <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">
           Inspector
         </h2>
-        <button
-          type="button"
-          onClick={() => {
-            setSettingsWithHistory((current) => editorDefaultGraphSettings(current));
-            setSelectedFillRegionId(null);
-            setFloatingPalette(null);
-            setCopiedFillColor(null);
-          }}
-          className="ui-btn-icon"
-          title="Reset settings"
-        >
-          <RefreshCw size={15} aria-hidden="true" />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setSettingsWithHistory((current) => editorDefaultGraphSettings(current));
+              setSelectedFillRegionId(null);
+              setFloatingPalette(null);
+              setCopiedFillColor(null);
+            }}
+            className="ui-btn-icon"
+            title="Reset settings"
+          >
+            <RefreshCw size={15} aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-5 border-b border-[#d7dde5] bg-white text-[12px]">
+      <div className="grid grid-cols-4 border-b border-[#d7dde5] bg-white text-[12px]">
         {inspectorTabs.map((tab) => (
           <button
             key={tab.id}
@@ -3342,163 +3438,178 @@ export function EditorClient({ project }: { project: Project }) {
 
       <div className="space-y-4 p-3">
         {selectedSourceInspector}
-        <CollapsibleSection
-          title={inspectorTab === "print" ? "Print setup" : "Parameters"}
-          open={!collapsedSections.parameters}
-          onToggle={() => toggleSection("parameters")}
-          className={inspectorTab === "graph" || inspectorTab === "print" ? "" : "hidden"}
-        >
-          <div className="grid min-w-0 grid-cols-2 gap-3">
-            <NumberField label="Width (cells)" value={settings.graphWidth} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphWidth", value)} />
-            <NumberField label="Height (cells)" value={settings.graphHeight} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphHeight", value)} />
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Size unit</span>
-              <select
-                value={settings.measurementUnit}
-                onChange={(event) => updateMeasurementUnit(event.target.value as GraphSettings["measurementUnit"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                <option value="cm">CM</option>
-                <option value="in">IN</option>
-              </select>
-            </label>
-            <NumberField
-              label={`Graph height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
-              value={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
-              min={0.01}
-              max={roundMeasure(cmToUnit(Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS) * DEFAULT_CELL_SIZE_CM, settings.measurementUnit))}
-              step={0.1}
-              allowDecimalInput
-              onChange={updateGraphPhysicalHeight}
-            />
-            <NumberField
-              label="Image width (CM)"
-              value={roundMeasure(settings.imageWidth * settings.cellSizeCm)}
-              min={0.01}
-              max={roundMeasure(settings.graphWidth * settings.cellSizeCm)}
-              step={0.1}
-              allowDecimalInput
-              onChange={updateImageWidthCm}
-            />
-            <NumberField
-              label={`Image height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
-              value={roundMeasure(cmToUnit(settings.imageHeight * settings.cellSizeCm, settings.measurementUnit))}
-              min={0.01}
-              max={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
-              step={0.1}
-              allowDecimalInput
-              onChange={updateImageHeightPhysical}
-            />
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Graph lines layer</span>
-              <select
-                value={settings.gridLineLayer}
-                onChange={(event) => updateSetting("gridLineLayer", event.target.value as GraphSettings["gridLineLayer"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {GRAPH_LINE_LAYER_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {GRAPH_LINE_LAYER_LABELS[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="flex h-10 min-w-0 items-center gap-2 self-end rounded-md border border-[var(--line)] bg-white px-3 text-sm font-semibold text-slate-600">
-              <input
-                type="checkbox"
-                checked={settings.showNumbers}
-                onChange={(event) => updateSetting("showNumbers", event.target.checked)}
-                className="h-4 w-4 accent-[var(--teal)]"
-              />
-              <span>Show grid numbers</span>
-            </label>
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Grid number position</span>
-              <select
-                value={settings.gridNumberPlacement}
-                onChange={(event) => updateSetting("gridNumberPlacement", event.target.value as GraphSettings["gridNumberPlacement"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {(["inside", "outside"] as const).map((key) => (
-                  <option key={key} value={key}>
-                    {GRID_NUMBER_PLACEMENT_LABELS[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="flex h-10 min-w-0 items-center gap-2 self-end rounded-md border border-[var(--line)] bg-white px-3 text-sm font-semibold text-slate-600">
-              <input
-                type="checkbox"
-                checked={settings.showPageBreaks}
-                onChange={(event) => updateSetting("showPageBreaks", event.target.checked)}
-                className="h-4 w-4 accent-[var(--teal)]"
-              />
-              <span>Show page breaks</span>
-            </label>
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Print paper</span>
-              <select
-                value={settings.printPaperSize}
-                onChange={(event) => updateSetting("printPaperSize", event.target.value as GraphSettings["printPaperSize"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {PRINT_PAPER_SIZE_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {PRINT_PAPER_SIZES[key].label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Orientation</span>
-              <select
-                value={settings.printOrientation}
-                onChange={(event) => updateSetting("printOrientation", event.target.value as GraphSettings["printOrientation"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {PRINT_ORIENTATION_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {PRINT_ORIENTATION_LABELS[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Horizontal align</span>
-              <select
-                value={settings.printHorizontalAlignment}
-                onChange={(event) => updateSetting("printHorizontalAlignment", event.target.value as GraphSettings["printHorizontalAlignment"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {PRINT_HORIZONTAL_ALIGNMENT_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {PRINT_HORIZONTAL_ALIGNMENT_LABELS[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Vertical align</span>
-              <select
-                value={settings.printVerticalAlignment}
-                onChange={(event) => updateSetting("printVerticalAlignment", event.target.value as GraphSettings["printVerticalAlignment"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {PRINT_VERTICAL_ALIGNMENT_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {PRINT_VERTICAL_ALIGNMENT_LABELS[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
+        {inspectorTab === "graph" ? (
+          <div className="space-y-4">
+            <InspectorGroup title="Dimensions">
+              <div className="grid min-w-0 grid-cols-2 gap-2">
+                <NumberField
+                  label="Width (cells)"
+                  value={settings.graphWidth}
+                  min={1}
+                  max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)}
+                  inputClassName={inspectorControlClass}
+                  onChange={(value) => updateSetting("graphWidth", value)}
+                />
+                <NumberField
+                  label="Height (cells)"
+                  value={settings.graphHeight}
+                  min={1}
+                  max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)}
+                  inputClassName={inspectorControlClass}
+                  onChange={(value) => updateSetting("graphHeight", value)}
+                />
+              </div>
+              <InspectorCheckbox label="Square cells" checked disabled />
+            </InspectorGroup>
 
-          <div className="min-w-0 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
-            <p className="break-words font-mono text-xs text-slate-600">
-              Graph {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / {GRAPH_LINE_LAYER_LABELS[settings.gridLineLayer].toLowerCase()} grid / {settings.showNumbers ? `${GRID_NUMBER_PLACEMENT_LABELS[settings.gridNumberPlacement].toLowerCase()} numbers` : "numbers off"} / {settings.showPageBreaks ? "page breaks on" : "page breaks off"} / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
-            </p>
+            <InspectorGroup title="Measurements">
+              <InspectorRow label="Units">
+                <InspectorSelect
+                  label="Measurement units"
+                  value={settings.measurementUnit}
+                  options={[
+                    { value: "cm", label: "Centimeters" },
+                    { value: "in", label: "Inches" },
+                  ]}
+                  onChange={(value) => updateMeasurementUnit(value as GraphSettings["measurementUnit"])}
+                />
+              </InspectorRow>
+              <InspectorRow label="Cell size">
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
+                  <input value={(settings.cellSizeCm * 10).toFixed(2)} readOnly className={inspectorControlClass} aria-label="Cell size millimeters" />
+                  <span className="grid h-9 place-items-center rounded-md border border-[#d7dde5] bg-[#f8fafc] text-[12px] font-semibold text-[#475467]">mm</span>
+                </div>
+              </InspectorRow>
+              <p className="text-[12px] leading-5 text-[#667085]">
+                {settings.graphWidth.toFixed(0)} x {settings.graphHeight.toFixed(0)} cells = {imageWidthCm} x {imageHeightCm} cm
+              </p>
+              <InspectorRow label={`Graph height`}>
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
+                  <NumberField
+                    label={`Graph height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
+                    value={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
+                    min={0.01}
+                    max={roundMeasure(cmToUnit(Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS) * DEFAULT_CELL_SIZE_CM, settings.measurementUnit))}
+                    step={0.1}
+                    allowDecimalInput
+                    hideLabel
+                    inputClassName={inspectorControlClass}
+                    onChange={updateGraphPhysicalHeight}
+                  />
+                  <span className="grid h-9 place-items-center rounded-md border border-[#d7dde5] bg-[#f8fafc] text-[12px] font-semibold text-[#475467]">
+                    {MEASUREMENT_UNIT_LABELS[settings.measurementUnit]}
+                  </span>
+                </div>
+              </InspectorRow>
+              <InspectorRow label="Artwork">
+                <div className="grid min-w-0 grid-cols-2 gap-2">
+                  <NumberField
+                    label="Artwork width (CM)"
+                    value={roundMeasure(settings.imageWidth * settings.cellSizeCm)}
+                    min={0.01}
+                    max={roundMeasure(settings.graphWidth * settings.cellSizeCm)}
+                    step={0.1}
+                    allowDecimalInput
+                    inputClassName={inspectorControlClass}
+                    onChange={updateImageWidthCm}
+                  />
+                  <NumberField
+                    label={`Artwork height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
+                    value={roundMeasure(cmToUnit(settings.imageHeight * settings.cellSizeCm, settings.measurementUnit))}
+                    min={0.01}
+                    max={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
+                    step={0.1}
+                    allowDecimalInput
+                    inputClassName={inspectorControlClass}
+                    onChange={updateImageHeightPhysical}
+                  />
+                </div>
+              </InspectorRow>
+            </InspectorGroup>
+
+            <InspectorGroup title="Grid Lines">
+              <InspectorRow label="Line color">
+                <InspectorColorControl label="Graph line color" value={settings.gridLineColor} onChange={(value) => updateSetting("gridLineColor", value)} />
+              </InspectorRow>
+              <InspectorRow label="Layer">
+                <InspectorSelect
+                  label="Graph lines layer"
+                  value={settings.gridLineLayer}
+                  options={GRAPH_LINE_LAYER_KEYS.map((key) => ({ value: key, label: GRAPH_LINE_LAYER_LABELS[key] }))}
+                  onChange={(value) => updateSetting("gridLineLayer", value as GraphSettings["gridLineLayer"])}
+                />
+              </InspectorRow>
+              <div className="grid grid-cols-2 gap-2">
+                <InspectorCheckbox label="Show numbers" checked={settings.showNumbers} onChange={(checked) => updateSetting("showNumbers", checked)} />
+                <InspectorCheckbox label="Show guides" checked={settings.showPageBreaks} onChange={(checked) => updateSetting("showPageBreaks", checked)} />
+              </div>
+              <InspectorRow label="Numbers">
+                <InspectorSelect
+                  label="Grid number position"
+                  value={settings.gridNumberPlacement}
+                  options={(["inside", "outside"] as const).map((key) => ({ value: key, label: GRID_NUMBER_PLACEMENT_LABELS[key] }))}
+                  onChange={(value) => updateSetting("gridNumberPlacement", value as GraphSettings["gridNumberPlacement"])}
+                />
+              </InspectorRow>
+            </InspectorGroup>
+
+            <InspectorGroup title="Print Settings">
+              <InspectorRow label="Paper size">
+                <InspectorSelect
+                  label="Print paper size"
+                  value={settings.printPaperSize}
+                  options={PRINT_PAPER_SIZE_KEYS.map((key) => ({ value: key, label: paperSizeOptionLabel(key) }))}
+                  onChange={(value) => updateSetting("printPaperSize", value as GraphSettings["printPaperSize"])}
+                />
+              </InspectorRow>
+              <InspectorRow label="Orientation">
+                <InspectorSegmented
+                  label="Print orientation"
+                  value={settings.printOrientation}
+                  options={PRINT_ORIENTATION_KEYS.map((key) => ({ value: key, label: PRINT_ORIENTATION_LABELS[key] }))}
+                  onChange={(value) => updateSetting("printOrientation", value as GraphSettings["printOrientation"])}
+                />
+              </InspectorRow>
+              <InspectorRow label="Margin">
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
+                  <NumberField
+                    label="Page margin"
+                    value={settings.pageMargin ?? 24}
+                    min={0}
+                    max={400}
+                    wholeStep
+                    hideLabel
+                    inputClassName={inspectorControlClass}
+                    onChange={(value) => updateSetting("pageMargin", Math.round(value))}
+                  />
+                  <span className="grid h-9 place-items-center rounded-md border border-[#d7dde5] bg-[#f8fafc] text-[12px] font-semibold text-[#475467]">px</span>
+                </div>
+              </InspectorRow>
+              <InspectorRow label="Align">
+                <div className="grid min-w-0 grid-cols-2 gap-2">
+                  <InspectorSelect
+                    label="Horizontal print alignment"
+                    value={settings.printHorizontalAlignment}
+                    options={PRINT_HORIZONTAL_ALIGNMENT_KEYS.map((key) => ({ value: key, label: PRINT_HORIZONTAL_ALIGNMENT_LABELS[key] }))}
+                    onChange={(value) => updateSetting("printHorizontalAlignment", value as GraphSettings["printHorizontalAlignment"])}
+                  />
+                  <InspectorSelect
+                    label="Vertical print alignment"
+                    value={settings.printVerticalAlignment}
+                    options={PRINT_VERTICAL_ALIGNMENT_KEYS.map((key) => ({ value: key, label: PRINT_VERTICAL_ALIGNMENT_LABELS[key] }))}
+                    onChange={(value) => updateSetting("printVerticalAlignment", value as GraphSettings["printVerticalAlignment"])}
+                  />
+                </div>
+              </InspectorRow>
+            </InspectorGroup>
+
+            <div className="min-w-0 overflow-hidden rounded-md border border-[#d7dde5] bg-[#f8fafc] p-3">
+              <p className="break-words font-mono text-[11px] leading-5 text-[#667085]">
+                Graph {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / {GRAPH_LINE_LAYER_LABELS[settings.gridLineLayer].toLowerCase()} grid / {settings.showNumbers ? `${GRID_NUMBER_PLACEMENT_LABELS[settings.gridNumberPlacement].toLowerCase()} numbers` : "numbers off"} / {settings.showPageBreaks ? "page guides on" : "page guides off"} / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
+              </p>
+            </div>
           </div>
-        </CollapsibleSection>
+        ) : null}
 
         <CollapsibleSection
           title="Drawing"
@@ -3643,7 +3754,10 @@ export function EditorClient({ project }: { project: Project }) {
         onPointerCancel={endPanelResize}
         className="group absolute inset-y-0 left-0 hidden w-3 cursor-col-resize touch-none place-items-center lg:grid"
       >
-        <span className="absolute inset-y-0 left-1.5 w-px bg-slate-200 transition-colors group-hover:bg-[var(--teal)]" aria-hidden="true" />
+        <span
+          className="absolute top-1/2 left-1.5 h-[50vh] w-px -translate-y-1/2 bg-slate-200 opacity-0 transition-colors transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-hover:bg-[var(--teal)]"
+          aria-hidden="true"
+        />
         <span
           className={`grid h-6 w-6 place-items-center rounded-full border border-[var(--line)] bg-white text-slate-500 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${
             resizingPanelSide === "right" ? "opacity-100" : "opacity-0"
@@ -3736,13 +3850,6 @@ export function EditorClient({ project }: { project: Project }) {
           height: Math.max(1, Math.round(selectedSourceLayout.height * GRAPH_MAJOR_CELL_PIXELS * zoom)),
         }
       : null;
-  const canvasToolItems = [
-    { label: "Select", Icon: MousePointer2 },
-    { label: "Pan", Icon: Hand },
-    { label: "Pencil", Icon: Pipette },
-    { label: "Fill", Icon: Crop },
-    { label: "Zoom", Icon: ZoomIn },
-  ];
 
   const canvasPanel = (
     <section className="editor-canvas-panel grid min-h-0 grid-rows-[40px_minmax(0,1fr)_36px]">
@@ -3766,15 +3873,6 @@ export function EditorClient({ project }: { project: Project }) {
               title={settingsPanelCollapsed ? "Show controls panel" : "Hide controls panel"}
             >
               {settingsPanelCollapsed ? <PanelRightOpen size={16} aria-hidden="true" /> : <PanelRightClose size={16} aria-hidden="true" />}
-            </button>
-            <button type="button" onClick={() => setShowOriginal((value) => !value)} className="ui-btn-icon" title={showOriginal ? "Show processed" : "Show original"}>
-              {showOriginal ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}
-            </button>
-            <button type="button" onClick={() => setZoom((value) => Math.max(0.35, value - 0.15))} className="ui-btn-icon" title="Zoom out">
-              <ZoomOut size={16} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={() => setZoom((value) => Math.min(2.5, value + 0.15))} className="ui-btn-icon" title="Zoom in">
-              <ZoomIn size={16} aria-hidden="true" />
             </button>
             <button
               type="button"
@@ -3800,24 +3898,25 @@ export function EditorClient({ project }: { project: Project }) {
           className="ui-canvas-bg relative min-h-0 overflow-auto p-8"
         >
           {notice ? (
-            <p className={`absolute left-24 top-3 z-20 max-w-[min(560px,calc(100%-8rem))] rounded-md border px-3 py-2 text-sm shadow-sm ${
+            <div className={`absolute left-24 top-3 z-20 flex min-h-8 w-[min(560px,calc(100%-8rem))] items-start gap-2 rounded-md border px-3 py-2 text-sm shadow-sm ${
               notice.tone === "error"
                 ? "border-red-200 bg-red-50 text-red-700"
                 : notice.tone === "ok"
                   ? "border-emerald-200 bg-emerald-50 text-emerald-700"
                   : "border-slate-200 bg-white text-slate-600"
             }`}>
-              {notice.text}
-            </p>
-          ) : null}
-          <div className="absolute left-2 top-12 z-10 hidden w-16 overflow-hidden rounded-md border border-[#d7dde5] bg-white shadow-sm lg:block">
-            {canvasToolItems.map(({ label, Icon }, index) => (
-              <button key={label} type="button" className={`flex h-16 w-full flex-col items-center justify-center gap-1 border-b border-[#e8edf2] text-[12px] ${index === 0 ? "bg-[#e6f7f7] text-[#008c8f]" : "text-[#344054]"}`}>
-                <Icon size={20} strokeWidth={1.8} />
-                {label}
+              <span className="min-w-0 flex-1 leading-5">{notice.text}</span>
+              <button
+                type="button"
+                onClick={() => setNotice(null)}
+                className="rounded-sm p-0.5 text-current transition hover:opacity-70"
+                title="Close"
+                aria-label="Close notification"
+              >
+                <X size={14} aria-hidden="true" />
               </button>
-            ))}
-          </div>
+            </div>
+          ) : null}
           {processing ? (
             <div className="absolute right-3 top-3 inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm">
               <Loader2 size={14} className="animate-spin" aria-hidden="true" />
@@ -3973,7 +4072,7 @@ export function EditorClient({ project }: { project: Project }) {
             <span className="text-lg font-semibold">Graph Pixel Maker</span>
           </Link>
           <span className="h-8 w-px bg-white/16" aria-hidden="true" />
-          <button type="button" className="editor-dark-btn w-10 px-0" title="Menu">
+          <button type="button" onClick={openMainMenu} className="editor-dark-btn w-10 px-0" title="Menu">
             <Menu size={18} aria-hidden="true" />
           </button>
           <button type="button" onClick={() => restoreSettingsHistory("undo")} className="editor-dark-btn w-10 px-0" title="Undo">
@@ -4018,29 +4117,72 @@ export function EditorClient({ project }: { project: Project }) {
             {isPending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}
             Save
           </button>
-          <button type="button" onClick={exportPNG} className="editor-dark-btn" title="Export menu">
-            <Download size={16} aria-hidden="true" />
-            Export
-            <ChevronDown size={15} aria-hidden="true" />
-          </button>
-          <button type="button" onClick={exportPNG} className="editor-dark-btn" title="Export PNG">
-            <ImageDown size={16} aria-hidden="true" />
-            PNG
-          </button>
-          <button type="button" onClick={exportPDF} className="editor-dark-btn" title="Export PDF">
-            <FileText size={16} aria-hidden="true" />
-            PDF
-          </button>
+          <div className="relative" ref={exportMenuRef}>
+            <button
+              type="button"
+              onClick={() => setIsExportMenuOpen((open) => !open)}
+              className="editor-dark-btn"
+              title="Export"
+              aria-expanded={isExportMenuOpen}
+              ref={exportMenuButtonRef}
+            >
+              <Download size={16} aria-hidden="true" />
+              Export
+              <ChevronDown size={15} aria-hidden="true" />
+            </button>
+          </div>
+          {isExportMenuOpen && exportMenuStyle
+            ? createPortal(
+                <div
+                  ref={exportMenuPortalRef}
+                  className="editor-export-menu editor-export-menu--portal"
+                  role="menu"
+                  aria-label="Export format"
+                  style={exportMenuStyle}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      exportPNG();
+                    }}
+                    className="editor-export-option"
+                    role="menuitem"
+                  >
+                    <ImageDown size={16} aria-hidden="true" />
+                    PNG
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      exportPDF();
+                    }}
+                    className="editor-export-option"
+                    role="menuitem"
+                  >
+                    <FileText size={16} aria-hidden="true" />
+                    PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      exportJSON();
+                    }}
+                    className="editor-export-option"
+                    role="menuitem"
+                  >
+                    <FileJson size={16} aria-hidden="true" />
+                    JSON
+                  </button>
+                </div>,
+                document.body,
+              )
+            : null}
           <button type="button" onClick={printGraph} className="editor-dark-btn" title="Print">
             <Printer size={16} aria-hidden="true" />
             Print
-          </button>
-          <button type="button" onClick={exportJSON} className="editor-dark-btn" title="Export JSON">
-            <FileJson size={16} aria-hidden="true" />
-            JSON
-          </button>
-          <button type="button" className="editor-dark-btn w-10 px-0" title="More">
-            <MoreVertical size={18} aria-hidden="true" />
           </button>
         </div>
       </header>

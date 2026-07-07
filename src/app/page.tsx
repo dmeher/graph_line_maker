@@ -11,6 +11,8 @@ const features = [
   { label: "Private access", icon: ShieldCheck, text: "Brevo OTP allowlist" },
 ];
 
+export const dynamic = "force-dynamic";
+
 export default async function Home() {
   const session = await getCurrentSession();
   if (session) redirect("/dashboard");

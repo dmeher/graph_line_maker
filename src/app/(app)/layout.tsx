@@ -3,6 +3,8 @@ import { AppShell } from "@/components/layout/app-shell";
 import { getCurrentSession } from "@/lib/auth/session";
 import { createOfflineSessionTicket } from "@/lib/auth/session";
 
+export const dynamic = "force-dynamic";
+
 export default async function ProtectedLayout({ children }: { children: React.ReactNode }) {
   const session = await getCurrentSession();
   if (!session) redirect("/login");

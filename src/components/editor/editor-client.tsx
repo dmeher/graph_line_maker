@@ -55,7 +55,8 @@ import { saveProjectState } from "@/app/(app)/projects/actions";
 import { LogoMark } from "@/components/layout/brand-mark";
 import { cropCanvasToFile, fullCrop, type CropPixels } from "@/lib/canvas/crop";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
-import { findContentBounds, loadImageToCanvas, pixelateLayeredImagesWithWorker, resizeImage, type FillRegion } from "@/lib/canvas/processor";
+import { pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
+import { findContentBounds, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
 import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
 import {
   createEditorSessionDraft,

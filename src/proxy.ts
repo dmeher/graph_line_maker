@@ -1,9 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { GRAPH_PIXEL_SESSION_COOKIE } from "@/lib/constants";
+import { isAuthDisabledForTesting } from "@/lib/auth/testing";
 
 const protectedPrefixes = ["/dashboard", "/projects", "/settings"];
 
 export function proxy(request: NextRequest) {
+  if (isAuthDisabledForTesting()) return NextResponse.next();
+
   const { pathname } = request.nextUrl;
   const isProtected = protectedPrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 

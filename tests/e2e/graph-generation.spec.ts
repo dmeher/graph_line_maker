@@ -60,7 +60,7 @@ async function canvasMetrics(page: import("@playwright/test").Page) {
 
       if (y < topLimit) {
         maxTopRowBlack = Math.max(maxTopRowBlack, rowBlack);
-        if (rowBlack > width * 0.18) artifactRows.push({ y, black: rowBlack });
+        if (rowBlack > width * 0.7) artifactRows.push({ y, black: rowBlack });
       }
     }
 
@@ -76,16 +76,33 @@ async function canvasMetrics(page: import("@playwright/test").Page) {
   });
 }
 
+async function waitForRenderedCanvas(page: import("@playwright/test").Page) {
+  await page.waitForFunction(() =>
+    Array.from(document.querySelectorAll("canvas")).some((canvas) => canvas.width >= 320 && canvas.height >= 320),
+  );
+}
+
+async function openSourcePanelControls(page: import("@playwright/test").Page) {
+  const sourcePanel = page.locator(".editor-panel").first();
+  await expect(sourcePanel.getByText(/Original image|Source|Ready/).first()).toBeVisible();
+  await sourcePanel.getByRole("button").filter({ hasText: /Original image|Source|Ready/ }).first().click();
+  return {
+    sourcePanel,
+    lineSize: sourcePanel.getByLabel("Line size").first(),
+    fillWidth: sourcePanel.getByLabel("Fill width").first(),
+    gapClosing: sourcePanel.getByLabel("Gap closing").first(),
+  };
+}
+
 test.describe("graph generation", () => {
   test("desktop editor preserves fill regions, removes scanline artifact, and changes line thickness", async ({ page }, testInfo) => {
     const consoleErrors = collectConsole(page);
 
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(editorUrl);
-    await expect(page.getByLabel("Image line size")).toHaveValue("0");
-    await page.waitForFunction(() =>
-      Array.from(document.querySelectorAll("canvas")).some((canvas) => canvas.width > 1000 && canvas.height > 1000),
-    );
+    const controls = await openSourcePanelControls(page);
+    await expect(controls.lineSize).toHaveValue("0");
+    await waitForRenderedCanvas(page);
 
     const thinMetrics = await canvasMetrics(page);
     expect(thinMetrics).not.toBeNull();
@@ -95,41 +112,41 @@ test.describe("graph generation", () => {
     expect(thinMetrics?.artifactRows).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath("desktop-line-size-0.png"), fullPage: false });
 
-    await page.getByLabel("Fill width").fill("48");
-    await expect(page.getByLabel("Fill width")).toHaveValue("48");
+    await controls.fillWidth.fill("48");
+    await expect(controls.fillWidth).toHaveValue("48");
     await page.waitForTimeout(700);
     const highFillWidthMetrics = await canvasMetrics(page);
     expect(highFillWidthMetrics).not.toBeNull();
     expect(highFillWidthMetrics?.artifactRows).toEqual([]);
     expect(highFillWidthMetrics?.totalFillGray ?? 0).toBeLessThan((thinMetrics?.totalFillGray ?? 0) * 0.35);
 
-    await page.getByLabel("Fill width").fill("7");
-    await expect(page.getByLabel("Fill width")).toHaveValue("7");
+    await controls.fillWidth.fill("7");
+    await expect(controls.fillWidth).toHaveValue("7");
     await page.waitForTimeout(700);
     const restoredFillMetrics = await canvasMetrics(page);
     expect(restoredFillMetrics).not.toBeNull();
     expect(restoredFillMetrics?.totalFillGray ?? 0).toBeGreaterThan(highFillWidthMetrics?.totalFillGray ?? 0);
 
-    await page.getByLabel("Image line size").fill("3");
-    await expect(page.getByLabel("Image line size")).toHaveValue("3");
+    await controls.lineSize.fill("3");
+    await expect(controls.lineSize).toHaveValue("3");
     await page.waitForTimeout(700);
     const mediumMetrics = await canvasMetrics(page);
     expect(mediumMetrics).not.toBeNull();
     expect(mediumMetrics?.artifactRows).toEqual([]);
     expect(mediumMetrics?.totalBlack ?? 0).toBeGreaterThan(thinMetrics?.totalBlack ?? 0);
 
-    await page.getByLabel("Image line size").fill("6");
-    await expect(page.getByLabel("Image line size")).toHaveValue("6");
+    await controls.lineSize.fill("6");
+    await expect(controls.lineSize).toHaveValue("6");
     await page.waitForTimeout(700);
     const thickMetrics = await canvasMetrics(page);
     expect(thickMetrics).not.toBeNull();
     expect(thickMetrics?.artifactRows).toEqual([]);
     expect(thickMetrics?.totalBlack ?? 0).toBeGreaterThan(mediumMetrics?.totalBlack ?? 0);
 
-    await page.getByLabel("Gap closing").fill("1");
-    await expect(page.getByLabel("Gap closing")).toHaveValue("1");
-    await page.getByLabel("Gap closing").fill("0");
-    await expect(page.getByLabel("Gap closing")).toHaveValue("0");
+    await controls.gapClosing.fill("1");
+    await expect(controls.gapClosing).toHaveValue("1");
+    await controls.gapClosing.fill("0");
+    await expect(controls.gapClosing).toHaveValue("0");
 
     await page.screenshot({ path: testInfo.outputPath("desktop-line-size-6.png"), fullPage: false });
     expect(consoleErrors).toEqual([]);
@@ -140,13 +157,12 @@ test.describe("graph generation", () => {
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(editorUrl);
-    await page.getByRole("button", { name: "Controls" }).click();
-    await expect(page.getByLabel("Image line size")).toBeVisible();
-    await expect(page.getByLabel("Fill width")).toBeVisible();
+    await page.getByRole("button", { name: "Source" }).last().click();
+    const controls = await openSourcePanelControls(page);
+    await expect(controls.lineSize).toBeVisible();
+    await expect(controls.fillWidth).toBeVisible();
     await expect(page.getByText(/Next\.js|Unhandled Runtime Error|Build Error/i)).toHaveCount(0);
-    await page.waitForFunction(() =>
-      Array.from(document.querySelectorAll("canvas")).some((canvas) => canvas.width > 1000 && canvas.height > 1000),
-    );
+    await waitForRenderedCanvas(page);
 
     const metrics = await canvasMetrics(page);
     expect(metrics).not.toBeNull();

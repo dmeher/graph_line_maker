@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { LogOut } from "lucide-react";
+import { ChevronDown, CircleHelp, Cloud, Grid3X3, Home, Menu, Moon } from "lucide-react";
 import { AppNav } from "@/components/layout/app-nav";
 import { BrandMark } from "@/components/layout/brand-mark";
 import { OfflineSessionBridge } from "@/components/layout/offline-session-bridge";
@@ -8,33 +8,53 @@ import type { CurrentSession } from "@/lib/types";
 
 export function AppShell({ session, children }: { session: CurrentSession; children: React.ReactNode }) {
   return (
-    <div className="min-h-dvh bg-[var(--panel)]">
+    <div className="mock-shell">
       <OfflineSessionBridge session={session} offlineSessionTicket={createOfflineSessionTicket(session)} />
-      <header className="sticky top-0 z-30 border-b border-[var(--line)] bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-[1480px] items-center justify-between gap-3 px-3 py-3 sm:px-4">
-          <Link href="/dashboard" prefetch={false} aria-label="Graph Pixel Maker dashboard">
+      <header className="mock-topbar">
+        <div className="flex min-w-0 items-center gap-5">
+          <button className="grid h-9 w-9 place-items-center rounded-md text-[#101828] hover:bg-[#f2f4f7]" aria-label="Menu">
+            <Menu size={22} strokeWidth={1.8} />
+          </button>
+          <Link href="/dashboard" prefetch={false} aria-label="Graph Pixel Maker dashboard" className="[--brand-text:#101828]">
             <BrandMark />
           </Link>
-          <AppNav variant="desktop" />
-          <div className="flex min-w-0 items-center gap-2">
-            <div className="hidden min-w-0 text-right sm:block">
-              <p className="truncate text-xs font-semibold text-slate-950">{session.displayName || session.email}</p>
-              <p className="text-xs capitalize text-slate-500">{session.role}</p>
+        </div>
+
+        <div className="flex min-w-0 items-center gap-4">
+          <div className="hidden items-center gap-2 text-sm font-medium text-[#101828] lg:flex">
+            <Cloud size={19} className="text-[#008c8f]" strokeWidth={1.8} />
+            <span>Online</span>
+          </div>
+          <button className="hidden h-9 w-9 place-items-center rounded-full text-[#101828] hover:bg-[#f2f4f7] sm:grid" aria-label="Home">
+            <Home size={18} strokeWidth={1.8} />
+          </button>
+          <button className="hidden h-9 w-9 place-items-center rounded-full text-[#101828] hover:bg-[#f2f4f7] sm:grid" aria-label="Apps">
+            <Grid3X3 size={18} strokeWidth={1.8} />
+          </button>
+          <button className="hidden h-9 w-9 place-items-center rounded-full text-[#101828] hover:bg-[#f2f4f7] sm:grid" aria-label="Help">
+            <CircleHelp size={19} strokeWidth={1.8} />
+          </button>
+          <button className="hidden h-9 w-9 place-items-center rounded-full text-[#101828] hover:bg-[#f2f4f7] sm:grid" aria-label="Theme">
+            <Moon size={18} strokeWidth={1.8} />
+          </button>
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#007f83] text-sm font-semibold text-white">
+              {(session.displayName || session.email || "DM").slice(0, 2).toUpperCase()}
+            </span>
+            <div className="hidden min-w-0 sm:block">
+              <p className="truncate text-sm font-semibold leading-4 text-[#101828]">{session.displayName || "Demo User"}</p>
+              <p className="text-xs capitalize leading-4 text-[#667085]">{session.role}</p>
             </div>
-            <form action="/api/auth/logout" method="post">
-              <button
-                className="grid h-10 w-10 place-items-center rounded-md border border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50"
-                aria-label="Sign out"
-                title="Sign out"
-              >
-                <LogOut size={16} aria-hidden="true" />
-              </button>
-            </form>
+            <ChevronDown size={17} className="hidden text-[#101828] sm:block" strokeWidth={1.8} />
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1480px]">{children}</main>
+      <aside className="mock-sidebar">
+        <AppNav variant="desktop" />
+      </aside>
+
+      <main className="mock-main">{children}</main>
 
       <AppNav variant="mobile" />
       <div className="h-16 md:hidden" />

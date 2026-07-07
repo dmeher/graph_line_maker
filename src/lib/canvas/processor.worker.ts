@@ -26,7 +26,12 @@ type WorkerResponse =
       error: string;
     };
 
-self.onmessage = (event: MessageEvent<WorkerRequest>) => {
+const workerContext = self as unknown as {
+  onmessage: ((event: MessageEvent<WorkerRequest>) => void) | null;
+  postMessage: (message: WorkerResponse, transfer?: Transferable[]) => void;
+};
+
+workerContext.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const bitmaps = event.data.layers.map((layer) => layer.bitmap);
   try {
     const layers: WorkerFittedImageLayer[] = event.data.layers.map((layer) => {
@@ -53,13 +58,13 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
       fillRegions: result.fillRegions,
       fillRegionMap: result.fillRegionMap,
     };
-    self.postMessage(response, [bitmap, result.fillRegionMap.buffer] as Transferable[]);
+    workerContext.postMessage(response, [bitmap, result.fillRegionMap.buffer] as Transferable[]);
   } catch (error) {
     bitmaps.forEach((bitmap) => bitmap.close());
     const response: WorkerResponse = {
       ok: false,
       error: error instanceof Error ? error.message : "Unable to process image.",
     };
-    self.postMessage(response);
+    workerContext.postMessage(response);
   }
 };

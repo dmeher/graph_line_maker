@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { BOOTSTRAP_ADMIN_EMAIL, GRAPH_PIXEL_SESSION_COOKIE } from "@/lib/constants";
 import { normalizeEmail, signPayload, verifySignedPayload } from "@/lib/auth/security";
+import { getTestingSession, isAuthDisabledForTesting } from "@/lib/auth/testing";
 import { tryGetSupabaseAdmin } from "@/lib/supabase/server";
 import type { AppRole, AppUser, CurrentSession } from "@/lib/types";
 
@@ -101,6 +102,8 @@ export async function getActiveUserByEmail(email: string) {
 }
 
 export async function getCurrentSession(): Promise<CurrentSession | null> {
+  if (isAuthDisabledForTesting()) return getTestingSession();
+
   const cookieStore = await cookies();
   const payload = parseSessionToken(cookieStore.get(GRAPH_PIXEL_SESSION_COOKIE)?.value);
   if (!payload) return null;

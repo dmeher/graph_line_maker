@@ -21,18 +21,25 @@ import {
   ImageIcon,
   FlipHorizontal,
   FlipVertical,
+  Grid3X3,
+  Hand,
   Lock,
   Loader2,
   Maximize2,
+  Menu,
+  MoreVertical,
+  MousePointer2,
   Pipette,
   Printer,
   RefreshCw,
+  Redo2,
   RotateCcw,
   RotateCw,
   Save,
   Settings2,
   Trash2,
   Unlock,
+  Undo2,
   Upload,
   X,
   ZoomIn,
@@ -43,6 +50,7 @@ import {
   PanelRightOpen,
 } from "lucide-react";
 import { saveProjectState } from "@/app/(app)/projects/actions";
+import { LogoMark } from "@/components/layout/brand-mark";
 import { cropCanvasToFile, fullCrop, type CropPixels } from "@/lib/canvas/crop";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
 import { findContentBounds, loadImageToCanvas, pixelateLayeredImagesWithWorker, resizeImage, type FillRegion } from "@/lib/canvas/processor";
@@ -107,6 +115,7 @@ import type { GraphCellLineSide, GraphCellPaint, GraphSettings, GraphShapeDrawin
 import { bytesToSize } from "@/lib/utils/format";
 
 type MobileTab = "source" | "canvas" | "controls";
+type InspectorTab = "graph" | "source" | "draw" | "palette" | "print";
 type Notice = { tone: "ok" | "error" | "info"; text: string };
 type CollapsibleKey = "parameters" | "drawing" | "outline" | "fill" | "selectedFill" | "graphLines";
 type FloatingPalette = { regionId: string; x: number; y: number } | null;
@@ -627,15 +636,17 @@ function CollapsibleSection({
   open,
   onToggle,
   children,
+  className = "",
 }: {
   title: string;
   summary?: ReactNode;
   open: boolean;
   onToggle: () => void;
   children: ReactNode;
+  className?: string;
 }) {
   return (
-    <section className="border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0">
+    <section className={`border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0 ${className}`}>
       <button
         type="button"
         onClick={onToggle}
@@ -1001,6 +1012,7 @@ export function EditorClient({ project }: { project: Project }) {
   const [floatingPalette, setFloatingPalette] = useState<FloatingPalette>(null);
   const [copiedFillColor, setCopiedFillColor] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("canvas");
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("graph");
   const [isPending, startTransition] = useTransition();
   const settingsRef = useRef(settings);
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -2578,11 +2590,10 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   const sourcePanel = (
-    <aside className="relative space-y-4 rounded-md border border-[var(--line)] bg-white p-4 shadow-sm lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950">
-          <ImageIcon size={16} aria-hidden="true" />
-          Source
+    <aside className="editor-panel relative space-y-0">
+      <div className="flex h-11 items-center justify-between border-b border-[#d7dde5] px-3">
+        <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">
+          Sources
         </h2>
         <div className="flex gap-2">
           {sourcePreviewUrl ? (
@@ -2592,7 +2603,7 @@ export function EditorClient({ project }: { project: Project }) {
                   type="button"
                   onClick={applySourceCrop}
                   disabled={!sourceCropArea || sourceCropPending}
-                  className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                  className="ui-btn-icon disabled:opacity-50"
                   title="Apply crop"
                 >
                   {sourceCropPending ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}
@@ -2600,7 +2611,7 @@ export function EditorClient({ project }: { project: Project }) {
                 <button
                   type="button"
                   onClick={selectFullSourceCrop}
-                  className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
+                  className="ui-btn-icon"
                   title="Full image"
                 >
                   <Maximize2 size={15} aria-hidden="true" />
@@ -2611,7 +2622,7 @@ export function EditorClient({ project }: { project: Project }) {
                     setSourceCropMode(false);
                     setSourceCropArea(null);
                   }}
-                  className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
+                  className="ui-btn-icon"
                   title="Cancel crop"
                 >
                   <X size={15} aria-hidden="true" />
@@ -2624,14 +2635,14 @@ export function EditorClient({ project }: { project: Project }) {
                   setSourceCropMode(true);
                   selectFullSourceCrop();
                 }}
-                className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
+                className="ui-btn-icon"
                 title="Crop source"
               >
                 <Crop size={15} aria-hidden="true" />
               </button>
             )
           ) : null}
-          <label className={`grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 ${uploadingSources ? "cursor-wait opacity-70" : "cursor-pointer"}`} title="Add images">
+          <label className={`ui-btn-icon ${uploadingSources ? "cursor-wait opacity-70" : "cursor-pointer"}`} title="Add images">
             {uploadingSources ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Upload size={15} aria-hidden="true" />}
             <input
               type="file"
@@ -2649,7 +2660,7 @@ export function EditorClient({ project }: { project: Project }) {
         </div>
       </div>
 
-      <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
+      <div className="border-b border-[#d7dde5] bg-white p-3">
         <p className="truncate text-sm font-semibold text-slate-950">{title || "Graph preview"}</p>
         <p className="mt-1 text-xs text-slate-500">
           {settings.sourceImages.length
@@ -2663,21 +2674,21 @@ export function EditorClient({ project }: { project: Project }) {
       </div>
 
       {sourceCropMode && sourcePreviewUrl ? (
-        <div className="overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)]">
+        <div className="m-3 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)]">
           <ManualCropper imageUrl={sourcePreviewUrl} crop={sourceCropArea} onCropChange={setSourceCropArea} className="h-[min(75vh,42rem)] p-3" />
         </div>
       ) : settings.sourceImages.length || settings.cellPaints.length || settings.graphShapes.length ? (
-        <div className="overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
+        <div className="m-3 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
           <canvas ref={overviewCanvasRef} className="max-h-72 w-full rounded bg-white object-contain shadow-sm" style={{ height: "auto" }} />
         </div>
       ) : (
-        <div className="grid min-h-48 place-items-center rounded-md border border-dashed border-slate-300 bg-[var(--panel)] text-center text-sm text-slate-500">
+        <div className="m-3 grid min-h-40 place-items-center rounded-md border border-dashed border-slate-300 bg-[var(--panel)] text-center text-sm text-slate-500">
           Upload source files
         </div>
       )}
 
       {settings.sourceImages.length || settings.cellPaints.length || settings.graphShapes.length ? (
-        <div className="space-y-3">
+        <div className="space-y-0 border-t border-[#d7dde5]">
           {settings.sourceImages.map((source, index) => {
             const status = sourceStatus[source.id];
             const expanded = Boolean(expandedSourceIds[source.id]);
@@ -2686,7 +2697,7 @@ export function EditorClient({ project }: { project: Project }) {
             const previousLocked = Boolean(settings.sourceImages[index - 1]?.locked);
             const nextLocked = Boolean(settings.sourceImages[index + 1]?.locked);
             return (
-              <div key={source.id} className={`space-y-3 rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
+              <div key={source.id} className={`space-y-3 overflow-hidden rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
                 <div className="grid gap-2">
                   <button
                     type="button"
@@ -2695,7 +2706,7 @@ export function EditorClient({ project }: { project: Project }) {
                       setSelectedDrawingLayerId(null);
                       toggleSourceCard(source.id);
                     }}
-                    className="grid min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
+                    className="grid w-full min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
                   >
                     <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[var(--teal)] text-xs font-bold text-white">{index + 1}</span>
                     {status?.previewUrl ? (
@@ -2904,7 +2915,7 @@ export function EditorClient({ project }: { project: Project }) {
             const previousLocked = Boolean(settings.cellPaints[index - 1]?.locked);
             const nextLocked = Boolean(settings.cellPaints[index + 1]?.locked);
             return (
-              <div key={key} className={`space-y-3 rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
+              <div key={key} className={`space-y-3 overflow-hidden rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
                 <div className="grid gap-2">
                   <button
                     type="button"
@@ -2913,7 +2924,7 @@ export function EditorClient({ project }: { project: Project }) {
                       setSelectedDrawingLayerId(key);
                       toggleDrawingLayerCard(key);
                     }}
-                    className="grid min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
+                    className="grid w-full min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
                   >
                     <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-700 text-xs font-bold text-white">{settings.sourceImages.length + index + 1}</span>
                     <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] p-1">
@@ -2992,7 +3003,7 @@ export function EditorClient({ project }: { project: Project }) {
             const previousLocked = Boolean(settings.graphShapes[index - 1]?.locked);
             const nextLocked = Boolean(settings.graphShapes[index + 1]?.locked);
             return (
-              <div key={key} className={`space-y-3 rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
+              <div key={key} className={`space-y-3 overflow-hidden rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
                 <div className="grid gap-2">
                   <button
                     type="button"
@@ -3001,7 +3012,7 @@ export function EditorClient({ project }: { project: Project }) {
                       setSelectedDrawingLayerId(key);
                       toggleDrawingLayerCard(key);
                     }}
-                    className="grid min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
+                    className="grid w-full min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
                   >
                     <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-700 text-xs font-bold text-white">{settings.sourceImages.length + settings.cellPaints.length + index + 1}</span>
                     <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] p-1 text-slate-500">
@@ -3205,12 +3216,101 @@ export function EditorClient({ project }: { project: Project }) {
       </div>
     ) : null;
 
+  const inspectorTabs: { id: InspectorTab; label: string }[] = [
+    { id: "graph", label: "Graph" },
+    { id: "source", label: "Source" },
+    { id: "draw", label: "Draw" },
+    { id: "palette", label: "Palette" },
+    { id: "print", label: "Print" },
+  ];
+
+  const selectedSourceInspector = (
+    <div className={inspectorTab === "source" ? "space-y-3" : "hidden"}>
+      {selectedSource ? (
+        <>
+          <div className="ui-panel-subtle p-3">
+            <p className="truncate text-sm font-semibold text-slate-950">{selectedSource.name}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              {selectedSource.locked ? "Locked" : "Editable"} / {sourceStatus[selectedSource.id]?.ready ? "Ready" : sourceStatus[selectedSource.id]?.error || "Loading"}
+            </p>
+          </div>
+          <div className="grid min-w-0 grid-cols-2 gap-2">
+            <NumberField
+              label="Width (CM)"
+              value={sourcePhysicalWidthCm(selectedSource)}
+              min={0.01}
+              max={1000}
+              step={0.1}
+              allowDecimalInput
+              disabled={selectedSource.locked}
+              onChange={(value) => updateSourceImagePhysicalWidthCm(selectedSource.id, value)}
+            />
+            <NumberField
+              label={`Height (${MEASUREMENT_UNIT_LABELS[selectedSource.measurementUnit]})`}
+              value={sourcePhysicalHeight(selectedSource)}
+              min={0.01}
+              max={roundMeasure(cmToUnit(1000 * settings.cellSizeCm, selectedSource.measurementUnit))}
+              step={0.1}
+              allowDecimalInput
+              disabled={selectedSource.locked}
+              onChange={(value) => updateSourceImagePhysicalHeight(selectedSource.id, value)}
+            />
+            <label className="grid min-w-0 gap-1.5">
+              <span className="text-xs font-semibold text-slate-500">Size unit</span>
+              <select
+                value={selectedSource.measurementUnit}
+                onChange={(event) => updateSourceImage(selectedSource.id, { measurementUnit: event.target.value as GraphSettings["measurementUnit"] })}
+                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
+              >
+                <option value="cm">CM</option>
+                <option value="in">IN</option>
+              </select>
+            </label>
+            <NumberField
+              label="Line size"
+              value={selectedSource.imageLineThickness}
+              min={MIN_IMAGE_LINE_THICKNESS}
+              max={MAX_IMAGE_LINE_THICKNESS}
+              step={0.01}
+              allowDecimalInput
+              onChange={(value) => updateSourceImage(selectedSource.id, { imageLineThickness: value })}
+            />
+            <NumberField label="Left padding" value={selectedSource.x} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { x: value })} />
+            <NumberField label="Right padding" value={sourceRightPadding(selectedSource)} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { x: settings.graphWidth - selectedSource.width - value })} />
+            <NumberField label="Top padding" value={selectedSource.y} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { y: value })} />
+            <NumberField label="Bottom padding" value={sourceBottomPadding(selectedSource)} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { y: settings.graphHeight - selectedSource.height - value })} />
+            <NumberField label="Fill detection" value={selectedSource.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} allowDecimalInput onChange={(value) => updateSourceImage(selectedSource.id, { sourceFillThreshold: value })} />
+            <NumberField label="Fill width" value={selectedSource.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSourceImage(selectedSource.id, { sourceFillMinStrokePixels: value })} />
+            <NumberField label="Gap closing" value={selectedSource.strokeGapClosePixels} min={MIN_STROKE_GAP_CLOSE_PIXELS} max={MAX_STROKE_GAP_CLOSE_PIXELS} onChange={(value) => updateSourceImage(selectedSource.id, { strokeGapClosePixels: value })} />
+          </div>
+          <div className="grid grid-cols-4 gap-1">
+            <button type="button" onClick={() => rotateSourceImage(selectedSource.id, -1)} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Rotate left">
+              <RotateCcw size={15} aria-hidden="true" />
+            </button>
+            <button type="button" onClick={() => rotateSourceImage(selectedSource.id, 1)} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Rotate right">
+              <RotateCw size={15} aria-hidden="true" />
+            </button>
+            <button type="button" onClick={() => flipSourceImage(selectedSource.id, "x")} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Flip horizontal">
+              <FlipHorizontal size={15} aria-hidden="true" />
+            </button>
+            <button type="button" onClick={() => flipSourceImage(selectedSource.id, "y")} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Flip vertical">
+              <FlipVertical size={15} aria-hidden="true" />
+            </button>
+          </div>
+        </>
+      ) : (
+        <div className="ui-panel-subtle grid min-h-32 place-items-center p-4 text-center text-sm text-slate-500">
+          Select a source layer to edit its size, padding, transform, and detection settings.
+        </div>
+      )}
+    </div>
+  );
+
   const settingsPanel = (
-    <aside className="relative space-y-4 rounded-md border border-[var(--line)] bg-white p-4 shadow-sm lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950">
-          <Settings2 size={16} aria-hidden="true" />
-          Controls
+    <aside className="editor-panel relative space-y-0">
+      <div className="flex h-11 items-center justify-between border-b border-[#d7dde5] px-3">
+        <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">
+          Inspector
         </h2>
         <button
           type="button"
@@ -3220,15 +3320,34 @@ export function EditorClient({ project }: { project: Project }) {
             setFloatingPalette(null);
             setCopiedFillColor(null);
           }}
-          className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
+          className="ui-btn-icon"
           title="Reset settings"
         >
           <RefreshCw size={15} aria-hidden="true" />
         </button>
       </div>
 
-      <div className="space-y-4">
-        <CollapsibleSection title="Parameters" open={!collapsedSections.parameters} onToggle={() => toggleSection("parameters")}>
+      <div className="grid grid-cols-5 border-b border-[#d7dde5] bg-white text-[12px]">
+        {inspectorTabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setInspectorTab(tab.id)}
+            className={`h-9 border-r border-[#d7dde5] font-medium ${inspectorTab === tab.id ? "bg-[#008c8f] text-white" : "text-[#344054]"}`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="space-y-4 p-3">
+        {selectedSourceInspector}
+        <CollapsibleSection
+          title={inspectorTab === "print" ? "Print setup" : "Parameters"}
+          open={!collapsedSections.parameters}
+          onToggle={() => toggleSection("parameters")}
+          className={inspectorTab === "graph" || inspectorTab === "print" ? "" : "hidden"}
+        >
           <div className="grid min-w-0 grid-cols-2 gap-3">
             <NumberField label="Width (cells)" value={settings.graphWidth} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphWidth", value)} />
             <NumberField label="Height (cells)" value={settings.graphHeight} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphHeight", value)} />
@@ -3386,6 +3505,7 @@ export function EditorClient({ project }: { project: Project }) {
           summary={<span className="text-xs font-semibold text-slate-500">{settings.cellPaints.length + settings.graphShapes.length}</span>}
           open={!collapsedSections.drawing}
           onToggle={() => toggleSection("drawing")}
+          className={inspectorTab === "draw" ? "" : "hidden"}
         >
           <div className="space-y-3">
             <div className="grid grid-cols-3 gap-2">
@@ -3474,16 +3594,16 @@ export function EditorClient({ project }: { project: Project }) {
           </div>
         </CollapsibleSection>
 
-        <CollapsibleSection title="Outline" summary={<ColorSummary value={settings.outlineColor} />} open={!collapsedSections.outline} onToggle={() => toggleSection("outline")}>
+        <CollapsibleSection title="Outline" summary={<ColorSummary value={settings.outlineColor} />} open={!collapsedSections.outline} onToggle={() => toggleSection("outline")} className={inspectorTab === "palette" ? "" : "hidden"}>
           <ColorPresetField label="Outline" value={settings.outlineColor} onChange={updateOutlineColor} />
         </CollapsibleSection>
 
-        <CollapsibleSection title="Default fill" summary={<ColorSummary value={settings.fillColor} />} open={!collapsedSections.fill} onToggle={() => toggleSection("fill")}>
+        <CollapsibleSection title="Default fill" summary={<ColorSummary value={settings.fillColor} />} open={!collapsedSections.fill} onToggle={() => toggleSection("fill")} className={inspectorTab === "palette" ? "" : "hidden"}>
           <ColorPresetField label="Default fill" value={settings.fillColor} onChange={(value) => updateSetting("fillColor", value)} allowTransparent />
         </CollapsibleSection>
 
         {selectedFillRegion ? (
-          <CollapsibleSection title={`Selected fill ${selectedFillRegion.id}`} summary={<ColorSummary value={selectedFillRegionColor} />} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")}>
+          <CollapsibleSection title={`Selected fill ${selectedFillRegion.id}`} summary={<ColorSummary value={selectedFillRegionColor} />} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")} className={inspectorTab === "palette" ? "" : "hidden"}>
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs font-semibold text-slate-500">{selectedFillRegion.kind === "source" ? "Source fill" : "Manual fill"}</span>
               <button
@@ -3504,7 +3624,7 @@ export function EditorClient({ project }: { project: Project }) {
           </CollapsibleSection>
         ) : null}
 
-        <CollapsibleSection title="Graph lines" summary={<ColorSummary value={settings.gridLineColor} />} open={!collapsedSections.graphLines} onToggle={() => toggleSection("graphLines")}>
+        <CollapsibleSection title="Graph lines" summary={<ColorSummary value={settings.gridLineColor} />} open={!collapsedSections.graphLines} onToggle={() => toggleSection("graphLines")} className={inspectorTab === "palette" ? "" : "hidden"}>
           <ColorPresetField
             label="Graph lines"
             value={settings.gridLineColor}
@@ -3534,35 +3654,6 @@ export function EditorClient({ project }: { project: Project }) {
         </span>
       </button>
     </aside>
-  );
-
-  const exportPanel = (
-    <div className="rounded-md border border-[var(--line)] bg-white p-3 shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950">
-          <Download size={16} aria-hidden="true" />
-          Export
-        </h2>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={exportPNG} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-            <ImageDown size={16} aria-hidden="true" />
-            PNG
-          </button>
-          <button type="button" onClick={exportPDF} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-            <FileText size={16} aria-hidden="true" />
-            PDF
-          </button>
-          <button type="button" onClick={printGraph} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-            <Printer size={16} aria-hidden="true" />
-            Print
-          </button>
-          <button type="button" onClick={exportJSON} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-            <FileJson size={16} aria-hidden="true" />
-            JSON
-          </button>
-        </div>
-      </div>
-    </div>
   );
 
   const graphPreviewWidth = Math.max(1, previewCanvasSize.width * zoom);
@@ -3645,24 +3736,25 @@ export function EditorClient({ project }: { project: Project }) {
           height: Math.max(1, Math.round(selectedSourceLayout.height * GRAPH_MAJOR_CELL_PIXELS * zoom)),
         }
       : null;
+  const canvasToolItems = [
+    { label: "Select", Icon: MousePointer2 },
+    { label: "Pan", Icon: Hand },
+    { label: "Pencil", Icon: Pipette },
+    { label: "Fill", Icon: Crop },
+    { label: "Zoom", Icon: ZoomIn },
+  ];
 
   const canvasPanel = (
-    <section className="min-w-0 space-y-4">
-      {exportPanel}
-
-      <div className="rounded-md border border-[var(--line)] bg-white p-3 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] pb-3">
+    <section className="editor-canvas-panel grid min-h-0 grid-rows-[40px_minmax(0,1fr)_36px]">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#d7dde5] bg-white px-3">
           <div className="min-w-0">
-            <h1 className="truncate text-xl font-semibold text-slate-950">{title || "Untitled project"}</h1>
-            <p className="mt-1 text-xs text-slate-500">
-              {settings.graphWidth} x {settings.graphHeight} cells
-            </p>
+            <h1 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">Canvas</h1>
           </div>
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
               onClick={() => setSourcePanelCollapsed((value) => !value)}
-              className="hidden h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 lg:grid"
+              className="hidden h-9 w-9 place-items-center rounded-md border border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50 lg:grid"
               title={sourcePanelCollapsed ? "Show source panel" : "Hide source panel"}
             >
               {sourcePanelCollapsed ? <PanelLeftOpen size={16} aria-hidden="true" /> : <PanelLeftClose size={16} aria-hidden="true" />}
@@ -3670,18 +3762,18 @@ export function EditorClient({ project }: { project: Project }) {
             <button
               type="button"
               onClick={() => setSettingsPanelCollapsed((value) => !value)}
-              className="hidden h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 lg:grid"
+              className="hidden h-9 w-9 place-items-center rounded-md border border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50 lg:grid"
               title={settingsPanelCollapsed ? "Show controls panel" : "Hide controls panel"}
             >
               {settingsPanelCollapsed ? <PanelRightOpen size={16} aria-hidden="true" /> : <PanelRightClose size={16} aria-hidden="true" />}
             </button>
-            <button type="button" onClick={() => setShowOriginal((value) => !value)} className="grid h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600" title={showOriginal ? "Show processed" : "Show original"}>
+            <button type="button" onClick={() => setShowOriginal((value) => !value)} className="ui-btn-icon" title={showOriginal ? "Show processed" : "Show original"}>
               {showOriginal ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}
             </button>
-            <button type="button" onClick={() => setZoom((value) => Math.max(0.35, value - 0.15))} className="grid h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600" title="Zoom out">
+            <button type="button" onClick={() => setZoom((value) => Math.max(0.35, value - 0.15))} className="ui-btn-icon" title="Zoom out">
               <ZoomOut size={16} aria-hidden="true" />
             </button>
-            <button type="button" onClick={() => setZoom((value) => Math.min(2.5, value + 0.15))} className="grid h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600" title="Zoom in">
+            <button type="button" onClick={() => setZoom((value) => Math.min(2.5, value + 0.15))} className="ui-btn-icon" title="Zoom in">
               <ZoomIn size={16} aria-hidden="true" />
             </button>
             <button
@@ -3689,25 +3781,13 @@ export function EditorClient({ project }: { project: Project }) {
               onClick={saveProject}
               disabled={isPending || processing || !title.trim()}
               title={!isOnline ? "Save an offline session draft" : hasSessionDraft ? "Sync session draft to the database" : "Save project"}
-              className="inline-flex h-10 items-center gap-2 rounded-md bg-[var(--teal)] px-4 text-sm font-semibold text-white disabled:opacity-60"
+              className="hidden"
             >
               {isPending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Save size={16} aria-hidden="true" />}
               Save
             </button>
           </div>
         </div>
-
-        {notice ? (
-          <p className={`mt-3 rounded-md border px-3 py-2 text-sm ${
-            notice.tone === "error"
-              ? "border-red-200 bg-red-50 text-red-700"
-              : notice.tone === "ok"
-                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                : "border-slate-200 bg-slate-50 text-slate-600"
-          }`}>
-            {notice.text}
-          </p>
-        ) : null}
 
         <div
           ref={canvasScrollRef}
@@ -3717,8 +3797,27 @@ export function EditorClient({ project }: { project: Project }) {
               setSelectedDrawingLayerId(null);
             }
           }}
-          className="relative mt-3 min-h-[520px] overflow-auto rounded-md border border-[var(--line)] bg-[linear-gradient(45deg,#f8fafc_25%,transparent_25%),linear-gradient(-45deg,#f8fafc_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#f8fafc_75%),linear-gradient(-45deg,transparent_75%,#f8fafc_75%)] bg-[length:24px_24px] bg-[position:0_0,0_12px,12px_-12px,-12px_0] p-4"
+          className="ui-canvas-bg relative min-h-0 overflow-auto p-8"
         >
+          {notice ? (
+            <p className={`absolute left-24 top-3 z-20 max-w-[min(560px,calc(100%-8rem))] rounded-md border px-3 py-2 text-sm shadow-sm ${
+              notice.tone === "error"
+                ? "border-red-200 bg-red-50 text-red-700"
+                : notice.tone === "ok"
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border-slate-200 bg-white text-slate-600"
+            }`}>
+              {notice.text}
+            </p>
+          ) : null}
+          <div className="absolute left-2 top-12 z-10 hidden w-16 overflow-hidden rounded-md border border-[#d7dde5] bg-white shadow-sm lg:block">
+            {canvasToolItems.map(({ label, Icon }, index) => (
+              <button key={label} type="button" className={`flex h-16 w-full flex-col items-center justify-center gap-1 border-b border-[#e8edf2] text-[12px] ${index === 0 ? "bg-[#e6f7f7] text-[#008c8f]" : "text-[#344054]"}`}>
+                <Icon size={20} strokeWidth={1.8} />
+                {label}
+              </button>
+            ))}
+          </div>
           {processing ? (
             <div className="absolute right-3 top-3 inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm">
               <Loader2 size={14} className="animate-spin" aria-hidden="true" />
@@ -3855,21 +3954,104 @@ export function EditorClient({ project }: { project: Project }) {
             </div>
           )}
         </div>
+      <div className="flex items-center gap-8 border-t border-[#d7dde5] bg-white px-4 text-xs text-[#475467]">
+        <span>X: 37</span>
+        <span>Y: 112</span>
+        <span>Cell: 0,0</span>
+        <span className="flex items-center gap-2">Color: #000000 <span className="h-4 w-4 bg-black" /></span>
+        <span className="ml-auto rounded bg-[#008c8f] px-3 py-2 text-white">Snap: On</span>
       </div>
-
     </section>
   );
 
   return (
-    <div className="p-3 sm:p-4 lg:p-5">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <Link href="/dashboard" className="text-sm font-semibold text-slate-600 hover:text-[var(--teal)]">
-          Back to dashboard
-        </Link>
-        <span className="hidden text-xs font-semibold text-slate-500 sm:inline">Brevo OTP private workspace</span>
+    <div className="editor-dark-shell">
+      <header className="editor-dark-toolbar">
+        <div className="flex min-w-max items-center gap-3">
+          <Link href="/dashboard" className="flex items-center gap-3 pr-3 text-white" aria-label="Back to dashboard">
+            <LogoMark className="h-9 w-9 shrink-0" />
+            <span className="text-lg font-semibold">Graph Pixel Maker</span>
+          </Link>
+          <span className="h-8 w-px bg-white/16" aria-hidden="true" />
+          <button type="button" className="editor-dark-btn w-10 px-0" title="Menu">
+            <Menu size={18} aria-hidden="true" />
+          </button>
+          <button type="button" onClick={() => restoreSettingsHistory("undo")} className="editor-dark-btn w-10 px-0" title="Undo">
+            <Undo2 size={18} aria-hidden="true" />
+          </button>
+          <button type="button" onClick={() => restoreSettingsHistory("redo")} className="editor-dark-btn w-10 px-0" title="Redo">
+            <Redo2 size={18} aria-hidden="true" />
+          </button>
+          <button type="button" className="editor-dark-btn border-[#008c8f] bg-[#10242d] text-[#6fe7ea]" title="Pan">
+            <Hand size={18} aria-hidden="true" />
+          </button>
+          <button type="button" className="editor-dark-btn border-[#008c8f] bg-[#10242d] text-[#6fe7ea]" title="Select">
+            <MousePointer2 size={18} aria-hidden="true" />
+          </button>
+          <button type="button" onClick={() => setShowOriginal((value) => !value)} className="editor-dark-btn" title={showOriginal ? "Show processed" : "Show original"}>
+            {showOriginal ? <EyeOff size={17} aria-hidden="true" /> : <Eye size={17} aria-hidden="true" />}
+            <span>Show Original</span>
+          </button>
+          <button type="button" onClick={() => updateSetting("showNumbers", !settings.showNumbers)} className="editor-dark-btn" title="Toggle graph numbers">
+            <Grid3X3 size={17} aria-hidden="true" />
+            <span>Grid</span>
+          </button>
+          <div className="flex h-9 items-center overflow-hidden rounded-[5px] border border-[#334152] bg-[#141d27]">
+            <button type="button" onClick={() => setZoom((value) => Math.max(0.35, value - 0.15))} className="grid h-9 w-10 place-items-center text-white/80" title="Zoom out">
+              <ZoomOut size={16} aria-hidden="true" />
+            </button>
+            <span className="border-x border-[#334152] px-4 text-sm font-semibold">{Math.round(zoom * 100)}%</span>
+            <button type="button" onClick={() => setZoom((value) => Math.min(2.5, value + 0.15))} className="grid h-9 w-10 place-items-center text-white/80" title="Zoom in">
+              <ZoomIn size={16} aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex min-w-max items-center gap-2">
+          <button
+            type="button"
+            onClick={saveProject}
+            disabled={isPending || processing || !title.trim()}
+            className="editor-dark-btn border-[#00a3a7] bg-[#00969a] text-white disabled:opacity-60"
+            title={!isOnline ? "Save an offline session draft" : hasSessionDraft ? "Sync session draft to the database" : "Save project"}
+          >
+            {isPending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}
+            Save
+          </button>
+          <button type="button" onClick={exportPNG} className="editor-dark-btn" title="Export menu">
+            <Download size={16} aria-hidden="true" />
+            Export
+            <ChevronDown size={15} aria-hidden="true" />
+          </button>
+          <button type="button" onClick={exportPNG} className="editor-dark-btn" title="Export PNG">
+            <ImageDown size={16} aria-hidden="true" />
+            PNG
+          </button>
+          <button type="button" onClick={exportPDF} className="editor-dark-btn" title="Export PDF">
+            <FileText size={16} aria-hidden="true" />
+            PDF
+          </button>
+          <button type="button" onClick={printGraph} className="editor-dark-btn" title="Print">
+            <Printer size={16} aria-hidden="true" />
+            Print
+          </button>
+          <button type="button" onClick={exportJSON} className="editor-dark-btn" title="Export JSON">
+            <FileJson size={16} aria-hidden="true" />
+            JSON
+          </button>
+          <button type="button" className="editor-dark-btn w-10 px-0" title="More">
+            <MoreVertical size={18} aria-hidden="true" />
+          </button>
+        </div>
+      </header>
+
+      <div className="editor-workspace" style={editorGridStyle}>
+        <div className={`${mobileTab === "source" ? "block" : "hidden"} ${sourcePanelCollapsed ? "lg:hidden" : "lg:block"}`}>{sourcePanel}</div>
+        <div className={mobileTab === "canvas" ? "block" : "hidden lg:block"}>{canvasPanel}</div>
+        <div className={`${mobileTab === "controls" ? "block" : "hidden"} ${settingsPanelCollapsed ? "lg:hidden" : "lg:block"}`}>{settingsPanel}</div>
       </div>
 
-      <div className="mb-3 grid grid-cols-3 rounded-md border border-[var(--line)] bg-white p-1 lg:hidden">
+      <div className="grid h-16 grid-cols-3 border-t border-[#d7dde5] bg-white lg:hidden">
         {[
           ["source", "Source"],
           ["canvas", "Canvas"],
@@ -3879,17 +4061,18 @@ export function EditorClient({ project }: { project: Project }) {
             key={value}
             type="button"
             onClick={() => setMobileTab(value as MobileTab)}
-            className={`h-10 rounded text-sm font-semibold ${mobileTab === value ? "bg-teal-50 text-[var(--teal)]" : "text-slate-600"}`}
+            className={`flex flex-col items-center justify-center gap-1 text-xs font-semibold ${mobileTab === value ? "text-[#008c8f]" : "text-[#344054]"}`}
           >
+            {value === "source" ? <ImageIcon size={20} aria-hidden="true" /> : value === "canvas" ? <Grid3X3 size={20} aria-hidden="true" /> : <Settings2 size={20} aria-hidden="true" />}
             {label}
           </button>
         ))}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[var(--editor-grid-columns)]" style={editorGridStyle}>
-        <div className={`${mobileTab === "source" ? "block" : "hidden"} ${sourcePanelCollapsed ? "lg:hidden" : "lg:block"}`}>{sourcePanel}</div>
-        <div className={mobileTab === "canvas" ? "block" : "hidden lg:block"}>{canvasPanel}</div>
-        <div className={`${mobileTab === "controls" ? "block" : "hidden"} ${settingsPanelCollapsed ? "lg:hidden" : "lg:block"}`}>{settingsPanel}</div>
+      <div className={`flex h-9 shrink-0 items-center gap-3 px-4 text-xs text-white ${isOnline ? "bg-[#008c8f]" : "bg-[#594407]"}`}>
+        <span className="font-semibold">{isOnline ? "Online save" : "Offline draft"}</span>
+        <span className="ml-auto">{hasSessionDraft ? "Changes saved locally" : isOnline ? "Database sync ready" : "Changes will sync when online."}</span>
+        <Check size={16} aria-hidden="true" />
       </div>
       {floatingPaletteNode}
     </div>

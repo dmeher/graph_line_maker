@@ -39,6 +39,7 @@ import type { GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSum
 
 const MAX_CANVAS_DIMENSION = 24000;
 const MAX_SOURCE_IMAGES = 12;
+const MOCK_EDITOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900"><rect width="900" height="900" fill="white"/><path d="M431 95c-62 58-78 131-45 218m30-204c45 71 73 133 56 225m-73-150c-62-42-120-50-173-24 36 91 96 145 178 164m66-7c83-93 161-127 236-91-41 92-113 137-218 134M417 354c-14 111-14 227 0 348m46-348c18 116 22 229 10 341M260 716c-72-66-120-143-143-231 112 11 196 75 251 193m122 5c64-123 149-185 255-188-42 93-111 166-208 219M223 724h382l-33 95H249z" fill="none" stroke="#111" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 type StoredGraphSettings = Partial<GraphSettings> & {
   cellSizeInches?: number;
 };
@@ -92,6 +93,86 @@ export const defaultGraphSettings: GraphSettings = {
   limitedColorMode: true,
   maxColors: 8,
 };
+
+function dataSvgUrl(svg: string) {
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+export function getMockEditorProject(): Project {
+  const now = new Date().toISOString();
+  const settings = normalizeGraphSettings({
+    ...defaultGraphSettings,
+    graphWidth: 150,
+    graphHeight: 150,
+    imageWidth: 118,
+    imageHeight: 126,
+    gridNumberPlacement: "outside",
+    sourceImages: [
+      {
+        id: "mock-deer",
+        name: "deer-line-art.png",
+        path: null,
+        url: dataSvgUrl(MOCK_EDITOR_SVG),
+        width: 118,
+        height: 126,
+        measurementUnit: "cm",
+        imageLineThickness: 3,
+        sourceFillThreshold: 0.58,
+        sourceFillMinStrokePixels: 7,
+        strokeGapClosePixels: 0,
+        x: 16,
+        y: 8,
+        topPadding: 0,
+        bottomPadding: 0,
+        locked: false,
+        rotationDegrees: 0,
+        flipX: false,
+        flipY: false,
+      },
+    ],
+    cellPaints: [
+      {
+        id: "ground",
+        name: "Ground",
+        x: 16,
+        y: 134,
+        width: 104,
+        height: 2,
+        sides: ["bottom"],
+        lineColor: "#111111",
+        fillColor: "transparent",
+        lineWidth: 3,
+        locked: false,
+        rotationDegrees: 0,
+        flipX: false,
+        flipY: false,
+      },
+    ],
+  });
+
+  return {
+    id: "mock-editor",
+    userId: "testing",
+    title: "Deer Pattern",
+    description: "Mock editor project for UI validation.",
+    originalImagePath: null,
+    processedImagePath: null,
+    settings,
+    width: settings.outputWidth,
+    height: settings.outputHeight,
+    pixelSize: settings.pixelSize,
+    gridCellSize: settings.gridCellSize,
+    colorCount: 2,
+    createdAt: now,
+    updatedAt: now,
+    palettes: [
+      { name: "Black", hex: "#000000", locked: true, cellCount: 2200, sortOrder: 0 },
+      { name: "White", hex: "#ffffff", locked: false, cellCount: 19000, sortOrder: 1 },
+    ],
+    originalImageUrl: dataSvgUrl(MOCK_EDITOR_SVG),
+    processedImageUrl: null,
+  };
+}
 
 type DbProject = {
   id: string;

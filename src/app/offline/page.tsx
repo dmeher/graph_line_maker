@@ -10,7 +10,7 @@ export default function OfflinePage() {
         </div>
         <h1 className="mt-5 text-2xl font-semibold text-slate-950">You are offline</h1>
         <p className="mt-2 text-sm leading-6 text-slate-600">
-          Graph Pixel Maker needs a connection for saved projects, but installed assets are still available.
+          Opened projects can keep working from this browser session. New online data needs a connection.
         </p>
         <Link
           href="/dashboard"

@@ -128,6 +128,7 @@ export async function POST(request: NextRequest) {
       topPadding: 0,
       bottomPadding: 0,
       locked: false,
+      visible: true,
       rotationDegrees: 0 as const,
       flipX: false,
       flipY: false,

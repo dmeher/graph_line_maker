@@ -50,6 +50,7 @@ export type GraphSourceImage = {
   topPadding: number;
   bottomPadding: number;
   locked: boolean;
+  visible: boolean;
   rotationDegrees: GraphRotationDegrees;
   flipX: boolean;
   flipY: boolean;
@@ -70,12 +71,13 @@ export type GraphCellPaint = {
   fillColor: string;
   lineWidth: number;
   locked: boolean;
+  visible: boolean;
   rotationDegrees: GraphRotationDegrees;
   flipX: boolean;
   flipY: boolean;
 };
 
-export type GraphShapeKind = "square" | "rectangle" | "circle" | "oval" | "line" | "arrow";
+export type GraphShapeKind = "square" | "rectangle" | "circle" | "oval" | "half-circle" | "line" | "arrow";
 
 export type GraphShapeDrawing = {
   id: string;
@@ -88,7 +90,42 @@ export type GraphShapeDrawing = {
   strokeColor: string;
   fillColor: string;
   strokeWidth: number;
+  sides: GraphCellLineSide[];
   locked: boolean;
+  visible: boolean;
+  rotationDegrees: GraphRotationDegrees;
+  flipX: boolean;
+  flipY: boolean;
+};
+
+export type GraphClipartAsset = {
+  id: string;
+  name: string;
+  path: string | null;
+  url?: string | null;
+  dataUrl?: string | null;
+  mimeType: string;
+  width: number;
+  height: number;
+  createdAt: string;
+};
+
+export type GraphClipartImage = {
+  id: string;
+  name: string;
+  assetId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  strokeColor: string;
+  fillColor: string;
+  imageLineThickness: number;
+  sourceFillThreshold: number;
+  sourceFillMinStrokePixels: number;
+  strokeGapClosePixels: number;
+  locked: boolean;
+  visible: boolean;
   rotationDegrees: GraphRotationDegrees;
   flipX: boolean;
   flipY: boolean;
@@ -132,6 +169,8 @@ export type GraphSettings = {
   sourceImages: GraphSourceImage[];
   cellPaints: GraphCellPaint[];
   graphShapes: GraphShapeDrawing[];
+  clipartAssets: GraphClipartAsset[];
+  clipartImages: GraphClipartImage[];
   imagePadding: number;
   imageOffsetX: number;
   imageOffsetY: number;

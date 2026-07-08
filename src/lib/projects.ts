@@ -35,10 +35,14 @@ import {
   clampStrokeGapClosePixels,
 } from "@/lib/graph-paper";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
-import type { GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSummary } from "@/lib/types";
+import type { GraphClipartAsset, GraphClipartImage, GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSummary } from "@/lib/types";
 
 const MAX_CANVAS_DIMENSION = 24000;
 const MAX_SOURCE_IMAGES = 12;
+const MAX_CLIPART_ASSETS = 120;
+const MAX_CLIPART_IMAGES = 500;
+const CELL_LINE_SIDE_KEYS = ["top", "right", "bottom", "left"] as const;
+const MOCK_EDITOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900"><rect width="900" height="900" fill="white"/><path d="M431 95c-62 58-78 131-45 218m30-204c45 71 73 133 56 225m-73-150c-62-42-120-50-173-24 36 91 96 145 178 164m66-7c83-93 161-127 236-91-41 92-113 137-218 134M417 354c-14 111-14 227 0 348m46-348c18 116 22 229 10 341M260 716c-72-66-120-143-143-231 112 11 196 75 251 193m122 5c64-123 149-185 255-188-42 93-111 166-208 219M223 724h382l-33 95H249z" fill="none" stroke="#111" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 type StoredGraphSettings = Partial<GraphSettings> & {
   cellSizeInches?: number;
 };
@@ -74,7 +78,7 @@ export const defaultGraphSettings: GraphSettings = {
   showBorder: true,
   transparentBackground: false,
   showNumbers: true,
-  gridNumberPlacement: "inside",
+  gridNumberPlacement: "outside",
   showPageBreaks: true,
   majorGridEvery: 5,
   imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
@@ -82,6 +86,8 @@ export const defaultGraphSettings: GraphSettings = {
   sourceImages: [],
   cellPaints: [],
   graphShapes: [],
+  clipartAssets: [],
+  clipartImages: [],
   imagePadding: 0,
   imageOffsetX: 0,
   imageOffsetY: 0,
@@ -92,6 +98,88 @@ export const defaultGraphSettings: GraphSettings = {
   limitedColorMode: true,
   maxColors: 8,
 };
+
+function dataSvgUrl(svg: string) {
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+export function getMockEditorProject(): Project {
+  const now = new Date().toISOString();
+  const settings = normalizeGraphSettings({
+    ...defaultGraphSettings,
+    graphWidth: 150,
+    graphHeight: 150,
+    imageWidth: 118,
+    imageHeight: 126,
+    gridNumberPlacement: "outside",
+    sourceImages: [
+      {
+        id: "mock-deer",
+        name: "deer-line-art.png",
+        path: null,
+        url: dataSvgUrl(MOCK_EDITOR_SVG),
+        width: 118,
+        height: 126,
+        measurementUnit: "cm",
+        imageLineThickness: 3,
+        sourceFillThreshold: 0.58,
+        sourceFillMinStrokePixels: 7,
+        strokeGapClosePixels: 0,
+        x: 16,
+        y: 8,
+        topPadding: 0,
+        bottomPadding: 0,
+        locked: false,
+        visible: true,
+        rotationDegrees: 0,
+        flipX: false,
+        flipY: false,
+      },
+    ],
+    cellPaints: [
+      {
+        id: "ground",
+        name: "Ground",
+        x: 16,
+        y: 134,
+        width: 104,
+        height: 2,
+        sides: ["bottom"],
+        lineColor: "#111111",
+        fillColor: "transparent",
+        lineWidth: 3,
+        locked: false,
+        visible: true,
+        rotationDegrees: 0,
+        flipX: false,
+        flipY: false,
+      },
+    ],
+  });
+
+  return {
+    id: "mock-editor",
+    userId: "testing",
+    title: "Deer Pattern",
+    description: "Mock editor project for UI validation.",
+    originalImagePath: null,
+    processedImagePath: null,
+    settings,
+    width: settings.outputWidth,
+    height: settings.outputHeight,
+    pixelSize: settings.pixelSize,
+    gridCellSize: settings.gridCellSize,
+    colorCount: 2,
+    createdAt: now,
+    updatedAt: now,
+    palettes: [
+      { name: "Black", hex: "#000000", locked: true, cellCount: 2200, sortOrder: 0 },
+      { name: "White", hex: "#ffffff", locked: false, cellCount: 19000, sortOrder: 1 },
+    ],
+    originalImageUrl: dataSvgUrl(MOCK_EDITOR_SVG),
+    processedImageUrl: null,
+  };
+}
 
 type DbProject = {
   id: string;
@@ -185,7 +273,7 @@ function normalizeFillRegions(value: unknown) {
 }
 
 const GRAPH_CELL_LINE_SIDES = ["top", "right", "bottom", "left"] as const;
-const GRAPH_SHAPE_KINDS = ["square", "rectangle", "circle", "oval", "line", "arrow"] as const;
+const GRAPH_SHAPE_KINDS = ["square", "rectangle", "circle", "oval", "half-circle", "line", "arrow"] as const;
 
 function normalizeCellPaints(value: unknown) {
   if (!Array.isArray(value)) return [];
@@ -218,6 +306,7 @@ function normalizeCellPaints(value: unknown) {
           fillColor,
           lineWidth,
           locked: Boolean(record.locked),
+          visible: typeof record.visible === "boolean" ? record.visible : true,
           rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
           flipX: Boolean(record.flipX),
           flipY: Boolean(record.flipY),
@@ -242,6 +331,15 @@ function normalizeGraphShapes(value: unknown) {
       const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
       const strokeWidthValue = Number(record.strokeWidth);
       const strokeWidth = Math.max(1, Math.min(24, Number.isFinite(strokeWidthValue) ? Math.round(strokeWidthValue) : 3));
+      const rawSides = Array.isArray(record.sides) ? record.sides : [...CELL_LINE_SIDE_KEYS];
+      const sides = Array.from(
+        new Set(
+          rawSides.filter(
+            (side): side is (typeof CELL_LINE_SIDE_KEYS)[number] =>
+              typeof side === "string" && (CELL_LINE_SIDE_KEYS as readonly string[]).includes(side),
+          ),
+        ),
+      );
       return [
         {
           id: typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 80) : `shape-${index + 1}`,
@@ -254,7 +352,9 @@ function normalizeGraphShapes(value: unknown) {
           strokeColor,
           fillColor,
           strokeWidth,
+          sides: sides.length ? sides : [...CELL_LINE_SIDE_KEYS],
           locked: Boolean(record.locked),
+          visible: typeof record.visible === "boolean" ? record.visible : true,
           rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
           flipX: Boolean(record.flipX),
           flipY: Boolean(record.flipY),
@@ -262,6 +362,69 @@ function normalizeGraphShapes(value: unknown) {
       ];
     })
     .slice(0, 500);
+}
+
+function normalizeClipartAssets(value: unknown): GraphClipartAsset[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((asset, index) => {
+      if (!asset || typeof asset !== "object" || Array.isArray(asset)) return [];
+      const record = asset as Record<string, unknown>;
+      const id = typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 80) : `clipart-${index + 1}`;
+      const name = typeof record.name === "string" && record.name.trim() ? record.name.trim().slice(0, 160) : `Clipart ${index + 1}`;
+      const path = typeof record.path === "string" && record.path.trim() ? record.path.trim().slice(0, 1024) : null;
+      const url = typeof record.url === "string" && record.url.trim() ? record.url.trim().slice(0, 4096) : null;
+      const dataUrl = typeof record.dataUrl === "string" && record.dataUrl.startsWith("data:image/") ? record.dataUrl.slice(0, 1024 * 1024) : null;
+      const mimeType = typeof record.mimeType === "string" && record.mimeType.trim() ? record.mimeType.trim().slice(0, 100) : "image/png";
+      const rawWidth = Number(record.width);
+      const rawHeight = Number(record.height);
+      const width = Math.max(1, Math.min(12000, Number.isFinite(rawWidth) ? Math.round(rawWidth) : 1));
+      const height = Math.max(1, Math.min(12000, Number.isFinite(rawHeight) ? Math.round(rawHeight) : 1));
+      const createdAt = typeof record.createdAt === "string" && !Number.isNaN(Date.parse(record.createdAt)) ? record.createdAt : new Date(0).toISOString();
+
+      if (!path && !url && !dataUrl) return [];
+      return [{ id, name, path, url, dataUrl, mimeType, width, height, createdAt }];
+    })
+    .slice(0, MAX_CLIPART_ASSETS);
+}
+
+function normalizeClipartImages(
+  value: unknown,
+  defaults: Pick<GraphSettings, "imageLineThickness" | "sourceFillThreshold" | "sourceFillMinStrokePixels" | "strokeGapClosePixels">,
+): GraphClipartImage[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((image, index) => {
+      if (!image || typeof image !== "object" || Array.isArray(image)) return [];
+      const record = image as Record<string, unknown>;
+      const assetId = typeof record.assetId === "string" && record.assetId.trim() ? record.assetId.trim().slice(0, 80) : "";
+      if (!assetId) return [];
+      const strokeColor = isHexColor(record.strokeColor) ? record.strokeColor : DEFAULT_OUTLINE_COLOR;
+      const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
+      return [
+        {
+          id: typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 80) : `clipart-image-${index + 1}`,
+          name: typeof record.name === "string" && record.name.trim() ? record.name.trim().slice(0, 160) : `Clipart image ${index + 1}`,
+          assetId,
+          x: clampFreeCellCoordinate(record.x, 0),
+          y: clampFreeCellCoordinate(record.y, 0),
+          width: clampSourceSizeCells(record.width, 4),
+          height: clampSourceSizeCells(record.height, 4),
+          strokeColor,
+          fillColor,
+          imageLineThickness: clampImageLineThickness(record.imageLineThickness ?? defaults.imageLineThickness),
+          sourceFillThreshold: clampSourceFillThreshold(record.sourceFillThreshold ?? defaults.sourceFillThreshold),
+          sourceFillMinStrokePixels: clampSourceFillMinStrokePixels(record.sourceFillMinStrokePixels ?? defaults.sourceFillMinStrokePixels),
+          strokeGapClosePixels: clampStrokeGapClosePixels(record.strokeGapClosePixels ?? defaults.strokeGapClosePixels),
+          locked: Boolean(record.locked),
+          visible: typeof record.visible === "boolean" ? record.visible : true,
+          rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
+          flipX: Boolean(record.flipX),
+          flipY: Boolean(record.flipY),
+        },
+      ];
+    })
+    .slice(0, MAX_CLIPART_IMAGES);
 }
 
 function normalizeSourceImages(
@@ -296,6 +459,7 @@ function normalizeSourceImages(
       const y = clampFreeCellCoordinate(record.y, legacyY + topPadding);
       legacyY = y + height + bottomPadding;
       const locked = Boolean(record.locked);
+      const visible = typeof record.visible === "boolean" ? record.visible : true;
       const rotationDegrees = normalizeRotationDegrees(record.rotationDegrees);
       const flipX = Boolean(record.flipX);
       const flipY = Boolean(record.flipY);
@@ -317,6 +481,7 @@ function normalizeSourceImages(
           topPadding,
           bottomPadding,
           locked,
+          visible,
           rotationDegrees,
           flipX,
           flipY,
@@ -377,6 +542,13 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const sourceFillThreshold = clampSourceFillThreshold(cleanMerged.sourceFillThreshold);
   const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(cleanMerged.sourceFillMinStrokePixels);
   const strokeGapClosePixels = clampStrokeGapClosePixels(cleanMerged.strokeGapClosePixels);
+  const clipartAssets = normalizeClipartAssets(cleanMerged.clipartAssets);
+  const clipartImages = normalizeClipartImages(cleanMerged.clipartImages, {
+    imageLineThickness,
+    sourceFillThreshold,
+    sourceFillMinStrokePixels,
+    strokeGapClosePixels,
+  }).filter((image) => clipartAssets.some((asset) => asset.id === image.assetId));
   const gridLineColor = isHexColor(cleanMerged.gridLineColor) && cleanMerged.gridLineColor.toLowerCase() !== "#cbd5e1" ? cleanMerged.gridLineColor : DEFAULT_GRID_LINE_COLOR;
   const gridLineLayer = hasBrokenLegacyArtworkWidth
     ? DEFAULT_GRAPH_LINE_LAYER
@@ -384,7 +556,8 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
       ? cleanMerged.gridLineLayer
       : DEFAULT_GRAPH_LINE_LAYER;
   const showNumbers = typeof cleanMerged.showNumbers === "boolean" ? cleanMerged.showNumbers : true;
-  const gridNumberPlacement = cleanMerged.gridNumberPlacement === "outside" ? "outside" : "inside";
+  const gridNumberPlacement =
+    cleanMerged.gridNumberPlacement === "outside" ? "outside" : defaultGraphSettings.gridNumberPlacement;
   const showPageBreaks = typeof cleanMerged.showPageBreaks === "boolean" ? cleanMerged.showPageBreaks : true;
   void legacyCellSizeInches;
   const cellSizeCm = DEFAULT_CELL_SIZE_CM;
@@ -427,6 +600,8 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     fillRegions,
     cellPaints,
     graphShapes,
+    clipartAssets,
+    clipartImages,
     imageLineThickness,
     sourceFillThreshold,
     sourceFillMinStrokePixels,
@@ -473,6 +648,20 @@ async function signedSourceImages(
   );
 }
 
+async function signedClipartAssets(clipartAssets: GraphClipartAsset[], signedImageUrlMode: SignedImageUrlMode) {
+  if (signedImageUrlMode === "none") {
+    return clipartAssets.map(({ url: _url, dataUrl: _dataUrl, ...asset }) => ({ ...asset, url: null, dataUrl: null }));
+  }
+
+  return Promise.all(
+    clipartAssets.map(async ({ url: _url, dataUrl: _dataUrl, ...asset }) => ({
+      ...asset,
+      url: asset.path ? await signedImageUrl(ORIGINAL_IMAGES_BUCKET, asset.path) : null,
+      dataUrl: null,
+    })),
+  );
+}
+
 async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImageUrlMode: SignedImageUrlMode = "all"): Promise<Project> {
   const baseSettings = normalizeGraphSettings(row.settings);
   const [originalImageUrl, processedImageUrl] = await Promise.all([
@@ -498,6 +687,7 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
           topPadding: 0,
           bottomPadding: 0,
           locked: false,
+          visible: true,
           rotationDegrees: 0 as const,
           flipX: false,
           flipY: false,
@@ -510,9 +700,11 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
     row.original_image_path,
     originalImageUrl,
   );
+  const clipartAssets = await signedClipartAssets(baseSettings.clipartAssets ?? [], signedImageUrlMode);
   const settings = {
     ...baseSettings,
     sourceImages,
+    clipartAssets,
   };
 
   return {
@@ -657,6 +849,12 @@ export function sourceImagePath(userId: string, projectId: string, imageId: stri
   const safeImageId = imageId.toLowerCase().replace(/[^a-z0-9-]/g, "") || crypto.randomUUID();
   const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
   return `${userId}/${projectId}/sources/${safeImageId}.${safeExtension}`;
+}
+
+export function clipartImagePath(userId: string, projectId: string, clipartId: string, extension: string) {
+  const safeClipartId = clipartId.toLowerCase().replace(/[^a-z0-9-]/g, "") || crypto.randomUUID();
+  const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
+  return `${userId}/${projectId}/cliparts/${safeClipartId}.${safeExtension}`;
 }
 
 export async function replaceProjectPalettes(projectId: string, palettes: PaletteColor[]) {

@@ -1,6 +1,7 @@
 import { hexToRgb, rgbToHex } from "@/lib/canvas/color";
 import { createGridNumberLabels } from "@/lib/canvas/grid-numbering";
 import { maskFromImageData } from "@/lib/canvas/ink-mask";
+import { mergeLayerPixelMasks } from "@/lib/canvas/layer-mask-merge";
 import { isPdfSource, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
 import { createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
@@ -14,12 +15,18 @@ import {
 } from "@/lib/graph-paper";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 
-export type ProcessedGraph = {
-  canvas: HTMLCanvasElement;
+type CanvasLike = HTMLCanvasElement | OffscreenCanvas;
+type ProcessingContext2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+const CELL_LINE_SIDE_KEYS = ["top", "right", "bottom", "left"] as const;
+
+type ProcessedGraphFor<TCanvas extends CanvasLike> = {
+  canvas: TCanvas;
   palette: PaletteColor[];
   fillRegions: FillRegion[];
   fillRegionMap: Uint16Array;
 };
+
+export type ProcessedGraph = ProcessedGraphFor<HTMLCanvasElement>;
 
 export type FillRegion = {
   id: string;
@@ -44,12 +51,38 @@ export type FittedImageLayer = {
   settings: GraphSettings;
 };
 
+export type WorkerFittedImageLayer = {
+  canvas: OffscreenCanvas;
+  settings: GraphSettings;
+};
+
+type AnyFittedImageLayer = {
+  canvas: CanvasLike;
+  settings: GraphSettings;
+};
+
 type FillMaskLayer = {
   mask: Uint8Array;
   kind: FillRegionKind;
 };
 
-const contentBoundsCache = new WeakMap<HTMLCanvasElement, ContentBounds>();
+const contentBoundsCache = new WeakMap<CanvasLike, ContentBounds>();
+
+function createProcessingCanvas(width: number, height: number) {
+  const safeWidth = Math.max(1, Math.round(width));
+  const safeHeight = Math.max(1, Math.round(height));
+  if (typeof document !== "undefined") {
+    const canvas = document.createElement("canvas");
+    canvas.width = safeWidth;
+    canvas.height = safeHeight;
+    return canvas;
+  }
+  return new OffscreenCanvas(safeWidth, safeHeight);
+}
+
+function getProcessingContext(canvas: CanvasLike, options?: CanvasRenderingContext2DSettings) {
+  return canvas.getContext("2d", options) as ProcessingContext2D | null;
+}
 
 function graphDimensions(settings: GraphSettings) {
   const graphWidth = Math.max(1, Math.round(settings.graphWidth || 1));
@@ -121,15 +154,13 @@ export function resizeImage(canvas: HTMLCanvasElement, maxWidth: number, maxHeig
   return output;
 }
 
-function fitCanvas(canvas: HTMLCanvasElement, settings: GraphSettings) {
+function fitCanvas(canvas: CanvasLike, settings: GraphSettings) {
   const dimensions = graphDimensions(settings);
   const width = dimensions.outputWidth;
   const height = dimensions.outputHeight;
   const contentBounds = findContentBounds(canvas);
-  const output = document.createElement("canvas");
-  output.width = width;
-  output.height = height;
-  const context = output.getContext("2d", { willReadFrequently: true });
+  const output = createProcessingCanvas(width, height);
+  const context = getProcessingContext(output, { willReadFrequently: true });
   if (!context) throw new Error("Canvas is not available.");
   context.clearRect(0, 0, width, height);
   context.imageSmoothingEnabled = true;
@@ -153,11 +184,11 @@ function fitCanvas(canvas: HTMLCanvasElement, settings: GraphSettings) {
   return output;
 }
 
-export function findContentBounds(canvas: HTMLCanvasElement): ContentBounds {
+export function findContentBounds(canvas: CanvasLike): ContentBounds {
   const cached = contentBoundsCache.get(canvas);
   if (cached) return cached;
 
-  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const context = getProcessingContext(canvas, { willReadFrequently: true });
   if (!context) throw new Error("Canvas is not available.");
   const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
   const data = imageData.data;
@@ -230,6 +261,11 @@ function fillColorForRegion(settings: GraphSettings, regionId: string, kind: Fil
   return customColor && isFillColor(customColor) ? customColor : defaultFillColorForRegion(settings, kind);
 }
 
+function colorForRegion(settings: GraphSettings, region: FillRegion) {
+  const customColor = settings.fillRegions?.[region.id];
+  return customColor && isFillColor(customColor) ? customColor : region.color;
+}
+
 function labelFillRegions(fillLayers: FillMaskLayer[], width: number, height: number, settings: GraphSettings) {
   const fillRegionMap = new Uint16Array(width * height);
   const queue = new Int32Array(fillRegionMap.length);
@@ -300,10 +336,8 @@ function createMaskLayer(
   color: string,
   alpha = 255,
 ) {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const canvas = createProcessingCanvas(width, height);
+  const context = getProcessingContext(canvas, { willReadFrequently: true });
   if (!context) throw new Error("Canvas is not available.");
 
   const rgb = hexToRgb(color);
@@ -321,7 +355,7 @@ function createMaskLayer(
 }
 
 function drawFillRegions(
-  context: CanvasRenderingContext2D,
+  context: ProcessingContext2D,
   fillRegionMap: Uint16Array,
   regions: FillRegion[],
   width: number,
@@ -329,10 +363,8 @@ function drawFillRegions(
   settings: GraphSettings,
   blurRadius: number,
 ) {
-  const layer = document.createElement("canvas");
-  layer.width = width;
-  layer.height = height;
-  const layerContext = layer.getContext("2d", { willReadFrequently: true });
+  const layer = createProcessingCanvas(width, height);
+  const layerContext = getProcessingContext(layer, { willReadFrequently: true });
   if (!layerContext) throw new Error("Canvas is not available.");
 
   const colorCache = new Map<string, ReturnType<typeof hexToRgb>>();
@@ -346,7 +378,7 @@ function drawFillRegions(
 
     const region = regionByNumber.get(regionNumber);
     if (!region) continue;
-    const hex = fillColorForRegion(settings, region.id, region.kind);
+    const hex = colorForRegion(settings, region);
     if (isTransparentFillColor(hex)) continue;
     let rgb = colorCache.get(hex);
     if (!rgb) {
@@ -365,10 +397,8 @@ function drawFillRegions(
     return;
   }
 
-  const softened = document.createElement("canvas");
-  softened.width = width;
-  softened.height = height;
-  const softenedContext = softened.getContext("2d");
+  const softened = createProcessingCanvas(width, height);
+  const softenedContext = getProcessingContext(softened);
   if (!softenedContext) throw new Error("Canvas is not available.");
   softenedContext.filter = `blur(${blurRadius}px)`;
   softenedContext.drawImage(layer, 0, 0);
@@ -376,7 +406,7 @@ function drawFillRegions(
 }
 
 function drawMaskLayer(
-  context: CanvasRenderingContext2D,
+  context: ProcessingContext2D,
   mask: Uint8Array,
   width: number,
   height: number,
@@ -390,18 +420,45 @@ function drawMaskLayer(
     return;
   }
 
-  const softened = document.createElement("canvas");
-  softened.width = width;
-  softened.height = height;
-  const softenedContext = softened.getContext("2d");
+  const softened = createProcessingCanvas(width, height);
+  const softenedContext = getProcessingContext(softened);
   if (!softenedContext) throw new Error("Canvas is not available.");
   softenedContext.filter = `blur(${blurRadius}px)`;
   softenedContext.drawImage(layer, 0, 0);
   context.drawImage(softened, 0, 0);
 }
 
-function drawGraphPaperGrid(canvas: HTMLCanvasElement, settings: GraphSettings) {
-  const context = canvas.getContext("2d");
+function drawColoredMaskLayers(
+  context: ProcessingContext2D,
+  mask: Uint8Array,
+  colorMap: Uint16Array,
+  colorsByNumber: ReadonlyMap<number, string>,
+  width: number,
+  height: number,
+  fallbackColor: string,
+  alpha: number,
+  blurRadius: number,
+) {
+  const masksByColor = new Map<string, Uint8Array>();
+  for (let pixel = 0; pixel < mask.length; pixel += 1) {
+    const value = mask[pixel];
+    if (!value) continue;
+    const color = colorsByNumber.get(colorMap[pixel]) ?? fallbackColor;
+    let colorMask = masksByColor.get(color);
+    if (!colorMask) {
+      colorMask = new Uint8Array(mask.length);
+      masksByColor.set(color, colorMask);
+    }
+    colorMask[pixel] = value;
+  }
+
+  for (const [color, colorMask] of masksByColor) {
+    drawMaskLayer(context, colorMask, width, height, color, alpha, blurRadius);
+  }
+}
+
+function drawGraphPaperGrid(canvas: CanvasLike, settings: GraphSettings) {
+  const context = getProcessingContext(canvas);
   if (!context) throw new Error("Canvas is not available.");
 
   const dimensions = graphDimensions(settings);
@@ -446,9 +503,9 @@ function drawGraphPaperGrid(canvas: HTMLCanvasElement, settings: GraphSettings) 
   context.restore();
 }
 
-function drawGridNumbers(canvas: HTMLCanvasElement, settings: GraphSettings) {
+function drawGridNumbers(canvas: CanvasLike, settings: GraphSettings) {
   if (!settings.showNumbers || settings.gridNumberPlacement === "outside") return;
-  const context = canvas.getContext("2d");
+  const context = getProcessingContext(canvas);
   if (!context) throw new Error("Canvas is not available.");
   const ctx = context;
 
@@ -482,8 +539,8 @@ function drawGridNumbers(canvas: HTMLCanvasElement, settings: GraphSettings) {
   ctx.restore();
 }
 
-function drawManualGraphArtwork(canvas: HTMLCanvasElement, settings: GraphSettings) {
-  const context = canvas.getContext("2d");
+function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
+  const context = getProcessingContext(canvas);
   if (!context) throw new Error("Canvas is not available.");
   const cellWidth = GRAPH_MAJOR_CELL_PIXELS;
   const cellHeight = GRAPH_MAJOR_CELL_PIXELS;
@@ -493,6 +550,7 @@ function drawManualGraphArtwork(canvas: HTMLCanvasElement, settings: GraphSettin
   context.lineCap = "round";
 
   for (const paint of settings.cellPaints ?? []) {
+    if (paint.visible === false) continue;
     const left = paint.x * cellWidth;
     const top = paint.y * cellHeight;
     const width = Math.max(1, paint.width * cellWidth);
@@ -537,6 +595,7 @@ function drawManualGraphArtwork(canvas: HTMLCanvasElement, settings: GraphSettin
   }
 
   for (const shape of settings.graphShapes ?? []) {
+    if (shape.visible === false) continue;
     const x = shape.x * cellWidth;
     const y = shape.y * cellHeight;
     const width = shape.width * cellWidth;
@@ -582,20 +641,49 @@ function drawManualGraphArtwork(canvas: HTMLCanvasElement, settings: GraphSettin
 
     if (shape.kind === "circle" || shape.kind === "oval") {
       context.ellipse(centerX, centerY, drawWidth / 2, drawHeight / 2, 0, 0, Math.PI * 2);
+      if (!isTransparentFillColor(shape.fillColor)) context.fill();
+      context.stroke();
+    } else if (shape.kind === "half-circle") {
+      context.moveTo(left, top + drawHeight);
+      context.ellipse(centerX, top + drawHeight, drawWidth / 2, drawHeight, 0, Math.PI, Math.PI * 2);
+      context.lineTo(left, top + drawHeight);
+      context.closePath();
+      if (!isTransparentFillColor(shape.fillColor)) context.fill();
+      context.stroke();
     } else {
       context.rect(left, top, drawWidth, drawHeight);
+      if (!isTransparentFillColor(shape.fillColor)) context.fill();
+      const sides = isTransparentFillColor(shape.fillColor) ? (shape.sides?.length ? shape.sides : CELL_LINE_SIDE_KEYS) : CELL_LINE_SIDE_KEYS;
+      if (sides.length) {
+        context.beginPath();
+        if (sides.includes("top")) {
+          context.moveTo(left, top);
+          context.lineTo(left + drawWidth, top);
+        }
+        if (sides.includes("right")) {
+          context.moveTo(left + drawWidth, top);
+          context.lineTo(left + drawWidth, top + drawHeight);
+        }
+        if (sides.includes("bottom")) {
+          context.moveTo(left + drawWidth, top + drawHeight);
+          context.lineTo(left, top + drawHeight);
+        }
+        if (sides.includes("left")) {
+          context.moveTo(left, top + drawHeight);
+          context.lineTo(left, top);
+        }
+        context.stroke();
+      }
     }
-    if (!isTransparentFillColor(shape.fillColor)) context.fill();
-    context.stroke();
     context.restore();
   }
 
   context.restore();
 }
 
-export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSettings, options: { sourceIsFitted?: boolean } = {}) {
+function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, options: { sourceIsFitted?: boolean } = {}) {
   const fitted = options.sourceIsFitted ? sourceCanvas : fitCanvas(sourceCanvas, settings);
-  const fittedContext = fitted.getContext("2d", { willReadFrequently: true });
+  const fittedContext = getProcessingContext(fitted, { willReadFrequently: true });
   if (!fittedContext) throw new Error("Canvas is not available.");
 
   const sourceData = fittedContext.getImageData(0, 0, fitted.width, fitted.height);
@@ -610,10 +698,8 @@ export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSe
     settings,
   );
 
-  const output = document.createElement("canvas");
-  output.width = fitted.width;
-  output.height = fitted.height;
-  const outputContext = output.getContext("2d", { willReadFrequently: true });
+  const output = createProcessingCanvas(fitted.width, fitted.height);
+  const outputContext = getProcessingContext(output, { willReadFrequently: true });
   if (!outputContext) throw new Error("Canvas is not available.");
 
   outputContext.fillStyle = settings.backgroundColor || "#ffffff";
@@ -652,40 +738,54 @@ export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSe
   };
 }
 
-export function pixelateLayeredImages(layers: FittedImageLayer[], settings: GraphSettings) {
+export function pixelateImage(sourceCanvas: HTMLCanvasElement, settings: GraphSettings, options: { sourceIsFitted?: boolean } = {}) {
+  return pixelateCanvas(sourceCanvas, settings, options) as ProcessedGraph;
+}
+
+export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings: GraphSettings) {
   const dimensions = graphDimensions(settings);
   const width = dimensions.outputWidth;
   const height = dimensions.outputHeight;
-  const output = document.createElement("canvas");
-  output.width = width;
-  output.height = height;
-  const outputContext = output.getContext("2d", { willReadFrequently: true });
+  const output = createProcessingCanvas(width, height);
+  const outputContext = getProcessingContext(output, { willReadFrequently: true });
   if (!outputContext) throw new Error("Canvas is not available.");
 
   const fillRegionMap = new Uint16Array(width * height);
   const outlineMask = new Uint8Array(width * height);
+  const outlineColorMap = new Uint16Array(width * height);
+  const outlineColorNumbers = new Map<string, number>();
+  const outlineColorsByNumber = new Map<number, string>();
   const regions: FillRegion[] = [];
   let nextRegionId = 0;
   let maxLineThickness = 0;
+
+  function outlineColorNumber(color: string) {
+    const normalized = rgbToHex(hexToRgb(color));
+    const existing = outlineColorNumbers.get(normalized);
+    if (existing) return existing;
+    const next = outlineColorNumbers.size + 1;
+    outlineColorNumbers.set(normalized, next);
+    outlineColorsByNumber.set(next, normalized);
+    return next;
+  }
 
   for (const layer of layers) {
     const fitted =
       layer.canvas.width === width && layer.canvas.height === height
         ? layer.canvas
         : (() => {
-            const canvas = document.createElement("canvas");
-            canvas.width = width;
-            canvas.height = height;
-            const context = canvas.getContext("2d", { willReadFrequently: true });
+            const canvas = createProcessingCanvas(width, height);
+            const context = getProcessingContext(canvas, { willReadFrequently: true });
             if (!context) throw new Error("Canvas is not available.");
             context.drawImage(layer.canvas, 0, 0, width, height);
             return canvas;
           })();
-    const fittedContext = fitted.getContext("2d", { willReadFrequently: true });
+    const fittedContext = getProcessingContext(fitted, { willReadFrequently: true });
     if (!fittedContext) throw new Error("Canvas is not available.");
 
     const sourceData = fittedContext.getImageData(0, 0, width, height);
     const { enclosedFillMask, outlineMask: layerOutlineMask, sourceFillMask } = buildArtworkMasks(sourceData, layer.settings);
+    const layerOutlineColorNumber = outlineColorNumber(layer.settings.outlineColor || layer.settings.lineColor || settings.outlineColor || settings.lineColor);
     const local = labelFillRegions(
       [
         { mask: sourceFillMask, kind: "source" },
@@ -705,20 +805,11 @@ export function pixelateLayeredImages(layers: FittedImageLayer[], settings: Grap
       regions.push({
         ...region,
         id: globalId,
-        color: fillColorForRegion(settings, globalId, region.kind),
+        color: fillColorForRegion(layer.settings, region.id, region.kind),
       });
     }
 
-    for (let pixel = 0; pixel < local.fillRegionMap.length; pixel += 1) {
-      const localRegionNumber = local.fillRegionMap[pixel];
-      if (!localRegionNumber) continue;
-      const globalRegionNumber = regionNumberMap.get(localRegionNumber);
-      if (globalRegionNumber) fillRegionMap[pixel] = globalRegionNumber;
-    }
-
-    for (let pixel = 0; pixel < layerOutlineMask.length; pixel += 1) {
-      if (layerOutlineMask[pixel]) outlineMask[pixel] = 1;
-    }
+    mergeLayerPixelMasks(fillRegionMap, outlineMask, local.fillRegionMap, layerOutlineMask, regionNumberMap, outlineColorMap, layerOutlineColorNumber);
     maxLineThickness = Math.max(maxLineThickness, clampImageLineThickness(layer.settings.imageLineThickness));
   }
 
@@ -731,7 +822,7 @@ export function pixelateLayeredImages(layers: FittedImageLayer[], settings: Grap
     .map((region) => ({
       ...region,
       cellCount: visibleCounts.get(region.id) ?? 0,
-      color: fillColorForRegion(settings, region.id, region.kind),
+      color: colorForRegion(settings, region),
     }))
     .filter((region) => region.cellCount > 0);
 
@@ -739,19 +830,27 @@ export function pixelateLayeredImages(layers: FittedImageLayer[], settings: Grap
   outputContext.fillRect(0, 0, output.width, output.height);
   if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
   drawFillRegions(outputContext, fillRegionMap, visibleRegions, output.width, output.height, settings, 0.8);
-  drawMaskLayer(outputContext, outlineMask, output.width, output.height, settings.outlineColor || settings.lineColor, 255, 0.12 * maxLineThickness);
+  drawColoredMaskLayers(outputContext, outlineMask, outlineColorMap, outlineColorsByNumber, output.width, output.height, settings.outlineColor || settings.lineColor, 255, 0.12 * maxLineThickness);
   if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
   drawManualGraphArtwork(output, settings);
   drawGridNumbers(output, settings);
 
-  const outlineHex = rgbToHex(hexToRgb(settings.outlineColor || settings.lineColor));
-  const outlineCount = outlineMask.reduce((sum, value) => sum + value, 0);
+  const outlineCountsByColor = new Map<string, number>();
+  for (let pixel = 0; pixel < outlineMask.length; pixel += 1) {
+    const value = outlineMask[pixel];
+    if (!value) continue;
+    const color = outlineColorsByNumber.get(outlineColorMap[pixel]) ?? rgbToHex(hexToRgb(settings.outlineColor || settings.lineColor));
+    outlineCountsByColor.set(color, (outlineCountsByColor.get(color) ?? 0) + value);
+  }
+  if (!outlineCountsByColor.size) {
+    outlineCountsByColor.set(rgbToHex(hexToRgb(settings.outlineColor || settings.lineColor)), 0);
+  }
   const fillCountsByColor = new Map<string, number>();
   const visibleRegionById = new Map(visibleRegions.map((region) => [region.id, region] as const));
   for (const [regionId, cellCount] of visibleCounts) {
     const region = visibleRegionById.get(regionId);
     if (!region) continue;
-    const color = fillColorForRegion(settings, region.id, region.kind);
+    const color = colorForRegion(settings, region);
     if (isTransparentFillColor(color)) continue;
     const hex = rgbToHex(hexToRgb(color));
     fillCountsByColor.set(hex, (fillCountsByColor.get(hex) ?? 0) + cellCount);
@@ -760,18 +859,28 @@ export function pixelateLayeredImages(layers: FittedImageLayer[], settings: Grap
   return {
     canvas: output,
     palette: [
-      { name: "Outline", hex: outlineHex, locked: true, cellCount: outlineCount, sortOrder: 0 },
+      ...Array.from(outlineCountsByColor.entries()).map(([hex, cellCount], index) => ({
+        name: index === 0 ? "Outline" : `Outline ${index + 1}`,
+        hex,
+        locked: true,
+        cellCount,
+        sortOrder: index,
+      })),
       ...Array.from(fillCountsByColor.entries()).map(([hex, cellCount], index) => ({
         name: index === 0 ? "Fill" : `Fill ${index + 1}`,
         hex,
         locked: true,
         cellCount,
-        sortOrder: index + 1,
+        sortOrder: outlineCountsByColor.size + index,
       })),
     ],
     fillRegions: visibleRegions,
     fillRegionMap,
   };
+}
+
+export function pixelateLayeredImages(layers: FittedImageLayer[], settings: GraphSettings) {
+  return pixelateLayeredCanvases(layers, settings) as ProcessedGraph;
 }
 
 export function generateGridOverlay(canvas: HTMLCanvasElement, settings: GraphSettings) {
@@ -785,8 +894,4 @@ export async function pixelateImageWithWorker(
   options: { sourceIsFitted?: boolean } = {},
 ) {
   return pixelateImage(sourceCanvas, settings, options);
-}
-
-export async function pixelateLayeredImagesWithWorker(layers: FittedImageLayer[], settings: GraphSettings) {
-  return pixelateLayeredImages(layers, settings);
 }

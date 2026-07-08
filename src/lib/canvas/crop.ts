@@ -79,6 +79,63 @@ export async function cropImageUrlToFile(imageUrl: string, crop: CropPixels, fil
   return canvasToFile(canvas, fileName, type);
 }
 
+function normalizeRightAngleRotation(rotationDegrees = 0) {
+  return ((Math.round(rotationDegrees / 90) * 90) % 360 + 360) % 360;
+}
+
+export async function transformImageUrlToFile({
+  imageUrl,
+  crop,
+  rotationDegrees = 0,
+  fileName,
+  type = "image/png",
+}: {
+  imageUrl: string;
+  crop?: CropPixels | null;
+  rotationDegrees?: number;
+  fileName: string;
+  type?: string;
+}) {
+  const image = await loadImage(imageUrl);
+  const naturalWidth = image.naturalWidth || image.width;
+  const naturalHeight = image.naturalHeight || image.height;
+  const cropPixels = crop ? normalizeCrop(crop, naturalWidth, naturalHeight) : fullCrop(naturalWidth, naturalHeight);
+  const rotation = normalizeRightAngleRotation(rotationDegrees);
+  const rotatedSideways = rotation === 90 || rotation === 270;
+  const canvas = document.createElement("canvas");
+  canvas.width = rotatedSideways ? cropPixels.height : cropPixels.width;
+  canvas.height = rotatedSideways ? cropPixels.width : cropPixels.height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas is not available.");
+
+  context.save();
+  if (rotation === 90) {
+    context.translate(canvas.width, 0);
+    context.rotate(Math.PI / 2);
+  } else if (rotation === 180) {
+    context.translate(canvas.width, canvas.height);
+    context.rotate(Math.PI);
+  } else if (rotation === 270) {
+    context.translate(0, canvas.height);
+    context.rotate((Math.PI * 3) / 2);
+  }
+
+  context.drawImage(
+    image,
+    cropPixels.x,
+    cropPixels.y,
+    cropPixels.width,
+    cropPixels.height,
+    0,
+    0,
+    cropPixels.width,
+    cropPixels.height,
+  );
+  context.restore();
+
+  return canvasToFile(canvas, fileName, type);
+}
+
 export async function cropCanvasToFile(canvas: HTMLCanvasElement, crop: CropPixels, fileName: string, type = "image/png") {
   const cropPixels = normalizeCrop(crop, canvas.width, canvas.height);
   const output = document.createElement("canvas");

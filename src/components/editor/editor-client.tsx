@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition, memo, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   ArrowDown,
@@ -20,19 +22,28 @@ import {
   ImageIcon,
   FlipHorizontal,
   FlipVertical,
+  Grid3X3,
+  Hand,
   Lock,
   Loader2,
   Maximize2,
+  Menu,
+  MousePointer2,
+  MoreVertical,
   Pipette,
+  Plus,
   Printer,
   RefreshCw,
+  Redo2,
   RotateCcw,
   RotateCw,
   Save,
   Settings2,
   Trash2,
   Unlock,
+  Undo2,
   Upload,
+  Search,
   X,
   ZoomIn,
   ZoomOut,
@@ -42,13 +53,30 @@ import {
   PanelRightOpen,
 } from "lucide-react";
 import { saveProjectState } from "@/app/(app)/projects/actions";
-import { ManualCropper } from "@/components/projects/manual-cropper";
+import { LogoMark } from "@/components/layout/brand-mark";
 import { cropCanvasToFile, fullCrop, type CropPixels } from "@/lib/canvas/crop";
-import { exportCanvasAsPDF, exportCanvasAsPNG, exportSettingsAsJSON, printCanvas } from "@/lib/canvas/exports";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
-import { findContentBounds, loadImageToCanvas, pixelateLayeredImagesWithWorker, resizeImage, type FillRegion } from "@/lib/canvas/processor";
+import { pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
+import { findContentBounds, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
 import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
-import { ROTATION_STEP_DEGREES, sourceLayouts, snapCellToGrid, sourceProcessingCacheKey, stackEndCell, normalizeRotationDegrees, type SourceLayout } from "@/lib/editor/source-layout";
+import {
+  createEditorSessionDraft,
+  hasEditorSessionDraft,
+  readEditorSessionDraft,
+  removeEditorSessionDraft,
+  writeEditorSessionDraft,
+} from "@/lib/editor/session-draft";
+import {
+  ROTATION_STEP_DEGREES,
+  normalizeRotationDegrees,
+  reorderSourceImages,
+  sourceLayouts,
+  sourceProcessingCacheKey,
+  sourceRenderOrder,
+  snapCellToGrid,
+  stackEndCell,
+  type SourceLayout,
+} from "@/lib/editor/source-layout";
 import {
   DEFAULT_CELL_SIZE_CM,
   DEFAULT_GRAPH_LINE_LAYER,
@@ -97,15 +125,38 @@ import {
   isPrintVerticalAlignment,
   isTransparentFillColor,
 } from "@/lib/graph-paper";
-import type { GraphCellLineSide, GraphCellPaint, GraphSettings, GraphShapeDrawing, GraphShapeKind, GraphSourceImage, PaletteColor, Project } from "@/lib/types";
+import type { GraphCellLineSide, GraphCellPaint, GraphClipartAsset, GraphClipartImage, GraphSettings, GraphShapeDrawing, GraphShapeKind, GraphSourceImage, PaletteColor, Project } from "@/lib/types";
+import { createDebouncedAction } from "@/lib/utils/debounce";
 import { bytesToSize } from "@/lib/utils/format";
+import { InspectorCheckbox, InspectorColorControl, InspectorGroup, InspectorRow, InspectorSelect, inspectorControlClass } from "./inspector-controls";
 
 type MobileTab = "source" | "canvas" | "controls";
+type InspectorTab = "graph" | "source" | "draw" | "palette";
+type DrawTab = "shape" | "clipart";
 type Notice = { tone: "ok" | "error" | "info"; text: string };
 type CollapsibleKey = "parameters" | "drawing" | "outline" | "fill" | "selectedFill" | "graphLines";
 type FloatingPalette = { regionId: string; x: number; y: number } | null;
 type DrawingTool = "image" | "cell" | "shape";
-type DrawingLayerKey = `cell:${string}` | `shape:${string}`;
+type CanvasTool = "pointer" | "hand";
+type DrawingLayerKey = `cell:${string}` | `shape:${string}` | `clipart:${string}`;
+type GeneratedShapeKind = Extract<GraphShapeKind, "square" | "rectangle" | "circle" | "oval" | "half-circle">;
+type ShapeFillMode = "outline" | "filled";
+type LayerChoice = {
+  key: string;
+  type: "source" | "shape" | "clipart";
+  id: string;
+  name: string;
+  detail: string;
+};
+type LayerChooser = {
+  x: number;
+  y: number;
+  choices: LayerChoice[];
+} | null;
+type LayerHit =
+  | (LayerChoice & { type: "source"; layout: SourceLayout })
+  | (LayerChoice & { type: "shape"; shape: GraphShapeDrawing })
+  | (LayerChoice & { type: "clipart"; clipart: GraphClipartImage });
 type SourceStatus = {
   ready: boolean;
   previewUrl: string | null;
@@ -123,8 +174,13 @@ type PanelResizeState = {
 };
 const SOURCE_RESIZE_HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
 type SourceResizeHandle = (typeof SOURCE_RESIZE_HANDLES)[number];
+const GENERATED_SHAPE_KIND_KEYS: GeneratedShapeKind[] = ["square", "rectangle", "circle", "oval", "half-circle"];
+const GENERATED_SHAPE_FILL_MODE_LABELS: Record<ShapeFillMode, string> = {
+  outline: "Outline",
+  filled: "Filled",
+};
 type DragState = {
-  kind: "viewport" | "source" | "resize-source" | "cell-paint" | "shape-draw";
+  kind: "viewport" | "pan" | "source" | "shape" | "clipart" | "resize-source" | "resize-shape" | "cell-paint" | "shape-draw";
   pointerId: number;
   startClientX: number;
   startClientY: number;
@@ -140,6 +196,8 @@ type DragState = {
   resizeCorner?: SourceResizeHandle;
   startScrollLeft?: number;
   startScrollTop?: number;
+  startPanX?: number;
+  startPanY?: number;
   canvasWidth: number;
   canvasHeight: number;
   rectWidth: number;
@@ -149,6 +207,13 @@ type DragState = {
   startGraphX?: number;
   startGraphY?: number;
   shapeId?: string;
+  startShapeX?: number;
+  startShapeY?: number;
+  startShapeWidth?: number;
+  startShapeHeight?: number;
+  clipartId?: string;
+  startClipartX?: number;
+  startClipartY?: number;
 };
 type UploadedSourceImage = {
   id: string;
@@ -159,13 +224,43 @@ type SourceImagesUploadResponse = {
   images?: unknown;
   message?: unknown;
 };
+type UploadedClipartAsset = {
+  id: string;
+  name: string;
+  path: string;
+  url?: string | null;
+  mimeType: string;
+  createdAt: string;
+};
+type ClipartUploadResponse = {
+  assets?: unknown;
+  message?: unknown;
+};
+type CopiedLayer =
+  | { type: "source"; source: GraphSourceImage }
+  | { type: "cell"; cell: GraphCellPaint }
+  | { type: "shape"; shape: GraphShapeDrawing }
+  | { type: "clipart"; clipart: GraphClipartImage };
+
+const ManualCropper = dynamic(() => import("@/components/projects/manual-cropper").then((module) => module.ManualCropper), {
+  ssr: false,
+  loading: () => (
+    <div className="grid h-full min-h-64 place-items-center text-sm font-semibold text-slate-500">
+      Preparing crop
+    </div>
+  ),
+});
 
 const MAX_CANVAS_DIMENSION = 24000;
 const MAX_SETTINGS_HISTORY = 80;
 const MIN_SIDE_PANEL_WIDTH = 280;
 const MAX_SIDE_PANEL_WIDTH = 560;
+const PREVIEW_PROCESSING_DEBOUNCE_MS = 250;
+const COPY_OFFSET_CELLS = 0.5;
+const CLIPART_ACCEPT = "image/png,image/jpeg,image/webp,image/svg+xml,.svg";
+const MAX_CLIPART_UPLOAD_BYTES = 6 * 1024 * 1024;
 const CELL_LINE_SIDE_KEYS: GraphCellLineSide[] = ["top", "right", "bottom", "left"];
-const GRAPH_SHAPE_KIND_KEYS: GraphShapeKind[] = ["square", "rectangle", "circle", "oval", "line", "arrow"];
+const GRAPH_SHAPE_KIND_KEYS: GraphShapeKind[] = ["square", "rectangle", "circle", "oval", "half-circle", "line", "arrow"];
 const CELL_LINE_SIDE_LABELS: Record<GraphCellLineSide, string> = {
   top: "Top",
   right: "Right",
@@ -177,6 +272,7 @@ const GRAPH_SHAPE_KIND_LABELS: Record<GraphShapeKind, string> = {
   rectangle: "Rectangle",
   circle: "Circle",
   oval: "Oval",
+  "half-circle": "Half circle",
   line: "Line",
   arrow: "Arrow",
 };
@@ -228,14 +324,70 @@ function canvasToBlob(canvas: HTMLCanvasElement) {
   });
 }
 
+function logProcessingTiming(label: string, startedAt: number) {
+  if (process.env.NODE_ENV !== "development") return;
+  const durationMs = performance.now() - startedAt;
+  console.info(`[graph-pixel] ${label}: ${durationMs.toFixed(1)}ms`);
+}
+
+function buildProcessingSignature(settings: GraphSettings) {
+  return [
+    settings.graphWidth,
+    settings.graphHeight,
+    settings.imageWidth,
+    settings.imageHeight,
+    settings.imageOffsetX ?? 0,
+    settings.imageOffsetY ?? 0,
+    settings.sourceImages
+      .map(
+        (source) =>
+          `${source.id}:${source.x}:${source.y}:${source.width}:${source.height}:${source.topPadding}:${source.bottomPadding}:${source.rotationDegrees}:${source.flipX}:${source.flipY}:${source.locked}:${source.visible}:${source.imageLineThickness}:${source.sourceFillThreshold}:${source.sourceFillMinStrokePixels}:${source.strokeGapClosePixels}`,
+      )
+      .join("|"),
+    settings.cellPaints.map((paint) => `${paint.id}:${paint.x}:${paint.y}:${paint.width}:${paint.height}:${paint.sides.join(",")}:${paint.lineColor}:${paint.fillColor}:${paint.lineWidth}:${paint.rotationDegrees}:${paint.flipX}:${paint.flipY}:${paint.visible}`).join("|"),
+    settings.graphShapes.map((shape) => `${shape.id}:${shape.kind}:${shape.x}:${shape.y}:${shape.width}:${shape.height}:${shape.strokeColor}:${shape.fillColor}:${shape.strokeWidth}:${shape.sides.join(",")}:${shape.rotationDegrees}:${shape.flipX}:${shape.flipY}:${shape.visible}`).join("|"),
+    settings.clipartAssets.map((asset) => `${asset.id}:${asset.path ?? ""}:${asset.url ?? ""}:${asset.dataUrl ?? ""}`).join("|"),
+    settings.clipartImages.map((clipart) => `${clipart.id}:${clipart.assetId}:${clipart.x}:${clipart.y}:${clipart.width}:${clipart.height}:${clipart.strokeColor}:${clipart.fillColor}:${clipart.imageLineThickness}:${clipart.sourceFillThreshold}:${clipart.sourceFillMinStrokePixels}:${clipart.strokeGapClosePixels}:${clipart.rotationDegrees}:${clipart.flipX}:${clipart.flipY}:${clipart.visible}`).join("|"),
+  ].join("|");
+}
+
 function isUploadedSourceImage(value: unknown): value is UploadedSourceImage {
   if (!value || typeof value !== "object") return false;
   const image = value as Record<string, unknown>;
   return typeof image.id === "string" && typeof image.name === "string" && typeof image.path === "string";
 }
 
+function isUploadedClipartAsset(value: unknown): value is UploadedClipartAsset {
+  if (!value || typeof value !== "object") return false;
+  const asset = value as Record<string, unknown>;
+  return (
+    typeof asset.id === "string" &&
+    typeof asset.name === "string" &&
+    typeof asset.path === "string" &&
+    typeof asset.mimeType === "string" &&
+    typeof asset.createdAt === "string"
+  );
+}
+
 async function canvasToObjectUrl(canvas: HTMLCanvasElement) {
   return URL.createObjectURL(await canvasToBlob(canvas));
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item: T, index: number) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+
+  async function runNext() {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, runNext));
+  return results;
 }
 
 function clampImageOffset(value: number) {
@@ -342,6 +494,7 @@ function normalizeSourceImagesForEditor(
       const y = clampFreeCellCoordinate(source.y, legacyY + topPadding);
       legacyY = y + height + bottomPadding;
       const locked = Boolean(source.locked);
+      const visible = typeof source.visible === "boolean" ? source.visible : true;
       const rotationDegrees = normalizeRotationDegrees(source.rotationDegrees);
       const flipX = Boolean(source.flipX);
       const flipY = Boolean(source.flipY);
@@ -363,6 +516,7 @@ function normalizeSourceImagesForEditor(
           topPadding,
           bottomPadding,
           locked,
+          visible,
           rotationDegrees,
           flipX,
           flipY,
@@ -403,6 +557,7 @@ function normalizeCellPaints(value: GraphSettings["cellPaints"] | undefined): Gr
         fillColor,
         lineWidth,
         locked: Boolean(paint.locked),
+        visible: typeof paint.visible === "boolean" ? paint.visible : true,
         rotationDegrees: normalizeRotationDegrees(paint.rotationDegrees),
         flipX: Boolean(paint.flipX),
         flipY: Boolean(paint.flipY),
@@ -417,6 +572,7 @@ function normalizeGraphShapes(value: GraphSettings["graphShapes"] | undefined): 
     .flatMap((shape, index) => {
       if (!shape || typeof shape !== "object") return [];
       const kind = GRAPH_SHAPE_KIND_KEYS.includes(shape.kind as GraphShapeKind) ? shape.kind : "rectangle";
+      const sides = Array.from(new Set((Array.isArray(shape.sides) ? shape.sides : CELL_LINE_SIDE_KEYS).filter((side): side is GraphCellLineSide => CELL_LINE_SIDE_KEYS.includes(side as GraphCellLineSide))));
       return [
         {
           id: shape.id || `shape-${index + 1}`,
@@ -429,7 +585,9 @@ function normalizeGraphShapes(value: GraphSettings["graphShapes"] | undefined): 
           strokeColor: isHexColor(shape.strokeColor) ? shape.strokeColor : DEFAULT_OUTLINE_COLOR,
           fillColor: isFillColor(shape.fillColor) ? shape.fillColor : TRANSPARENT_FILL_COLOR,
           strokeWidth: Math.max(1, Math.min(24, Math.round(Number(shape.strokeWidth) || 3))),
+          sides: sides.length ? sides : [...CELL_LINE_SIDE_KEYS],
           locked: Boolean(shape.locked),
+          visible: typeof shape.visible === "boolean" ? shape.visible : true,
           rotationDegrees: normalizeRotationDegrees(shape.rotationDegrees),
           flipX: Boolean(shape.flipX),
           flipY: Boolean(shape.flipY),
@@ -439,7 +597,71 @@ function normalizeGraphShapes(value: GraphSettings["graphShapes"] | undefined): 
     .slice(0, 500);
 }
 
-function NumberField({
+function normalizeClipartAssetsForEditor(value: GraphSettings["clipartAssets"] | undefined): GraphSettings["clipartAssets"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((asset, index) => {
+      if (!asset || typeof asset !== "object") return [];
+      const id = typeof asset.id === "string" && asset.id.trim() ? asset.id.trim() : `clipart-${index + 1}`;
+      const path = typeof asset.path === "string" && asset.path.trim() ? asset.path : null;
+      const url = typeof asset.url === "string" && asset.url.trim() ? asset.url : null;
+      const dataUrl = typeof asset.dataUrl === "string" && asset.dataUrl.startsWith("data:image/") ? asset.dataUrl : null;
+      if (!path && !url && !dataUrl) return [];
+      return [
+        {
+          id,
+          name: typeof asset.name === "string" && asset.name.trim() ? asset.name.trim() : `Clipart ${index + 1}`,
+          path,
+          url,
+          dataUrl,
+          mimeType: typeof asset.mimeType === "string" && asset.mimeType.trim() ? asset.mimeType.trim() : "image/png",
+          width: Math.max(1, Math.round(Number(asset.width) || 1)),
+          height: Math.max(1, Math.round(Number(asset.height) || 1)),
+          createdAt: typeof asset.createdAt === "string" && !Number.isNaN(Date.parse(asset.createdAt)) ? asset.createdAt : new Date().toISOString(),
+        },
+      ];
+    })
+    .slice(0, 120);
+}
+
+function normalizeClipartImagesForEditor(
+  value: GraphSettings["clipartImages"] | undefined,
+  assetIds: Set<string>,
+  defaults: Pick<GraphSettings, "imageLineThickness" | "sourceFillThreshold" | "sourceFillMinStrokePixels" | "strokeGapClosePixels">,
+): GraphSettings["clipartImages"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .flatMap((clipart, index) => {
+      if (!clipart || typeof clipart !== "object") return [];
+      const assetId = typeof clipart.assetId === "string" && clipart.assetId.trim() ? clipart.assetId.trim() : "";
+      if (!assetId || !assetIds.has(assetId)) return [];
+      return [
+        {
+          id: clipart.id || `clipart-image-${index + 1}`,
+          name: clipart.name || `Clipart image ${index + 1}`,
+          assetId,
+          x: clampFreeCellCoordinate(clipart.x, 0),
+          y: clampFreeCellCoordinate(clipart.y, 0),
+          width: clampSourceSizeCells(clipart.width, 4),
+          height: clampSourceSizeCells(clipart.height, 4),
+          strokeColor: isHexColor(clipart.strokeColor) ? clipart.strokeColor : DEFAULT_OUTLINE_COLOR,
+          fillColor: isFillColor(clipart.fillColor) ? clipart.fillColor : TRANSPARENT_FILL_COLOR,
+          imageLineThickness: clampImageLineThickness(clipart.imageLineThickness ?? defaults.imageLineThickness),
+          sourceFillThreshold: clampSourceFillThreshold(clipart.sourceFillThreshold ?? defaults.sourceFillThreshold),
+          sourceFillMinStrokePixels: clampSourceFillMinStrokePixels(clipart.sourceFillMinStrokePixels ?? defaults.sourceFillMinStrokePixels),
+          strokeGapClosePixels: clampStrokeGapClosePixels(clipart.strokeGapClosePixels ?? defaults.strokeGapClosePixels),
+          locked: Boolean(clipart.locked),
+          visible: typeof clipart.visible === "boolean" ? clipart.visible : true,
+          rotationDegrees: normalizeRotationDegrees(clipart.rotationDegrees),
+          flipX: Boolean(clipart.flipX),
+          flipY: Boolean(clipart.flipY),
+        },
+      ];
+    })
+    .slice(0, 500);
+}
+
+const NumberField = memo(function NumberField({
   label,
   value,
   min,
@@ -448,6 +670,9 @@ function NumberField({
   allowDecimalInput = false,
   wholeStep = false,
   disabled = false,
+  hideLabel = false,
+  wrapperClassName,
+  inputClassName,
   onChange,
 }: {
   label: string;
@@ -458,14 +683,17 @@ function NumberField({
   allowDecimalInput?: boolean;
   wholeStep?: boolean;
   disabled?: boolean;
+  hideLabel?: boolean;
+  wrapperClassName?: string;
+  inputClassName?: string;
   onChange: (value: number) => void;
 }) {
   const [draftValue, setDraftValue] = useState(() => String(value));
   const [isFocused, setIsFocused] = useState(false);
 
   useEffect(() => {
-    if (!isFocused) setDraftValue(String(value));
-  }, [isFocused, value]);
+    setDraftValue(String(value));
+  }, [value]);
 
   function parseDraft(nextValue: string) {
     const trimmed = nextValue.trim();
@@ -502,8 +730,8 @@ function NumberField({
   }
 
   return (
-    <label className="grid min-w-0 gap-1.5">
-      <span className="text-xs font-semibold text-slate-500">{label}</span>
+    <label className={wrapperClassName ?? "grid min-w-0 gap-1.5"}>
+      <span className={hideLabel ? "sr-only" : "text-xs font-semibold text-slate-500"}>{label}</span>
       <input
         type="number"
         inputMode={allowDecimalInput || step < 1 ? "decimal" : "numeric"}
@@ -525,13 +753,13 @@ function NumberField({
           if (normalized !== parsed) setDraftValue(String(normalized));
           onChange(normalized);
         }}
-        className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-400"
+        className={inputClassName ?? "h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-400"}
       />
     </label>
   );
-}
+});
 
-function ColorPresetField({
+const ColorPresetField = memo(function ColorPresetField({
   label,
   value,
   onChange,
@@ -544,50 +772,67 @@ function ColorPresetField({
   colors?: typeof PRESET_GRAPH_COLORS;
   allowTransparent?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
   const colorPickerValue = isHexColor(value) ? value : "#ffffff";
   const transparentSelected = isTransparentFillColor(value);
 
   return (
-    <div className="grid min-w-0 gap-2">
-      <span className="text-xs font-semibold text-slate-500">{label}</span>
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(1.75rem,1fr))] gap-1.5">
-        {colors.map((color) => {
-          const selected = color.hex.toLowerCase() === value.toLowerCase();
-          return (
-            <button
-              key={`${label}-${color.hex}`}
-              type="button"
-              onClick={() => onChange(color.hex)}
-              className={`h-7 rounded-sm border ${selected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
-              style={{ backgroundColor: color.hex }}
-              title={color.name}
-              aria-label={`${label}: ${color.name}`}
+    <div className="min-w-0 rounded-md border border-[#d7dde5] bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex h-10 w-full min-w-0 items-center justify-between gap-2 px-2.5 text-left"
+        aria-expanded={open}
+      >
+        <span className="min-w-0 truncate text-xs font-semibold text-slate-500">{label}</span>
+        <span className="ml-auto inline-flex min-w-0 items-center gap-2">
+          <ColorSummary value={value} />
+          <span className="max-w-24 truncate font-mono text-[11px] font-semibold text-[#475467]">{transparentSelected ? "Transparent" : value.toUpperCase()}</span>
+          {open ? <ChevronDown size={14} className="shrink-0 text-[#667085]" aria-hidden="true" /> : <ChevronRight size={14} className="shrink-0 text-[#667085]" aria-hidden="true" />}
+        </span>
+      </button>
+      {open ? (
+        <div className="grid min-w-0 gap-2 border-t border-[#e8edf2] p-2">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(1.75rem,1fr))] gap-1.5">
+            {colors.map((color) => {
+              const selected = color.hex.toLowerCase() === value.toLowerCase();
+              return (
+                <button
+                  key={`${label}-${color.hex}`}
+                  type="button"
+                  onClick={() => onChange(color.hex)}
+                  className={`h-7 rounded-sm border ${selected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
+                  style={{ backgroundColor: color.hex }}
+                  title={color.name}
+                  aria-label={`${label}: ${color.name}`}
+                />
+              );
+            })}
+            {allowTransparent ? (
+              <button
+                type="button"
+                onClick={() => onChange(TRANSPARENT_FILL_COLOR)}
+                className={`h-7 rounded-sm border bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:10px_10px] bg-[position:0_0,0_5px,5px_-5px,-5px_0] ${transparentSelected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
+                title="Transparent"
+                aria-label={`${label}: Transparent`}
+              />
+            ) : null}
+          </div>
+          <label className="flex h-10 items-center gap-2 rounded-md border border-[var(--line)] bg-white px-2 text-sm font-semibold text-slate-600">
+            <input
+              type="color"
+              value={colorPickerValue}
+              onChange={(event) => onChange(event.target.value)}
+              className="h-7 w-9 cursor-pointer rounded border border-slate-200 bg-white p-0"
+              aria-label={`${label}: custom color`}
             />
-          );
-        })}
-        {allowTransparent ? (
-          <button
-            type="button"
-            onClick={() => onChange(TRANSPARENT_FILL_COLOR)}
-            className={`h-7 rounded-sm border bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:10px_10px] bg-[position:0_0,0_5px,5px_-5px,-5px_0] ${transparentSelected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
-            title="Transparent"
-            aria-label={`${label}: Transparent`}
-          />
-        ) : null}
-      </div>
-      <label className="flex h-10 items-center gap-2 rounded-md border border-[var(--line)] bg-white px-2 text-sm font-semibold text-slate-600">
-        <input
-          type="color"
-          value={colorPickerValue}
-          onChange={(event) => onChange(event.target.value)}
-          className="h-7 w-9 cursor-pointer rounded border border-slate-200 bg-white p-0"
-          aria-label={`${label}: custom color`}
-        />
-        <span>Custom</span>
-      </label>
+            <span>Custom</span>
+          </label>
+        </div>
+      ) : null}
     </div>
   );
-}
+});
 
 function CollapsibleSection({
   title,
@@ -595,15 +840,17 @@ function CollapsibleSection({
   open,
   onToggle,
   children,
+  className = "",
 }: {
   title: string;
   summary?: ReactNode;
   open: boolean;
   onToggle: () => void;
   children: ReactNode;
+  className?: string;
 }) {
   return (
-    <section className="border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0">
+    <section className={`border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0 ${className}`}>
       <button
         type="button"
         onClick={onToggle}
@@ -633,6 +880,116 @@ function ColorSummary({ value }: { value: string }) {
       style={transparent ? undefined : { backgroundColor: value }}
       aria-hidden="true"
     />
+  );
+}
+
+const ShapePreviewSvg = memo(function ShapePreviewSvg({
+  kind,
+  sides,
+  fillColor,
+  strokeColor,
+  strokeWidth,
+  widthCells,
+  heightCells,
+  className = "h-full w-full",
+}: {
+  kind: GraphShapeKind;
+  sides: GraphCellLineSide[];
+  fillColor: string;
+  strokeColor: string;
+  strokeWidth: number;
+  widthCells?: number;
+  heightCells?: number;
+  className?: string;
+}) {
+  const rectLike = kind === "square" || kind === "rectangle";
+  const circleLike = kind === "circle" || kind === "oval";
+  const halfCircleLike = kind === "half-circle";
+  const normalizedSides = isTransparentFillColor(fillColor) ? (sides.length ? sides : CELL_LINE_SIDE_KEYS) : CELL_LINE_SIDE_KEYS;
+  const stroke = isHexColor(strokeColor) ? strokeColor : DEFAULT_OUTLINE_COLOR;
+  const fill = isTransparentFillColor(fillColor) ? "none" : fillColor;
+  const previewStrokeWidth = Math.max(2, Math.min(10, strokeWidth * 1.5));
+  const rawWidth = Math.max(0.01, Number(widthCells) || (kind === "square" || kind === "circle" ? 1 : 1.65));
+  const rawHeight = kind === "square" || kind === "circle" ? rawWidth : Math.max(0.01, Number(heightCells) || 1);
+  const maxPreviewWidth = 92;
+  const maxPreviewHeight = 62;
+  const scale = Math.min(maxPreviewWidth / rawWidth, maxPreviewHeight / rawHeight);
+  const width = Math.max(8, rawWidth * scale);
+  const height = Math.max(8, rawHeight * scale);
+  const left = 60 - width / 2;
+  const top = 45 - height / 2;
+  const right = left + width;
+  const bottom = top + height;
+
+  return (
+    <svg viewBox="0 0 120 90" className={className} role="img" aria-label={GRAPH_SHAPE_KIND_LABELS[kind] ?? "Shape preview"}>
+      <rect x="1" y="1" width="118" height="88" rx="5" fill="#ffffff" stroke="#e8edf2" />
+      {circleLike ? (
+        <ellipse
+          cx={left + width / 2}
+          cy={top + height / 2}
+          rx={width / 2}
+          ry={height / 2}
+          fill={fill}
+          stroke={stroke}
+          strokeWidth={previewStrokeWidth}
+        />
+      ) : halfCircleLike ? (
+        <path
+          d={`M ${left} ${bottom} A ${width / 2} ${height} 0 0 1 ${right} ${bottom} L ${left} ${bottom} Z`}
+          fill={fill}
+          stroke={stroke}
+          strokeWidth={previewStrokeWidth}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      ) : rectLike ? (
+        <>
+          <rect x={left} y={top} width={width} height={height} fill={fill} stroke="none" />
+          {normalizedSides.includes("top") ? <line x1={left} y1={top} x2={right} y2={top} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
+          {normalizedSides.includes("right") ? <line x1={right} y1={top} x2={right} y2={bottom} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
+          {normalizedSides.includes("bottom") ? <line x1={right} y1={bottom} x2={left} y2={bottom} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
+          {normalizedSides.includes("left") ? <line x1={left} y1={bottom} x2={left} y2={top} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
+        </>
+      ) : (
+        <line x1="18" y1="68" x2="102" y2="22" stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" />
+      )}
+    </svg>
+  );
+});
+
+function paperSizeOptionLabel(key: GraphSettings["printPaperSize"]) {
+  const paper = PRINT_PAPER_SIZES[key] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
+  return `${paper.label} (${Math.round(paper.widthCm * 10)} x ${Math.round(paper.heightCm * 10)} mm)`;
+}
+
+function InspectorSegmented({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: readonly { value: string; label: string; icon?: ReactNode }[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="grid rounded-md border border-[#d7dde5] bg-[#f8fafc] p-0.5" style={{ gridTemplateColumns: `repeat(${Math.max(1, options.length)}, minmax(0, 1fr))` }} role="group" aria-label={label}>
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => onChange(option.value)}
+          className={`inline-flex h-8 min-w-0 items-center justify-center gap-1 rounded text-[12px] font-semibold ${
+            option.value === value ? "bg-[#008c8f] text-white shadow-sm" : "text-[#475467] hover:bg-white"
+          }`}
+        >
+          {option.icon}
+          <span className="truncate">{option.label}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -693,7 +1050,7 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const gridLineColor = isHexColor(settings.gridLineColor) && settings.gridLineColor.toLowerCase() !== "#cbd5e1" ? settings.gridLineColor : DEFAULT_GRID_LINE_COLOR;
   const gridLineLayer = isGraphLineLayer(settings.gridLineLayer) ? settings.gridLineLayer : DEFAULT_GRAPH_LINE_LAYER;
   const showNumbers = typeof settings.showNumbers === "boolean" ? settings.showNumbers : true;
-  const gridNumberPlacement = settings.gridNumberPlacement === "outside" ? "outside" : "inside";
+  const gridNumberPlacement = settings.gridNumberPlacement === "inside" ? "inside" : "outside";
   const showPageBreaks = typeof settings.showPageBreaks === "boolean" ? settings.showPageBreaks : true;
   const cellSizeCm = DEFAULT_CELL_SIZE_CM;
   const measurementUnit = isMeasurementUnit(settings.measurementUnit) ? settings.measurementUnit : "in";
@@ -720,6 +1077,13 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const fillRegions = normalizeFillRegions(settings.fillRegions);
   const cellPaints = normalizeCellPaints(settings.cellPaints);
   const graphShapes = normalizeGraphShapes(settings.graphShapes);
+  const clipartAssets = normalizeClipartAssetsForEditor(settings.clipartAssets);
+  const clipartImages = normalizeClipartImagesForEditor(settings.clipartImages, new Set(clipartAssets.map((asset) => asset.id)), {
+    imageLineThickness,
+    sourceFillThreshold,
+    sourceFillMinStrokePixels,
+    strokeGapClosePixels,
+  });
 
   return {
     ...settings,
@@ -743,6 +1107,8 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
     fillRegions,
     cellPaints,
     graphShapes,
+    clipartAssets,
+    clipartImages,
     imageLineThickness,
     sourceFillThreshold,
     sourceFillMinStrokePixels,
@@ -782,6 +1148,8 @@ function editorDefaultGraphSettings(current: GraphSettings): GraphSettings {
     fillRegions: {},
     cellPaints: [],
     graphShapes: [],
+    clipartAssets: [],
+    clipartImages: [],
     imageLineThickness: DEFAULT_IMAGE_LINE_THICKNESS,
     sourceFillThreshold: DEFAULT_SOURCE_FILL_THRESHOLD,
     sourceFillMinStrokePixels: DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
@@ -789,7 +1157,7 @@ function editorDefaultGraphSettings(current: GraphSettings): GraphSettings {
     gridLineColor: DEFAULT_GRID_LINE_COLOR,
     gridLineLayer: DEFAULT_GRAPH_LINE_LAYER,
     showNumbers: true,
-    gridNumberPlacement: "inside",
+    gridNumberPlacement: "outside",
     showPageBreaks: true,
     imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
     imageHeight: DEFAULT_IMAGE_HEIGHT_CELLS,
@@ -850,6 +1218,7 @@ function initialEditorSettings(project: Project) {
         topPadding: 0,
         bottomPadding: 0,
         locked: false,
+        visible: true,
         rotationDegrees: 0 as const,
         flipX: false,
         flipY: false,
@@ -870,10 +1239,26 @@ function sourceSettings(settings: GraphSettings, source: GraphSourceImage) {
   });
 }
 
-function composeSourceLayerCanvas(
-  layout: SourceLayout,
-  sourceCanvases: Map<string, HTMLCanvasElement>,
+function clipartSettings(settings: GraphSettings, clipart: GraphClipartImage) {
+  return deriveGraphSettings({
+    ...settings,
+    outlineColor: clipart.strokeColor,
+    lineColor: clipart.strokeColor,
+    fillColor: clipart.fillColor,
+    imageLineThickness: clipart.imageLineThickness,
+    sourceFillThreshold: clipart.sourceFillThreshold,
+    sourceFillMinStrokePixels: clipart.sourceFillMinStrokePixels,
+    strokeGapClosePixels: clipart.strokeGapClosePixels,
+    imageWidth: settings.graphWidth,
+    imageHeight: settings.graphHeight,
+  });
+}
+
+function composePlacedImageLayerCanvas(
+  placement: Pick<GraphSourceImage, "id" | "x" | "y" | "width" | "height" | "rotationDegrees" | "flipX" | "flipY">,
+  sourceCanvas: HTMLCanvasElement | null | undefined,
   settings: GraphSettings,
+  offset: { x?: number; y?: number } = {},
 ) {
   const output = document.createElement("canvas");
   output.width = Math.max(1, Math.round(settings.graphWidth * GRAPH_MAJOR_CELL_PIXELS));
@@ -886,15 +1271,14 @@ function composeSourceLayerCanvas(
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
 
-  const sourceCanvas = sourceCanvases.get(layout.source.id);
   if (!sourceCanvas) return output;
 
   const bounds = findContentBounds(sourceCanvas);
-  const drawX = Math.round(layout.x * GRAPH_MAJOR_CELL_PIXELS + settings.imageOffsetX);
-  const drawY = Math.round(layout.y * GRAPH_MAJOR_CELL_PIXELS + settings.imageOffsetY);
-  const drawWidth = Math.round(layout.width * GRAPH_MAJOR_CELL_PIXELS);
-  const drawHeight = Math.round(layout.height * GRAPH_MAJOR_CELL_PIXELS);
-  const rotation = normalizeRotationDegrees(layout.source.rotationDegrees);
+  const drawX = Math.round(placement.x * GRAPH_MAJOR_CELL_PIXELS + (offset.x ?? 0));
+  const drawY = Math.round(placement.y * GRAPH_MAJOR_CELL_PIXELS + (offset.y ?? 0));
+  const drawWidth = Math.round(placement.width * GRAPH_MAJOR_CELL_PIXELS);
+  const drawHeight = Math.round(placement.height * GRAPH_MAJOR_CELL_PIXELS);
+  const rotation = normalizeRotationDegrees(placement.rotationDegrees);
   const rotatedSideways = rotation === 90 || rotation === 270;
   const fittedWidth = rotatedSideways ? drawHeight : drawWidth;
   const fittedHeight = rotatedSideways ? drawWidth : drawHeight;
@@ -902,7 +1286,7 @@ function composeSourceLayerCanvas(
   context.save();
   context.translate(drawX + drawWidth / 2, drawY + drawHeight / 2);
   context.rotate((rotation * Math.PI) / 180);
-  context.scale(layout.source.flipX ? -1 : 1, layout.source.flipY ? -1 : 1);
+  context.scale(placement.flipX ? -1 : 1, placement.flipY ? -1 : 1);
   context.drawImage(
     sourceCanvas,
     bounds.x,
@@ -919,12 +1303,46 @@ function composeSourceLayerCanvas(
   return output;
 }
 
+function composeSourceLayerCanvas(
+  layout: SourceLayout,
+  sourceCanvases: Map<string, HTMLCanvasElement>,
+  settings: GraphSettings,
+) {
+  return composePlacedImageLayerCanvas(
+    {
+      id: layout.source.id,
+      x: layout.x,
+      y: layout.y,
+      width: layout.width,
+      height: layout.height,
+      rotationDegrees: layout.source.rotationDegrees,
+      flipX: layout.source.flipX,
+      flipY: layout.source.flipY,
+    },
+    sourceCanvases.get(layout.source.id),
+    settings,
+    { x: settings.imageOffsetX, y: settings.imageOffsetY },
+  );
+}
+
+function composeClipartLayerCanvas(
+  clipart: GraphClipartImage,
+  clipartCanvases: Map<string, HTMLCanvasElement>,
+  settings: GraphSettings,
+) {
+  return composePlacedImageLayerCanvas(clipart, clipartCanvases.get(clipart.assetId), settings);
+}
+
 export function EditorClient({ project }: { project: Project }) {
   const [title, setTitle] = useState(project.title);
   const [description, setDescription] = useState(project.description ?? "");
   const [settings, setSettings] = useState<GraphSettings>(() => initialEditorSettings(project));
   const [palette, setPalette] = useState<PaletteColor[]>(project.palettes);
+  const [draftChecked, setDraftChecked] = useState(false);
+  const [hasSessionDraft, setHasSessionDraft] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
   const [sourceReady, setSourceReady] = useState(false);
+  const [clipartReady, setClipartReady] = useState(true);
   const [sourceStatus, setSourceStatus] = useState<Record<string, SourceStatus>>({});
   const [sourceCropMode, setSourceCropMode] = useState(false);
   const [sourceCropArea, setSourceCropArea] = useState<CropPixels | null>(null);
@@ -938,14 +1356,34 @@ export function EditorClient({ project }: { project: Project }) {
   const [isDraggingGraph, setIsDraggingGraph] = useState(false);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [selectedDrawingLayerId, setSelectedDrawingLayerId] = useState<DrawingLayerKey | null>(null);
-  const [expandedSourceIds, setExpandedSourceIds] = useState<Record<string, boolean>>({});
-  const [expandedDrawingLayerIds, setExpandedDrawingLayerIds] = useState<Record<string, boolean>>({});
   const [previewCanvasSize, setPreviewCanvasSize] = useState({ width: 1, height: 1 });
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("image");
+  const [canvasTool, setCanvasTool] = useState<CanvasTool>("pointer");
+  const [canvasPan, setCanvasPan] = useState({ x: 0, y: 0 });
+  const [renderKey, setRenderKey] = useState(0);
   const [cellPaintSides, setCellPaintSides] = useState<GraphCellLineSide[]>(CELL_LINE_SIDE_KEYS);
   const [cellPaintFillEnabled, setCellPaintFillEnabled] = useState(false);
   const [cellPaintLineEnabled, setCellPaintLineEnabled] = useState(true);
   const [shapeKind, setShapeKind] = useState<GraphShapeKind>("rectangle");
+  const [draftShapeKind, setDraftShapeKind] = useState<GeneratedShapeKind>("rectangle");
+  const [draftShapeWidthCm, setDraftShapeWidthCm] = useState(4);
+  const [draftShapeHeightCm, setDraftShapeHeightCm] = useState(3);
+  const [draftShapeFillMode, setDraftShapeFillMode] = useState<ShapeFillMode>("outline");
+  const [draftShapeSides, setDraftShapeSides] = useState<GraphCellLineSide[]>(CELL_LINE_SIDE_KEYS);
+  const [draftShapeStrokeWidth, setDraftShapeStrokeWidth] = useState(3);
+  const [draftShapeStrokeColor, setDraftShapeStrokeColor] = useState(DEFAULT_OUTLINE_COLOR);
+  const [draftShapeFillColor, setDraftShapeFillColor] = useState("#ccfbf1");
+  const [placingGeneratedShape, setPlacingGeneratedShape] = useState(false);
+  const [selectedClipartAssetId, setSelectedClipartAssetId] = useState<string | null>(null);
+  const [placingClipartAssetId, setPlacingClipartAssetId] = useState<string | null>(null);
+  const [uploadingCliparts, setUploadingCliparts] = useState(false);
+  const [draftClipartWidthCm, setDraftClipartWidthCm] = useState(4);
+  const [draftClipartHeightCm, setDraftClipartHeightCm] = useState(4);
+  const [draftClipartStrokeWidth, setDraftClipartStrokeWidth] = useState(3);
+  const [draftClipartStrokeColor, setDraftClipartStrokeColor] = useState(DEFAULT_OUTLINE_COLOR);
+  const [draftClipartFillColor, setDraftClipartFillColor] = useState(TRANSPARENT_FILL_COLOR);
+  const [generatedImagesCollapsed, setGeneratedImagesCollapsed] = useState(true);
+  const [layerChooser, setLayerChooser] = useState<LayerChooser>(null);
   const [canvasViewportGuide, setCanvasViewportGuide] = useState({ left: 0, top: 0, width: 1, height: 1 });
   const [leftPanelWidth, setLeftPanelWidth] = useState(320);
   const [rightPanelWidth, setRightPanelWidth] = useState(360);
@@ -953,6 +1391,7 @@ export function EditorClient({ project }: { project: Project }) {
   const [uploadingSources, setUploadingSources] = useState(false);
   const [replacingSourceId, setReplacingSourceId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
+  const [sourcesSectionCollapsed, setSourcesSectionCollapsed] = useState(true);
   const [sourcePanelCollapsed, setSourcePanelCollapsed] = useState(false);
   const [settingsPanelCollapsed, setSettingsPanelCollapsed] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Record<CollapsibleKey, boolean>>({
@@ -965,11 +1404,24 @@ export function EditorClient({ project }: { project: Project }) {
   });
   const [floatingPalette, setFloatingPalette] = useState<FloatingPalette>(null);
   const [copiedFillColor, setCopiedFillColor] = useState<string | null>(null);
+  const [copiedLayer, setCopiedLayer] = useState<CopiedLayer | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("canvas");
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>("graph");
+  const [drawTab, setDrawTab] = useState<DrawTab>("shape");
   const [isPending, startTransition] = useTransition();
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [exportMenuStyle, setExportMenuStyle] = useState<CSSProperties | null>(null);
+  const [clipartSearch, setClipartSearch] = useState("");
+  const [deletingClipartAssetId, setDeletingClipartAssetId] = useState<string | null>(null);
+  const openMainMenu = useCallback(() => {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(new Event("graph-pixel-editor-menu"));
+  }, []);
   const settingsRef = useRef(settings);
+  const processingDebounceRef = useRef<{ run: (...args: unknown[]) => void; cancel: () => void } | null>(null);
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const sourceCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  const clipartCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const processedCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const overviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -978,27 +1430,159 @@ export function EditorClient({ project }: { project: Project }) {
   const uploadedSourceObjectUrlsRef = useRef<string[]>([]);
   const sourcePreviewObjectUrlsRef = useRef<Map<string, string>>(new Map());
   const sourceLayerCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  const clipartLayerCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const dragStateRef = useRef<DragState | null>(null);
   const panelResizeStateRef = useRef<PanelResizeState | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const exportMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const exportMenuPortalRef = useRef<HTMLDivElement | null>(null);
+  const noticeDismissTimerRef = useRef<number | NodeJS.Timeout | null>(null);
   const fillRegionMapRef = useRef<Uint16Array | null>(null);
   const settingsHistoryRef = useRef<SettingsHistory>({ undo: [], redo: [] });
+  const lastProcessedSignatureRef = useRef<string | null>(null);
   const spacePressedRef = useRef(false);
+
+  useEffect(() => {
+    const baseSettings = initialEditorSettings(project);
+    const draft = readEditorSessionDraft(project.id, project.updatedAt, baseSettings);
+    if (draft) {
+      const nextSettings = deriveGraphSettings(draft.settings);
+      settingsRef.current = nextSettings;
+      setTitle(draft.title);
+      setDescription(draft.description);
+      setSettings(nextSettings);
+      setPalette(draft.palette);
+      setHasSessionDraft(true);
+      setNotice({ tone: "info", text: "Restored an offline draft from this browser session. Press Save while online to sync it." });
+    } else {
+      setHasSessionDraft(hasEditorSessionDraft(project.id));
+    }
+    setDraftChecked(true);
+  }, [project]);
+
+  useEffect(() => {
+    function syncOnlineState() {
+      const nextOnline = typeof navigator === "undefined" ? true : navigator.onLine;
+      setIsOnline(nextOnline);
+      if (!nextOnline) {
+        setNotice({ tone: "info", text: "You are offline. Save will store a draft in this browser session." });
+        return;
+      }
+      if (readEditorSessionDraft(project.id, project.updatedAt, initialEditorSettings(project))) {
+        setHasSessionDraft(true);
+        setNotice({ tone: "info", text: "Back online. Press Save to sync the session draft to the database." });
+      }
+    }
+
+    syncOnlineState();
+    window.addEventListener("online", syncOnlineState);
+    window.addEventListener("offline", syncOnlineState);
+    return () => {
+      window.removeEventListener("online", syncOnlineState);
+      window.removeEventListener("offline", syncOnlineState);
+    };
+  }, [project]);
+
+  useEffect(() => {
+    if (!isExportMenuOpen) return;
+
+    function closeMenu(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      const menuRoot = exportMenuRef.current;
+      const portalRoot = exportMenuPortalRef.current;
+      if (menuRoot?.contains(target) || (portalRoot && portalRoot.contains(target))) return;
+
+      setIsExportMenuOpen(false);
+    }
+
+    window.addEventListener("pointerdown", closeMenu, { capture: true });
+    return () => window.removeEventListener("pointerdown", closeMenu, { capture: true });
+  }, [isExportMenuOpen]);
+
+  useEffect(() => {
+    if (!isExportMenuOpen) {
+      setExportMenuStyle(null);
+      return;
+    }
+
+    const buttonElement = exportMenuButtonRef.current;
+    if (!buttonElement) return;
+
+    const updateMenuStyle = () => {
+      const rect = buttonElement.getBoundingClientRect();
+      const minimumWidth = 152;
+      const menuWidth = Math.max(minimumWidth, Math.ceil(rect.width));
+      const maxLeft = Math.max(8, window.innerWidth - menuWidth - 8);
+      const left = Math.max(8, Math.min(rect.right - menuWidth, maxLeft));
+      setExportMenuStyle({
+        position: "fixed",
+        left: `${left}px`,
+        top: `${rect.bottom + 6}px`,
+        minWidth: `${menuWidth}px`,
+      });
+    };
+
+    updateMenuStyle();
+    window.addEventListener("scroll", updateMenuStyle, true);
+    window.addEventListener("resize", updateMenuStyle);
+    return () => {
+      window.removeEventListener("scroll", updateMenuStyle, true);
+      window.removeEventListener("resize", updateMenuStyle);
+    };
+  }, [isExportMenuOpen]);
+
+  useEffect(() => {
+    if (!notice) {
+      if (noticeDismissTimerRef.current) {
+        window.clearTimeout(noticeDismissTimerRef.current);
+        noticeDismissTimerRef.current = null;
+      }
+      return;
+    }
+
+    if (noticeDismissTimerRef.current) {
+      window.clearTimeout(noticeDismissTimerRef.current);
+      noticeDismissTimerRef.current = null;
+    }
+
+    const timer = window.setTimeout(() => {
+      setNotice(null);
+    }, 5000);
+    noticeDismissTimerRef.current = timer;
+
+    return () => {
+      window.clearTimeout(timer);
+      if (noticeDismissTimerRef.current === timer) noticeDismissTimerRef.current = null;
+    };
+  }, [notice]);
 
   const filename = useMemo(() => slug(title), [title]);
   const primarySource = settings.sourceImages[0] ?? null;
   const sourceName = primarySource?.name ?? "Source image";
   const sourcePreviewUrl = primarySource ? sourceStatus[primarySource.id]?.previewUrl ?? primarySource.url ?? null : null;
   const selectedSource = selectedSourceId ? settings.sourceImages.find((source) => source.id === selectedSourceId) ?? null : null;
+  const cropSource = selectedSource ?? primarySource;
+  const cropSourcePreviewUrl = cropSource ? sourceStatus[cropSource.id]?.previewUrl ?? cropSource.url ?? null : null;
   const selectedSourceLayout = selectedSourceId ? sourceLayouts(settings.sourceImages).find((layout) => layout.source.id === selectedSourceId) ?? null : null;
   const sourceLoadKey = useMemo(
     () => settings.sourceImages.map((source) => `${source.id}:${source.name}:${source.url ?? source.path ?? ""}`).join("|"),
     [settings.sourceImages],
+  );
+  const clipartLoadKey = useMemo(
+    () => settings.clipartAssets.map((asset) => `${asset.id}:${asset.name}:${asset.url ?? asset.dataUrl ?? asset.path ?? ""}`).join("|"),
+    [settings.clipartAssets],
+  );
+  const selectedClipartAsset = useMemo(
+    () => settings.clipartAssets.find((asset) => asset.id === selectedClipartAssetId) ?? settings.clipartAssets[0] ?? null,
+    [selectedClipartAssetId, settings.clipartAssets],
   );
   const selectedFillRegion = useMemo(
     () => fillRegions.find((region) => region.id === selectedFillRegionId) ?? null,
     [fillRegions, selectedFillRegionId],
   );
   const fillRegionsById = useMemo(() => new Map(fillRegions.map((region) => [region.id, region] as const)), [fillRegions]);
+  const isPaletteSectionExpanded = !collapsedSections.outline || !collapsedSections.fill || !collapsedSections.graphLines || (!!selectedFillRegion && !collapsedSections.selectedFill);
   const pushUndoSettings = useCallback((snapshot: GraphSettings) => {
     const history = settingsHistoryRef.current;
     const previous = history.undo.at(-1);
@@ -1126,6 +1710,49 @@ export function EditorClient({ project }: { project: Project }) {
     return roundMeasure(source.width * settings.cellSizeCm);
   }
 
+  function shapePhysicalWidthCm(shape: GraphShapeDrawing) {
+    return roundMeasure(shape.width * settings.cellSizeCm);
+  }
+
+  function shapePhysicalHeightCm(shape: GraphShapeDrawing) {
+    return roundMeasure(shape.height * settings.cellSizeCm);
+  }
+
+  function shapeUsesSingleSize(kind: GraphShapeKind) {
+    return kind === "square" || kind === "circle";
+  }
+
+  function shapeSupportsSides(kind: GraphShapeKind) {
+    return kind === "square" || kind === "rectangle";
+  }
+
+  function shapeFillMode(shape: GraphShapeDrawing): ShapeFillMode {
+    return isTransparentFillColor(shape.fillColor) ? "outline" : "filled";
+  }
+
+  function draftShapeDimensionsCells(cellSizeCm = settings.cellSizeCm) {
+    const width = clampSourceSizeCells(draftShapeWidthCm / Math.max(0.05, cellSizeCm), 4);
+    const height = shapeUsesSingleSize(draftShapeKind)
+      ? width
+      : clampSourceSizeCells(draftShapeHeightCm / Math.max(0.05, cellSizeCm), 3);
+    return { width, height };
+  }
+
+  function clipartAssetAspect(asset: GraphClipartAsset | null = selectedClipartAsset) {
+    if (!asset?.width || !asset.height) return 1;
+    return Math.max(0.01, asset.width / asset.height);
+  }
+
+  function draftClipartDimensionsCells(asset: GraphClipartAsset | null = selectedClipartAsset, cellSizeCm = settings.cellSizeCm) {
+    const aspect = clipartAssetAspect(asset);
+    const widthCm = Math.max(0.01, draftClipartWidthCm);
+    const heightCm = Math.max(0.01, draftClipartHeightCm || widthCm / aspect);
+    return {
+      width: clampSourceSizeCells(widthCm / Math.max(0.05, cellSizeCm), 4),
+      height: clampSourceSizeCells(heightCm / Math.max(0.05, cellSizeCm), 4 / aspect),
+    };
+  }
+
   function sourceRightPadding(source: GraphSourceImage) {
     return roundCells(settings.graphWidth - source.width - source.x);
   }
@@ -1134,7 +1761,7 @@ export function EditorClient({ project }: { project: Project }) {
     return roundCells(settings.graphHeight - source.height - source.y);
   }
 
-  function drawingLayerKey(type: "cell" | "shape", id: string): DrawingLayerKey {
+  function drawingLayerKey(type: "cell" | "shape" | "clipart", id: string): DrawingLayerKey {
     return `${type}:${id}` as DrawingLayerKey;
   }
 
@@ -1176,6 +1803,7 @@ export function EditorClient({ project }: { project: Project }) {
       graphShapes: current.graphShapes.map((shape) => {
         if (shape.id !== shapeId || shape.locked) return shape;
         const kind = patch.kind && GRAPH_SHAPE_KIND_KEYS.includes(patch.kind) ? patch.kind : shape.kind;
+        const sides = patch.sides === undefined ? shape.sides : Array.from(new Set(patch.sides.filter((side) => CELL_LINE_SIDE_KEYS.includes(side))));
         return {
           ...shape,
           ...patch,
@@ -1187,10 +1815,60 @@ export function EditorClient({ project }: { project: Project }) {
           strokeColor: patch.strokeColor && isHexColor(patch.strokeColor) ? patch.strokeColor : shape.strokeColor,
           fillColor: patch.fillColor && isFillColor(patch.fillColor) ? patch.fillColor : shape.fillColor,
           strokeWidth: patch.strokeWidth === undefined ? shape.strokeWidth : Math.max(1, Math.min(24, Math.round(patch.strokeWidth))),
+          sides: sides.length ? sides : shape.sides,
           rotationDegrees: patch.rotationDegrees === undefined ? shape.rotationDegrees : normalizeRotationDegrees(patch.rotationDegrees),
         };
       }),
     }));
+  }
+
+  function updateClipartImage(clipartId: string, patch: Partial<GraphClipartImage>) {
+    setSettingsWithHistory((current) => ({
+      ...current,
+      fillRegions: {},
+      clipartImages: current.clipartImages.map((clipart) => {
+        if (clipart.id !== clipartId || clipart.locked) return clipart;
+        return {
+          ...clipart,
+          ...patch,
+          x: patch.x === undefined ? clipart.x : clampFreeCellCoordinate(patch.x, clipart.x),
+          y: patch.y === undefined ? clipart.y : clampFreeCellCoordinate(patch.y, clipart.y),
+          width: patch.width === undefined ? clipart.width : clampSourceSizeCells(patch.width, clipart.width),
+          height: patch.height === undefined ? clipart.height : clampSourceSizeCells(patch.height, clipart.height),
+          strokeColor: patch.strokeColor && isHexColor(patch.strokeColor) ? patch.strokeColor : clipart.strokeColor,
+          fillColor: patch.fillColor && isFillColor(patch.fillColor) ? patch.fillColor : clipart.fillColor,
+          imageLineThickness: patch.imageLineThickness === undefined ? clipart.imageLineThickness : clampImageLineThickness(patch.imageLineThickness),
+          sourceFillThreshold: patch.sourceFillThreshold === undefined ? clipart.sourceFillThreshold : clampSourceFillThreshold(patch.sourceFillThreshold),
+          sourceFillMinStrokePixels: patch.sourceFillMinStrokePixels === undefined ? clipart.sourceFillMinStrokePixels : clampSourceFillMinStrokePixels(patch.sourceFillMinStrokePixels),
+          strokeGapClosePixels: patch.strokeGapClosePixels === undefined ? clipart.strokeGapClosePixels : clampStrokeGapClosePixels(patch.strokeGapClosePixels),
+          rotationDegrees: patch.rotationDegrees === undefined ? clipart.rotationDegrees : normalizeRotationDegrees(patch.rotationDegrees),
+        };
+      }),
+    }));
+  }
+
+  function updateGraphShapePhysicalWidthCm(shapeId: string, value: number) {
+    const shape = settingsRef.current.graphShapes.find((item) => item.id === shapeId);
+    if (!shape) return;
+    const width = value / Math.max(0.05, settingsRef.current.cellSizeCm);
+    updateGraphShape(shapeId, shapeUsesSingleSize(shape.kind) ? { width, height: width } : { width });
+  }
+
+  function updateGraphShapePhysicalHeightCm(shapeId: string, value: number) {
+    const shape = settingsRef.current.graphShapes.find((item) => item.id === shapeId);
+    if (!shape) return;
+    const height = value / Math.max(0.05, settingsRef.current.cellSizeCm);
+    updateGraphShape(shapeId, shapeUsesSingleSize(shape.kind) ? { width: height, height } : { height });
+  }
+
+  function updateClipartPhysicalWidthCm(clipartId: string, value: number) {
+    const width = value / Math.max(0.05, settingsRef.current.cellSizeCm);
+    updateClipartImage(clipartId, { width });
+  }
+
+  function updateClipartPhysicalHeightCm(clipartId: string, value: number) {
+    const height = value / Math.max(0.05, settingsRef.current.cellSizeCm);
+    updateClipartImage(clipartId, { height });
   }
 
   function updateSourceImagePhysicalWidthCm(sourceId: string, value: number) {
@@ -1270,7 +1948,7 @@ export function EditorClient({ project }: { project: Project }) {
     if (!sourceId && !drawingId) return;
     setSettingsWithHistory((current) => {
       if (!sourceId && drawingId) {
-        const [type, id] = drawingId.split(":") as ["cell" | "shape", string];
+        const [type, id] = drawingId.split(":") as ["cell" | "shape" | "clipart", string];
         const nudgeCells = roundCells(0.1 / Math.max(0.05, current.cellSizeCm));
         if (type === "cell") {
           const cell = current.cellPaints.find((item) => item.id === id);
@@ -1279,6 +1957,19 @@ export function EditorClient({ project }: { project: Project }) {
             ...current,
             cellPaints: current.cellPaints.map((item) =>
               item.id === id ? { ...item, x: roundCells(Math.max(0, item.x + deltaX * nudgeCells)), y: roundCells(Math.max(0, item.y + deltaY * nudgeCells)) } : item,
+            ),
+          };
+        }
+        if (type === "clipart") {
+          const clipart = current.clipartImages.find((item) => item.id === id);
+          if (!clipart || clipart.locked) return current;
+          return {
+            ...current,
+            fillRegions: {},
+            clipartImages: current.clipartImages.map((item) =>
+              item.id === id
+                ? { ...item, x: clampFreeCellCoordinate(item.x + deltaX * nudgeCells, item.x), y: clampFreeCellCoordinate(item.y + deltaY * nudgeCells, item.y) }
+                : item,
             ),
           };
         }
@@ -1311,9 +2002,7 @@ export function EditorClient({ project }: { project: Project }) {
       const nextIndex = index + direction;
       if (index < 0 || nextIndex < 0 || nextIndex >= current.sourceImages.length) return current;
       if (current.sourceImages[index]?.locked || current.sourceImages[nextIndex]?.locked) return current;
-      const sourceImages = [...current.sourceImages];
-      const [source] = sourceImages.splice(index, 1);
-      sourceImages.splice(nextIndex, 0, source);
+      const sourceImages = reorderSourceImages(current.sourceImages, index, nextIndex);
       return { ...current, fillRegions: {}, sourceImages };
     });
   }
@@ -1350,32 +2039,101 @@ export function EditorClient({ project }: { project: Project }) {
     updateSourceImage(sourceId, axis === "x" ? { flipX: !source.flipX } : { flipY: !source.flipY });
   }
 
-  function toggleDrawingLayerCard(key: DrawingLayerKey) {
-    setExpandedDrawingLayerIds((current) => ({ ...current, [key]: !current[key] }));
-  }
 
-  function toggleDrawingLock(type: "cell" | "shape", id: string) {
+  function toggleDrawingLock(type: "cell" | "shape" | "clipart", id: string) {
     setSettingsWithHistory((current) => ({
       ...current,
       cellPaints: type === "cell" ? current.cellPaints.map((cell) => (cell.id === id ? { ...cell, locked: !cell.locked } : cell)) : current.cellPaints,
       graphShapes: type === "shape" ? current.graphShapes.map((shape) => (shape.id === id ? { ...shape, locked: !shape.locked } : shape)) : current.graphShapes,
+      clipartImages: type === "clipart" ? current.clipartImages.map((clipart) => (clipart.id === id ? { ...clipart, locked: !clipart.locked } : clipart)) : current.clipartImages,
     }));
   }
 
-  function removeDrawingLayer(type: "cell" | "shape", id: string, name: string, locked: boolean) {
+  function toggleSourceVisibility(sourceId: string) {
+    setSettingsWithHistory((current) => ({
+      ...current,
+      sourceImages: current.sourceImages.map((source) => (source.id === sourceId ? { ...source, visible: !source.visible } : source)),
+    }));
+  }
+
+  function toggleDrawingVisibility(type: "cell" | "shape" | "clipart", id: string) {
+    setSettingsWithHistory((current) => ({
+      ...current,
+      cellPaints: type === "cell" ? current.cellPaints.map((cell) => (cell.id === id ? { ...cell, visible: !cell.visible } : cell)) : current.cellPaints,
+      graphShapes: type === "shape" ? current.graphShapes.map((shape) => (shape.id === id ? { ...shape, visible: !shape.visible } : shape)) : current.graphShapes,
+      clipartImages: type === "clipart" ? current.clipartImages.map((clipart) => (clipart.id === id ? { ...clipart, visible: !clipart.visible } : clipart)) : current.clipartImages,
+    }));
+  }
+
+  function reorderLayer(type: "source" | "cell" | "shape" | "clipart", fromId: string, toId: string) {
+    if (fromId === toId) return;
+    setSettingsWithHistory((current) => {
+      const list = type === "source" ? current.sourceImages : type === "cell" ? current.cellPaints : type === "shape" ? current.graphShapes : current.clipartImages;
+      const fromIndex = list.findIndex((item) => item.id === fromId);
+      const toIndex = list.findIndex((item) => item.id === toId);
+      if (fromIndex < 0 || toIndex < 0) return current;
+      if (list[fromIndex]?.locked || list[toIndex]?.locked) return current;
+      if (type === "source") return { ...current, fillRegions: {}, sourceImages: reorderSourceImages(current.sourceImages, fromIndex, toIndex) };
+      const nextList = [...list];
+      const [item] = nextList.splice(fromIndex, 1);
+      nextList.splice(toIndex, 0, item);
+      if (type === "cell") return { ...current, cellPaints: nextList as GraphCellPaint[] };
+      if (type === "clipart") return { ...current, fillRegions: {}, clipartImages: nextList as GraphClipartImage[] };
+      return { ...current, graphShapes: nextList as GraphShapeDrawing[] };
+    });
+  }
+
+  function handleLayerDragStart(type: "source" | "cell" | "shape" | "clipart", id: string) {
+    return (event: ReactDragEvent<HTMLButtonElement>) => {
+      const list = type === "source" ? settingsRef.current.sourceImages : type === "cell" ? settingsRef.current.cellPaints : type === "shape" ? settingsRef.current.graphShapes : settingsRef.current.clipartImages;
+      const item = list.find((entry) => entry.id === id);
+      if (!item || item.locked) {
+        event.preventDefault();
+        return;
+      }
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData(`application/x-graph-layer-reorder:${type}`, id);
+    };
+  }
+
+  function handleLayerDragOver(type: "source" | "cell" | "shape" | "clipart") {
+    return (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!event.dataTransfer.types.includes(`application/x-graph-layer-reorder:${type}`)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+    };
+  }
+
+  function handleLayerDrop(type: "source" | "cell" | "shape" | "clipart", targetId: string) {
+    return (event: ReactDragEvent<HTMLDivElement>) => {
+      const draggedId = event.dataTransfer.getData(`application/x-graph-layer-reorder:${type}`);
+      if (!draggedId || draggedId === targetId) return;
+      event.preventDefault();
+      reorderLayer(type, draggedId, targetId);
+    };
+  }
+
+  function removeDrawingLayer(
+    type: "cell" | "shape" | "clipart",
+    id: string,
+    name: string,
+    locked: boolean,
+    options: { skipConfirm?: boolean } = {},
+  ) {
     if (locked) return;
-    if (!window.confirm(`Delete "${name}" from this project?`)) return;
+    if (!options.skipConfirm && !window.confirm(`Delete "${name}" from this project?`)) return;
     setSettingsWithHistory((current) => ({
       ...current,
       cellPaints: type === "cell" ? current.cellPaints.filter((cell) => cell.id !== id) : current.cellPaints,
       graphShapes: type === "shape" ? current.graphShapes.filter((shape) => shape.id !== id) : current.graphShapes,
+      clipartImages: type === "clipart" ? current.clipartImages.filter((clipart) => clipart.id !== id) : current.clipartImages,
     }));
     setSelectedDrawingLayerId((current) => (current === drawingLayerKey(type, id) ? null : current));
   }
 
-  function moveDrawingLayer(type: "cell" | "shape", id: string, direction: -1 | 1) {
+  function moveDrawingLayer(type: "cell" | "shape" | "clipart", id: string, direction: -1 | 1) {
     setSettingsWithHistory((current) => {
-      const list = type === "cell" ? current.cellPaints : current.graphShapes;
+      const list = type === "cell" ? current.cellPaints : type === "shape" ? current.graphShapes : current.clipartImages;
       const index = list.findIndex((item) => item.id === id);
       const nextIndex = index + direction;
       if (index < 0 || nextIndex < 0 || nextIndex >= list.length) return current;
@@ -1383,15 +2141,23 @@ export function EditorClient({ project }: { project: Project }) {
       const nextList = [...list];
       const [item] = nextList.splice(index, 1);
       nextList.splice(nextIndex, 0, item);
-      return type === "cell" ? { ...current, cellPaints: nextList as GraphCellPaint[] } : { ...current, graphShapes: nextList as GraphShapeDrawing[] };
+      if (type === "cell") return { ...current, cellPaints: nextList as GraphCellPaint[] };
+      if (type === "clipart") return { ...current, fillRegions: {}, clipartImages: nextList as GraphClipartImage[] };
+      return { ...current, graphShapes: nextList as GraphShapeDrawing[] };
     });
   }
 
-  function rotateDrawingLayer(type: "cell" | "shape", id: string, direction: -1 | 1) {
+  function rotateDrawingLayer(type: "cell" | "shape" | "clipart", id: string, direction: -1 | 1) {
     if (type === "cell") {
       const cell = settingsRef.current.cellPaints.find((item) => item.id === id);
       if (!cell || cell.locked) return;
       updateCellPaint(id, { rotationDegrees: normalizeRotationDegrees(cell.rotationDegrees + direction * ROTATION_STEP_DEGREES) });
+      return;
+    }
+    if (type === "clipart") {
+      const clipart = settingsRef.current.clipartImages.find((item) => item.id === id);
+      if (!clipart || clipart.locked) return;
+      updateClipartImage(id, { rotationDegrees: normalizeRotationDegrees(clipart.rotationDegrees + direction * ROTATION_STEP_DEGREES) });
       return;
     }
     const shape = settingsRef.current.graphShapes.find((item) => item.id === id);
@@ -1399,11 +2165,17 @@ export function EditorClient({ project }: { project: Project }) {
     updateGraphShape(id, { rotationDegrees: normalizeRotationDegrees(shape.rotationDegrees + direction * ROTATION_STEP_DEGREES) });
   }
 
-  function flipDrawingLayer(type: "cell" | "shape", id: string, axis: "x" | "y") {
+  function flipDrawingLayer(type: "cell" | "shape" | "clipart", id: string, axis: "x" | "y") {
     if (type === "cell") {
       const cell = settingsRef.current.cellPaints.find((item) => item.id === id);
       if (!cell || cell.locked) return;
       updateCellPaint(id, axis === "x" ? { flipX: !cell.flipX } : { flipY: !cell.flipY });
+      return;
+    }
+    if (type === "clipart") {
+      const clipart = settingsRef.current.clipartImages.find((item) => item.id === id);
+      if (!clipart || clipart.locked) return;
+      updateClipartImage(id, axis === "x" ? { flipX: !clipart.flipX } : { flipY: !clipart.flipY });
       return;
     }
     const shape = settingsRef.current.graphShapes.find((item) => item.id === id);
@@ -1426,11 +2198,10 @@ export function EditorClient({ project }: { project: Project }) {
 
   function clearGraphShapes() {
     setSettingsWithHistory((current) => ({ ...current, graphShapes: [] }));
+    setSelectedDrawingLayerId((current) => (current?.startsWith("shape:") ? null : current));
+    setLayerChooser(null);
   }
 
-  function toggleSourceCard(sourceId: string) {
-    setExpandedSourceIds((current) => ({ ...current, [sourceId]: !current[sourceId] }));
-  }
 
   function beginPanelResize(event: ReactPointerEvent<HTMLElement>, side: "left" | "right") {
     event.preventDefault();
@@ -1482,41 +2253,274 @@ export function EditorClient({ project }: { project: Project }) {
     });
   }
 
-  function sourceLayoutAtPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
-    const canvas = event.currentTarget;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0 || !canvas.width || !canvas.height) return null;
-
-    const canvasX = ((event.clientX - rect.left) * canvas.width) / rect.width;
-    const canvasY = ((event.clientY - rect.top) * canvas.height) / rect.height;
-    const graphX = (canvasX - settings.imageOffsetX) / GRAPH_MAJOR_CELL_PIXELS;
-    const graphY = (canvasY - settings.imageOffsetY) / GRAPH_MAJOR_CELL_PIXELS;
-    const layouts = sourceLayouts(settings.sourceImages);
-
-    for (let index = layouts.length - 1; index >= 0; index -= 1) {
-      const layout = layouts[index];
-      if (graphX < layout.x || graphX > layout.x + layout.width || graphY < layout.y || graphY > layout.y + layout.height) continue;
-      return layout;
-    }
-
-    return null;
-  }
-
-  function graphPointAtPointer(event: ReactPointerEvent<HTMLElement>) {
+  function graphPointAtClientPosition(clientX: number, clientY: number) {
     const canvas = previewCanvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0 || !canvas.width || !canvas.height) return null;
-    const canvasX = ((event.clientX - rect.left) * canvas.width) / rect.width;
-    const canvasY = ((event.clientY - rect.top) * canvas.height) / rect.height;
+
+    const canvasX = ((clientX - rect.left) * canvas.width) / rect.width;
+    const canvasY = ((clientY - rect.top) * canvas.height) / rect.height;
     return {
       x: canvasX / GRAPH_MAJOR_CELL_PIXELS,
       y: canvasY / GRAPH_MAJOR_CELL_PIXELS,
     };
   }
 
+  function layerHitsAtPoint(graphX: number, graphY: number): LayerHit[] {
+    const hits: LayerHit[] = [];
+
+    for (let index = settings.clipartImages.length - 1; index >= 0; index -= 1) {
+      const clipart = settings.clipartImages[index];
+      if (!clipart || clipart.visible === false) continue;
+      const width = Math.max(0.01, Math.abs(clipart.width));
+      const height = Math.max(0.01, Math.abs(clipart.height));
+      const left = Math.min(clipart.x, clipart.x + clipart.width);
+      const top = Math.min(clipart.y, clipart.y + clipart.height);
+      if (graphX < left || graphX > left + width || graphY < top || graphY > top + height) continue;
+      hits.push({
+        key: drawingLayerKey("clipart", clipart.id),
+        type: "clipart",
+        id: clipart.id,
+        name: clipart.name,
+        detail: "Clipart image",
+        clipart,
+      });
+    }
+
+    for (let index = settings.graphShapes.length - 1; index >= 0; index -= 1) {
+      const shape = settings.graphShapes[index];
+      if (!shape || shape.visible === false) continue;
+      const width = Math.max(0.01, Math.abs(shape.width));
+      const height = Math.max(0.01, Math.abs(shape.height));
+      const left = Math.min(shape.x, shape.x + shape.width);
+      const top = Math.min(shape.y, shape.y + shape.height);
+      if (graphX < left || graphX > left + width || graphY < top || graphY > top + height) continue;
+      hits.push({
+        key: drawingLayerKey("shape", shape.id),
+        type: "shape",
+        id: shape.id,
+        name: shape.name,
+        detail: `Generated ${GRAPH_SHAPE_KIND_LABELS[shape.kind]?.toLowerCase() ?? "shape"}`,
+        shape,
+      });
+    }
+
+    const layouts = sourceLayouts(settings.sourceImages);
+    const sourceGraphX = graphX - settings.imageOffsetX / GRAPH_MAJOR_CELL_PIXELS;
+    const sourceGraphY = graphY - settings.imageOffsetY / GRAPH_MAJOR_CELL_PIXELS;
+    for (let index = layouts.length - 1; index >= 0; index -= 1) {
+      const layout = layouts[index];
+      if (!layout || layout.source.visible === false) continue;
+      if (sourceGraphX < layout.x || sourceGraphX > layout.x + layout.width || sourceGraphY < layout.y || sourceGraphY > layout.y + layout.height) continue;
+      hits.push({
+        key: `source:${layout.source.id}`,
+        type: "source",
+        id: layout.source.id,
+        name: layout.source.name,
+        detail: "Source image",
+        layout,
+      });
+    }
+
+    return hits;
+  }
+
+  function graphPointAtPointer(event: ReactPointerEvent<HTMLElement>) {
+    return graphPointAtClientPosition(event.clientX, event.clientY);
+  }
+
   function drawingId(prefix: string) {
     return `${prefix}-${typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Date.now().toString(36)}`;
+  }
+
+  function selectSourceLayer(sourceId: string) {
+    setSelectedSourceId(sourceId);
+    setSelectedDrawingLayerId(null);
+    setInspectorTab("source");
+    setSettingsPanelCollapsed(false);
+  }
+
+  function selectCellLayer(cellId: string) {
+    const key = drawingLayerKey("cell", cellId);
+    setSelectedSourceId(null);
+    setSelectedDrawingLayerId(key);
+    setInspectorTab("draw");
+    setSettingsPanelCollapsed(false);
+  }
+
+  function selectGeneratedShape(shapeId: string) {
+    const key = drawingLayerKey("shape", shapeId);
+    setSelectedSourceId(null);
+    setSelectedDrawingLayerId(key);
+    setGeneratedImagesCollapsed(false);
+    setInspectorTab("draw");
+    setSettingsPanelCollapsed(false);
+  }
+
+  function selectClipartLayer(clipartId: string) {
+    const key = drawingLayerKey("clipart", clipartId);
+    setSelectedSourceId(null);
+    setSelectedDrawingLayerId(key);
+    setGeneratedImagesCollapsed(false);
+    setInspectorTab("draw");
+    setSettingsPanelCollapsed(false);
+  }
+
+  function selectLayerChoice(choice: LayerChoice) {
+    if (choice.type === "source") {
+      selectSourceLayer(choice.id);
+    } else if (choice.type === "clipart") {
+      selectClipartLayer(choice.id);
+    } else {
+      selectGeneratedShape(choice.id);
+    }
+    setLayerChooser(null);
+    setFloatingPalette(null);
+  }
+
+  function setDraftShapeSide(side: GraphCellLineSide, checked: boolean) {
+    setDraftShapeSides((current) => {
+      const next = checked ? Array.from(new Set([...current, side])) : current.filter((item) => item !== side);
+      return next.length ? next : current;
+    });
+  }
+
+  function addGeneratedShapeAtPoint(point: { x: number; y: number }) {
+    const id = drawingId("shape");
+    const { width, height } = draftShapeDimensionsCells(settingsRef.current.cellSizeCm);
+    const kind = draftShapeKind;
+    const x = clampFreeCellCoordinate(snapCellToGrid(point.x - width / 2), 0);
+    const y = clampFreeCellCoordinate(snapCellToGrid(point.y - height / 2), 0);
+    const fillColor = draftShapeFillMode === "filled" ? draftShapeFillColor : TRANSPARENT_FILL_COLOR;
+    const sides = shapeSupportsSides(kind) ? [...draftShapeSides] : [...CELL_LINE_SIDE_KEYS];
+    setSettingsWithHistory((current) => ({
+      ...current,
+      graphShapes: [
+        ...current.graphShapes,
+        {
+          id,
+          name: `${GRAPH_SHAPE_KIND_LABELS[kind]} ${current.graphShapes.length + 1}`,
+          kind,
+          x,
+          y,
+          width,
+          height,
+          strokeColor: draftShapeStrokeColor,
+          fillColor,
+          strokeWidth: Math.max(1, Math.min(24, Math.round(draftShapeStrokeWidth))),
+          sides,
+          locked: false,
+          visible: true,
+          rotationDegrees: 0,
+          flipX: false,
+          flipY: false,
+        },
+      ],
+    }));
+    selectGeneratedShape(id);
+    setLayerChooser(null);
+    setFloatingPalette(null);
+    return id;
+  }
+
+  function addClipartAtPoint(assetId: string, point: { x: number; y: number }) {
+    const asset = settingsRef.current.clipartAssets.find((item) => item.id === assetId);
+    if (!asset) return null;
+    const id = drawingId("clipart");
+    const { width, height } = draftClipartDimensionsCells(asset, settingsRef.current.cellSizeCm);
+    const x = clampFreeCellCoordinate(snapCellToGrid(point.x - width / 2), 0);
+    const y = clampFreeCellCoordinate(snapCellToGrid(point.y - height / 2), 0);
+    setSettingsWithHistory((current) => ({
+      ...current,
+      fillRegions: {},
+      clipartImages: [
+        ...current.clipartImages,
+        {
+          id,
+          name: `${asset.name.replace(/\.[^.]+$/, "") || "Clipart"} ${current.clipartImages.length + 1}`,
+          assetId,
+          x,
+          y,
+          width,
+          height,
+          strokeColor: draftClipartStrokeColor,
+          fillColor: draftClipartFillColor,
+          imageLineThickness: Math.max(1, Math.min(24, Math.round(draftClipartStrokeWidth))),
+          sourceFillThreshold: current.sourceFillThreshold,
+          sourceFillMinStrokePixels: current.sourceFillMinStrokePixels,
+          strokeGapClosePixels: current.strokeGapClosePixels,
+          locked: false,
+          visible: true,
+          rotationDegrees: 0,
+          flipX: false,
+          flipY: false,
+        },
+      ],
+    }));
+    selectClipartLayer(id);
+    setLayerChooser(null);
+    setFloatingPalette(null);
+    return id;
+  }
+
+  function placeGeneratedShapeFromClientPoint(clientX: number, clientY: number) {
+    const point = graphPointAtClientPosition(clientX, clientY);
+    if (!point) return false;
+    addGeneratedShapeAtPoint(point);
+    setPlacingGeneratedShape(false);
+    return true;
+  }
+
+  function placeClipartFromClientPoint(assetId: string, clientX: number, clientY: number) {
+    const point = graphPointAtClientPosition(clientX, clientY);
+    if (!point) return false;
+    addClipartAtPoint(assetId, point);
+    setPlacingClipartAssetId(null);
+    return true;
+  }
+
+  function handleGeneratedShapeDragStart(event: ReactDragEvent<HTMLElement>) {
+    event.dataTransfer.effectAllowed = "copy";
+    event.dataTransfer.setData("application/x-graph-generated-shape", draftShapeKind);
+    setPlacingGeneratedShape(true);
+  }
+
+  function handleClipartDragStart(assetId: string) {
+    return (event: ReactDragEvent<HTMLElement>) => {
+      event.dataTransfer.effectAllowed = "copy";
+      event.dataTransfer.setData("application/x-graph-clipart", assetId);
+      setPlacingClipartAssetId(assetId);
+    };
+  }
+
+  function hasGeneratedShapeTransfer(types: readonly string[] | DOMStringList) {
+    return Array.from(types as ArrayLike<string>).includes("application/x-graph-generated-shape");
+  }
+
+  function clipartTransferId(dataTransfer: DataTransfer) {
+    if (!Array.from(dataTransfer.types as ArrayLike<string>).includes("application/x-graph-clipart")) return "";
+    return dataTransfer.getData("application/x-graph-clipart");
+  }
+
+  function handleGeneratedShapeDrop(event: ReactDragEvent<HTMLElement>) {
+    const droppedClipartId = clipartTransferId(event.dataTransfer);
+    if (droppedClipartId) {
+      event.preventDefault();
+      event.stopPropagation();
+      placeClipartFromClientPoint(droppedClipartId, event.clientX, event.clientY);
+      return;
+    }
+    if (!placingGeneratedShape && !hasGeneratedShapeTransfer(event.dataTransfer.types)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    placeGeneratedShapeFromClientPoint(event.clientX, event.clientY);
+  }
+
+  function handleGeneratedShapeDragOver(event: ReactDragEvent<HTMLElement>) {
+    if (!placingGeneratedShape && !placingClipartAssetId && !hasGeneratedShapeTransfer(event.dataTransfer.types) && !clipartTransferId(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
   }
 
   function paintCellAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
@@ -1531,8 +2535,7 @@ export function EditorClient({ project }: { project: Project }) {
     const currentPaints = settingsRef.current.cellPaints;
     const existingBefore = currentPaints.find((paint) => paint.x === x && paint.y === y);
     const selectedPaintId = existingBefore?.id ?? drawingId("cell");
-    setSelectedSourceId(null);
-    setSelectedDrawingLayerId(drawingLayerKey("cell", selectedPaintId));
+    selectCellLayer(selectedPaintId);
 
     setSettings((current) => {
       const existingIndex = current.cellPaints.findIndex((paint) => paint.x === x && paint.y === y);
@@ -1549,6 +2552,7 @@ export function EditorClient({ project }: { project: Project }) {
         fillColor: fillColor === TRANSPARENT_FILL_COLOR ? existing?.fillColor ?? TRANSPARENT_FILL_COLOR : fillColor,
         lineWidth: Math.max(1, Math.round(settingsRef.current.imageLineThickness || 3)),
         locked: existing?.locked ?? false,
+        visible: existing?.visible ?? true,
         rotationDegrees: existing?.rotationDegrees ?? 0,
         flipX: existing?.flipX ?? false,
         flipY: existing?.flipY ?? false,
@@ -1585,8 +2589,7 @@ export function EditorClient({ project }: { project: Project }) {
     dragState.shapeId = id;
     dragState.startGraphX = cellX;
     dragState.startGraphY = cellY;
-    setSelectedSourceId(null);
-    setSelectedDrawingLayerId(drawingLayerKey("shape", id));
+    selectGeneratedShape(id);
     setSettings((current) => {
       if (!dragState.historyRecorded) {
         pushUndoSettings(current);
@@ -1607,7 +2610,9 @@ export function EditorClient({ project }: { project: Project }) {
             strokeColor: current.outlineColor,
             fillColor: cellPaintFillEnabled ? current.fillColor : TRANSPARENT_FILL_COLOR,
             strokeWidth: Math.max(1, Math.round(current.imageLineThickness || 3)),
+            sides: [...CELL_LINE_SIDE_KEYS],
             locked: false,
+            visible: true,
             rotationDegrees: 0,
             flipX: false,
             flipY: false,
@@ -1711,7 +2716,43 @@ export function EditorClient({ project }: { project: Project }) {
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
     const viewportDrag = event.ctrlKey || spacePressedRef.current;
-    if (!viewportDrag && drawingTool !== "image") {
+
+    if (canvasTool === "hand") {
+      event.preventDefault();
+      canvas.setPointerCapture(event.pointerId);
+      dragStateRef.current = {
+        kind: "pan",
+        pointerId: event.pointerId,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        startOffsetX: settings.imageOffsetX,
+        startOffsetY: settings.imageOffsetY,
+        startPanX: canvasPan.x,
+        startPanY: canvasPan.y,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        rectWidth: rect.width,
+        rectHeight: rect.height,
+        moved: false,
+        historyRecorded: false,
+      };
+      setIsDraggingGraph(true);
+      return;
+    }
+
+    if (!viewportDrag && placingClipartAssetId) {
+      event.preventDefault();
+      placeClipartFromClientPoint(placingClipartAssetId, event.clientX, event.clientY);
+      return;
+    }
+
+    if (!viewportDrag && placingGeneratedShape) {
+      event.preventDefault();
+      placeGeneratedShapeFromClientPoint(event.clientX, event.clientY);
+      return;
+    }
+
+    if (!viewportDrag && canvasTool !== "pointer" && drawingTool !== "image") {
       event.preventDefault();
       setSelectedSourceId(null);
       setFloatingPalette(null);
@@ -1739,31 +2780,70 @@ export function EditorClient({ project }: { project: Project }) {
       return;
     }
 
-    const sourceHit = sourceLayoutAtPointer(event);
-    if (sourceHit) {
-      setSelectedSourceId(sourceHit.source.id);
-      setSelectedDrawingLayerId(null);
+    const point = graphPointAtPointer(event);
+    const layerHits = point ? layerHitsAtPoint(point.x, point.y) : [];
+    const selectedHit = layerHits.find((hit) =>
+      hit.type === "source"
+        ? selectedSourceId === hit.id
+        : selectedDrawingLayerId === drawingLayerKey(hit.type, hit.id),
+    );
+    const activeHit = selectedHit ?? (layerHits.length === 1 ? layerHits[0] : null);
+
+    if (!viewportDrag && layerHits.length > 1 && !selectedHit) {
+      event.preventDefault();
+      setLayerChooser({
+        x: event.clientX,
+        y: event.clientY,
+        choices: layerHits.map((hit) => ({
+          key: hit.key,
+          type: hit.type,
+          id: hit.id,
+          name: hit.name,
+          detail: hit.detail,
+        })),
+      });
+      setFloatingPalette(null);
+      return;
     }
-    if (!sourceHit && !viewportDrag) {
+
+    if (activeHit?.type === "source") {
+      selectSourceLayer(activeHit.layout.source.id);
+      setLayerChooser(null);
+    } else if (activeHit?.type === "shape") {
+      selectGeneratedShape(activeHit.shape.id);
+      setLayerChooser(null);
+    } else if (activeHit?.type === "clipart") {
+      selectClipartLayer(activeHit.clipart.id);
+      setLayerChooser(null);
+    }
+    if (!activeHit && !viewportDrag) {
       setSelectedSourceId(null);
       setSelectedDrawingLayerId(null);
+      setLayerChooser(null);
       selectFillRegionFromPointer(event, true);
+      if (canvasTool === "pointer") return;
     }
 
     event.preventDefault();
     canvas.setPointerCapture(event.pointerId);
     dragStateRef.current = {
-      kind: viewportDrag || !sourceHit ? "viewport" : "source",
+      kind: viewportDrag || !activeHit ? "viewport" : activeHit.type,
       pointerId: event.pointerId,
       startClientX: event.clientX,
       startClientY: event.clientY,
       startOffsetX: settings.imageOffsetX,
       startOffsetY: settings.imageOffsetY,
-      sourceId: sourceHit?.source.id,
-      startSourceX: sourceHit?.source.x,
-      startSourceY: sourceHit?.y,
-      startSourceWidth: sourceHit?.source.width,
-      startSourceHeight: sourceHit?.source.height,
+      sourceId: activeHit?.type === "source" ? activeHit.layout.source.id : undefined,
+      startSourceX: activeHit?.type === "source" ? activeHit.layout.source.x : undefined,
+      startSourceY: activeHit?.type === "source" ? activeHit.layout.y : undefined,
+      startSourceWidth: activeHit?.type === "source" ? activeHit.layout.source.width : undefined,
+      startSourceHeight: activeHit?.type === "source" ? activeHit.layout.source.height : undefined,
+      shapeId: activeHit?.type === "shape" ? activeHit.shape.id : undefined,
+      startShapeX: activeHit?.type === "shape" ? activeHit.shape.x : undefined,
+      startShapeY: activeHit?.type === "shape" ? activeHit.shape.y : undefined,
+      clipartId: activeHit?.type === "clipart" ? activeHit.clipart.id : undefined,
+      startClipartX: activeHit?.type === "clipart" ? activeHit.clipart.x : undefined,
+      startClipartY: activeHit?.type === "clipart" ? activeHit.clipart.y : undefined,
       startScrollLeft: canvasScrollRef.current?.scrollLeft ?? 0,
       startScrollTop: canvasScrollRef.current?.scrollTop ?? 0,
       canvasWidth: canvas.width,
@@ -1812,6 +2892,42 @@ export function EditorClient({ project }: { project: Project }) {
     setIsDraggingGraph(true);
   }
 
+  function beginShapeResize(event: ReactPointerEvent<HTMLElement>, shape: GraphShapeDrawing, resizeCorner: SourceResizeHandle) {
+    if (showOriginal || event.button !== 0 || shape.locked) return;
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedSourceId(null);
+    setSelectedDrawingLayerId(drawingLayerKey("shape", shape.id));
+    dragStateRef.current = {
+      kind: "resize-shape",
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startOffsetX: settings.imageOffsetX,
+      startOffsetY: settings.imageOffsetY,
+      shapeId: shape.id,
+      startShapeX: shape.x,
+      startShapeY: shape.y,
+      startShapeWidth: shape.width,
+      startShapeHeight: shape.height,
+      resizeCorner,
+      startScrollLeft: canvasScrollRef.current?.scrollLeft ?? 0,
+      startScrollTop: canvasScrollRef.current?.scrollTop ?? 0,
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      rectWidth: rect.width,
+      rectHeight: rect.height,
+      moved: false,
+      historyRecorded: false,
+    };
+    setIsDraggingGraph(true);
+  }
+
   function dragGraph(event: ReactPointerEvent<HTMLElement>) {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== event.pointerId) {
@@ -1837,6 +2953,14 @@ export function EditorClient({ project }: { project: Project }) {
       return;
     }
 
+    if (dragState.kind === "pan") {
+      setCanvasPan({
+        x: (dragState.startPanX ?? 0) + (event.clientX - dragState.startClientX),
+        y: (dragState.startPanY ?? 0) + (event.clientY - dragState.startClientY),
+      });
+      return;
+    }
+
     if (dragState.kind === "cell-paint") {
       paintCellAtPointer(event, dragState);
       return;
@@ -1844,6 +2968,53 @@ export function EditorClient({ project }: { project: Project }) {
 
     if (dragState.kind === "shape-draw") {
       updateShapeAtPointer(event, dragState);
+      return;
+    }
+
+    if (dragState.kind === "shape" && dragState.shapeId && dragState.startShapeX !== undefined && dragState.startShapeY !== undefined) {
+      const deltaCellsX = deltaX / GRAPH_MAJOR_CELL_PIXELS;
+      const deltaCellsY = deltaY / GRAPH_MAJOR_CELL_PIXELS;
+      setSettings((current) => {
+        const shape = current.graphShapes.find((item) => item.id === dragState.shapeId);
+        if (!shape || shape.locked) return current;
+        const x = clampFreeCellCoordinate(snapCellToGrid(dragState.startShapeX! + deltaCellsX), shape.x);
+        const y = clampFreeCellCoordinate(snapCellToGrid(dragState.startShapeY! + deltaCellsY), shape.y);
+        if (shape.x === x && shape.y === y) return current;
+        if (!dragState.historyRecorded) {
+          pushUndoSettings(current);
+          dragState.historyRecorded = true;
+        }
+        const next = deriveGraphSettings({
+          ...current,
+          graphShapes: current.graphShapes.map((item) => (item.id === dragState.shapeId ? { ...item, x, y } : item)),
+        });
+        settingsRef.current = next;
+        return next;
+      });
+      return;
+    }
+
+    if (dragState.kind === "clipart" && dragState.clipartId && dragState.startClipartX !== undefined && dragState.startClipartY !== undefined) {
+      const deltaCellsX = deltaX / GRAPH_MAJOR_CELL_PIXELS;
+      const deltaCellsY = deltaY / GRAPH_MAJOR_CELL_PIXELS;
+      setSettings((current) => {
+        const clipart = current.clipartImages.find((item) => item.id === dragState.clipartId);
+        if (!clipart || clipart.locked) return current;
+        const x = clampFreeCellCoordinate(snapCellToGrid(dragState.startClipartX! + deltaCellsX), clipart.x);
+        const y = clampFreeCellCoordinate(snapCellToGrid(dragState.startClipartY! + deltaCellsY), clipart.y);
+        if (clipart.x === x && clipart.y === y) return current;
+        if (!dragState.historyRecorded) {
+          pushUndoSettings(current);
+          dragState.historyRecorded = true;
+        }
+        const next = deriveGraphSettings({
+          ...current,
+          fillRegions: {},
+          clipartImages: current.clipartImages.map((item) => (item.id === dragState.clipartId ? { ...item, x, y } : item)),
+        });
+        settingsRef.current = next;
+        return next;
+      });
       return;
     }
 
@@ -1895,6 +3066,58 @@ export function EditorClient({ project }: { project: Project }) {
           sourceImages: current.sourceImages.map((image) =>
             image.id === dragState.sourceId ? { ...image, x, y, width, height } : image,
           ),
+        });
+        settingsRef.current = next;
+        return next;
+      });
+      return;
+    }
+
+    if (
+      dragState.kind === "resize-shape" &&
+      dragState.shapeId &&
+      dragState.startShapeX !== undefined &&
+      dragState.startShapeY !== undefined &&
+      dragState.startShapeWidth !== undefined &&
+      dragState.startShapeHeight !== undefined
+    ) {
+      const deltaCellsX = deltaX / GRAPH_MAJOR_CELL_PIXELS;
+      const deltaCellsY = deltaY / GRAPH_MAJOR_CELL_PIXELS;
+      setSettings((current) => {
+        const shape = current.graphShapes.find((item) => item.id === dragState.shapeId);
+        if (!shape || shape.locked) return current;
+
+        let left = dragState.startShapeX!;
+        let right = dragState.startShapeX! + dragState.startShapeWidth!;
+        let top = dragState.startShapeY!;
+        let bottom = dragState.startShapeY! + dragState.startShapeHeight!;
+        if (dragState.resizeCorner?.includes("w")) left = snapCellToGrid(left + deltaCellsX);
+        if (dragState.resizeCorner?.includes("e")) right = snapCellToGrid(right + deltaCellsX);
+        if (dragState.resizeCorner?.includes("n")) top = snapCellToGrid(top + deltaCellsY);
+        if (dragState.resizeCorner?.includes("s")) bottom = snapCellToGrid(bottom + deltaCellsY);
+
+        const minSize = 0.25;
+        if (right - left < minSize) {
+          if (dragState.resizeCorner?.includes("w")) left = right - minSize;
+          else right = left + minSize;
+        }
+        if (bottom - top < minSize) {
+          if (dragState.resizeCorner?.includes("n")) top = bottom - minSize;
+          else bottom = top + minSize;
+        }
+
+        const width = clampFreeCellCoordinate(right - left, shape.width);
+        const height = clampFreeCellCoordinate(bottom - top, shape.height);
+        const x = clampFreeCellCoordinate(left, shape.x);
+        const y = clampFreeCellCoordinate(top, shape.y);
+        if (shape.x === x && shape.y === y && shape.width === width && shape.height === height) return current;
+        if (!dragState.historyRecorded) {
+          pushUndoSettings(current);
+          dragState.historyRecorded = true;
+        }
+        const next = deriveGraphSettings({
+          ...current,
+          graphShapes: current.graphShapes.map((item) => (item.id === dragState.shapeId ? { ...item, x, y, width, height } : item)),
         });
         settingsRef.current = next;
         return next;
@@ -1972,6 +3195,7 @@ export function EditorClient({ project }: { project: Project }) {
   }, []);
 
   useEffect(() => {
+    if (!draftChecked) return;
     const sources = settingsRef.current.sourceImages;
     let cancelled = false;
     setSourceReady(false);
@@ -2007,11 +3231,14 @@ export function EditorClient({ project }: { project: Project }) {
     const hasPdf = sources.some((source) => isPdfFile({ name: source.name }));
     setNotice({ tone: "info", text: hasPdf ? "Rendering source files..." : "Loading source files..." });
 
-    void Promise.all(
-      sources.map(async (source) => {
+    const previewMaxDimension = 1400;
+    void mapWithConcurrency(
+      sources,
+      2,
+      async (source) => {
         try {
           if (!source.url) throw new Error(`${source.name} is not available. Save and reopen the project, then try again.`);
-          const canvas = resizeImage(await loadImageToCanvas(source.url, source.name), 2200, 2200);
+          const canvas = resizeImage(await loadImageToCanvas(source.url, source.name), previewMaxDimension, previewMaxDimension);
           const previewUrl = await canvasToObjectUrl(canvas);
           return { source, canvas, previewUrl, error: null };
         } catch (error) {
@@ -2022,7 +3249,7 @@ export function EditorClient({ project }: { project: Project }) {
             error: error instanceof Error ? error.message : "Unable to load this source image.",
           };
         }
-      }),
+      },
     )
       .then((loadedSources) => {
         if (cancelled) {
@@ -2035,6 +3262,7 @@ export function EditorClient({ project }: { project: Project }) {
         const canvases = new Map<string, HTMLCanvasElement>();
         const previewUrls = new Map<string, string>();
         const nextStatus: Record<string, SourceStatus> = {};
+        const previousPreviewUrls = sourcePreviewObjectUrlsRef.current;
         let readyCount = 0;
         for (const { source, canvas, previewUrl, error } of loadedSources) {
           if (!canvas || !previewUrl) {
@@ -2045,6 +3273,9 @@ export function EditorClient({ project }: { project: Project }) {
           previewUrls.set(source.id, previewUrl);
           nextStatus[source.id] = { ready: true, previewUrl, error: null };
           readyCount += 1;
+        }
+        for (const [id, url] of previousPreviewUrls.entries()) {
+          if (!previewUrls.has(id)) URL.revokeObjectURL(url);
         }
         sourceCanvasesRef.current = canvases;
         sourceCanvasRef.current = canvases.get(sources[0]?.id ?? "") ?? null;
@@ -2060,17 +3291,81 @@ export function EditorClient({ project }: { project: Project }) {
     return () => {
       cancelled = true;
     };
-  }, [sourceLoadKey]);
+  }, [draftChecked, sourceLoadKey]);
 
   useEffect(() => {
-    if (settings.sourceImages.length && !sourceReady) return;
+    if (!draftChecked) return;
+    const assets = settingsRef.current.clipartAssets;
     let cancelled = false;
+    setClipartReady(!assets.length);
+    clipartCanvasesRef.current = new Map();
+    clipartLayerCacheRef.current = new Map();
+
+    if (!assets.length) {
+      setPlacingClipartAssetId(null);
+      setSelectedClipartAssetId(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void mapWithConcurrency(
+      assets,
+      2,
+      async (asset) => {
+        const url = asset.url ?? asset.dataUrl ?? null;
+        if (!url) return { asset, canvas: null };
+        try {
+          const canvas = resizeImage(await loadImageToCanvas(url, asset.name), 1600, 1600);
+          return { asset, canvas };
+        } catch {
+          return { asset, canvas: null };
+        }
+      },
+    ).then((loadedAssets) => {
+      if (cancelled) return;
+      const canvases = new Map<string, HTMLCanvasElement>();
+      for (const { asset, canvas } of loadedAssets) {
+        if (canvas) canvases.set(asset.id, canvas);
+      }
+      clipartCanvasesRef.current = canvases;
+      setClipartReady(canvases.size >= assets.filter((asset) => asset.url || asset.dataUrl).length);
+      setSelectedClipartAssetId((current) => (current && assets.some((asset) => asset.id === current) ? current : assets[0]?.id ?? null));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clipartLoadKey, draftChecked]);
+
+  useEffect(() => {
+    if (!draftChecked) return;
+    if (settings.sourceImages.length && !sourceReady) return;
+    if (settings.clipartImages.length && !clipartReady) return;
+    let cancelled = false;
+    const controller = new AbortController();
+    const processingSignature = buildProcessingSignature(settings);
+
+    if (lastProcessedSignatureRef.current === processingSignature && processedCanvasRef.current) {
+      setProcessing(false);
+      return () => {
+        cancelled = true;
+        controller.abort();
+      };
+    }
+
+    lastProcessedSignatureRef.current = processingSignature;
     setProcessing(true);
 
-    const timer = window.setTimeout(() => {
-      const layouts = sourceLayouts(settings.sourceImages);
-      const layers = layouts
-        .filter((layout) => sourceCanvasesRef.current.has(layout.source.id))
+    const startAt = performance.now();
+    if (!processingDebounceRef.current) {
+      processingDebounceRef.current = createDebouncedAction(() => undefined, PREVIEW_PROCESSING_DEBOUNCE_MS);
+    }
+    processingDebounceRef.current.cancel();
+    processingDebounceRef.current = createDebouncedAction(() => {
+      const layouts = sourceRenderOrder(settings.sourceImages);
+      const sourceLayers = layouts
+        .filter((layout) => layout.source.visible !== false && sourceCanvasesRef.current.has(layout.source.id))
         .map((layout) => {
           const cacheKey = `${settings.graphWidth}x${settings.graphHeight}:${settings.imageOffsetX},${settings.imageOffsetY}:${sourceProcessingCacheKey(layout.source, layout)}`;
           let canvas = sourceLayerCacheRef.current.get(cacheKey);
@@ -2083,10 +3378,33 @@ export function EditorClient({ project }: { project: Project }) {
             settings: sourceSettings(settings, layout.source),
           };
         });
+      const clipartLayers = settings.clipartImages
+        .filter((clipart) => clipart.visible !== false && clipartCanvasesRef.current.has(clipart.assetId))
+        .map((clipart) => {
+          const cacheKey = `${settings.graphWidth}x${settings.graphHeight}:${clipart.assetId}:${clipart.x},${clipart.y}:${clipart.width},${clipart.height}:${clipart.rotationDegrees}:${clipart.flipX}:${clipart.flipY}`;
+          let canvas = clipartLayerCacheRef.current.get(cacheKey);
+          if (!canvas) {
+            canvas = composeClipartLayerCanvas(clipart, clipartCanvasesRef.current, settings);
+            clipartLayerCacheRef.current.set(cacheKey, canvas);
+          }
+          return {
+            canvas,
+            settings: clipartSettings(settings, clipart),
+          };
+        });
+      const layers = [...sourceLayers, ...clipartLayers];
       if (sourceLayerCacheRef.current.size > settings.sourceImages.length * 4) {
         const liveKeys = new Set(layouts.map((layout) => `${settings.graphWidth}x${settings.graphHeight}:${settings.imageOffsetX},${settings.imageOffsetY}:${sourceProcessingCacheKey(layout.source, layout)}`));
         for (const key of sourceLayerCacheRef.current.keys()) {
           if (!liveKeys.has(key)) sourceLayerCacheRef.current.delete(key);
+        }
+      }
+      if (clipartLayerCacheRef.current.size > Math.max(4, settings.clipartImages.length * 4)) {
+        const liveKeys = new Set(
+          settings.clipartImages.map((clipart) => `${settings.graphWidth}x${settings.graphHeight}:${clipart.assetId}:${clipart.x},${clipart.y}:${clipart.width},${clipart.height}:${clipart.rotationDegrees}:${clipart.flipX}:${clipart.flipY}`),
+        );
+        for (const key of clipartLayerCacheRef.current.keys()) {
+          if (!liveKeys.has(key)) clipartLayerCacheRef.current.delete(key);
         }
       }
       const renderSettings = deriveGraphSettings({
@@ -2094,7 +3412,7 @@ export function EditorClient({ project }: { project: Project }) {
         imageWidth: settings.graphWidth,
         imageHeight: settings.graphHeight,
       });
-      void pixelateLayeredImagesWithWorker(layers, renderSettings)
+      void pixelateLayeredImagesWithWorker(layers, renderSettings, { signal: controller.signal })
         .then((result) => {
           if (cancelled) return;
           processedCanvasRef.current = result.canvas;
@@ -2105,20 +3423,139 @@ export function EditorClient({ project }: { project: Project }) {
           setFloatingPalette((current) => (current && result.fillRegions.some((region) => region.id === current.regionId) ? current : null));
           setPalette(result.palette);
           setProcessing(false);
+          logProcessingTiming("preview-processing", startAt);
         })
         .catch((error) => {
+          if (controller.signal.aborted) return;
           if (!cancelled) {
             setProcessing(false);
             setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to process image." });
           }
         });
-    }, 60);
+    }, PREVIEW_PROCESSING_DEBOUNCE_MS);
+    processingDebounceRef.current.run();
 
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
+      controller.abort();
+      processingDebounceRef.current?.cancel();
     };
-  }, [drawPreview, settings, sourceReady]);
+  }, [clipartReady, draftChecked, drawPreview, settings, sourceReady, renderKey]);
+
+  function copySelectedLayer() {
+    const current = settingsRef.current;
+    if (selectedSourceId) {
+      const source = current.sourceImages.find((item) => item.id === selectedSourceId);
+      if (!source) return false;
+      setCopiedLayer({ type: "source", source });
+      setCopiedFillColor(null);
+      setNotice({ tone: "info", text: "Layer copied." });
+      return true;
+    }
+    if (!selectedDrawingLayerId) return false;
+    const [type, id] = selectedDrawingLayerId.split(":") as ["cell" | "shape" | "clipart", string];
+    if (type === "cell") {
+      const cell = current.cellPaints.find((item) => item.id === id);
+      if (!cell) return false;
+      setCopiedLayer({ type: "cell", cell });
+    } else if (type === "shape") {
+      const shape = current.graphShapes.find((item) => item.id === id);
+      if (!shape) return false;
+      setCopiedLayer({ type: "shape", shape });
+    } else {
+      const clipart = current.clipartImages.find((item) => item.id === id);
+      if (!clipart) return false;
+      setCopiedLayer({ type: "clipart", clipart });
+    }
+    setCopiedFillColor(null);
+    setNotice({ tone: "info", text: "Layer copied." });
+    return true;
+  }
+
+  function pasteCopiedLayer() {
+    if (!copiedLayer) return false;
+    const nextId = drawingId(copiedLayer.type);
+    setSettingsWithHistory((current) => {
+      if (copiedLayer.type === "source") {
+        const source = copiedLayer.source;
+        return {
+          ...current,
+          fillRegions: {},
+          sourceImages: [
+            ...current.sourceImages,
+            {
+              ...source,
+              id: nextId,
+              name: `${source.name.replace(/\s+copy$/i, "")} copy`,
+              x: clampSourceX(source.x + COPY_OFFSET_CELLS, current.graphWidth, source.width),
+              y: clampFreeCellCoordinate(source.y + COPY_OFFSET_CELLS, source.y),
+              locked: false,
+              visible: true,
+            },
+          ],
+        };
+      }
+      if (copiedLayer.type === "cell") {
+        const cell = copiedLayer.cell;
+        return {
+          ...current,
+          cellPaints: [
+            ...current.cellPaints,
+            {
+              ...cell,
+              id: nextId,
+              name: `${cell.name.replace(/\s+copy$/i, "")} copy`,
+              x: roundCells(Math.max(0, cell.x + COPY_OFFSET_CELLS)),
+              y: roundCells(Math.max(0, cell.y + COPY_OFFSET_CELLS)),
+              locked: false,
+              visible: true,
+            },
+          ],
+        };
+      }
+      if (copiedLayer.type === "shape") {
+        const shape = copiedLayer.shape;
+        return {
+          ...current,
+          graphShapes: [
+            ...current.graphShapes,
+            {
+              ...shape,
+              id: nextId,
+              name: `${shape.name.replace(/\s+copy$/i, "")} copy`,
+              x: clampFreeCellCoordinate(shape.x + COPY_OFFSET_CELLS, shape.x),
+              y: clampFreeCellCoordinate(shape.y + COPY_OFFSET_CELLS, shape.y),
+              locked: false,
+              visible: true,
+            },
+          ],
+        };
+      }
+      const clipart = copiedLayer.clipart;
+      return {
+        ...current,
+        fillRegions: {},
+        clipartImages: [
+          ...current.clipartImages,
+          {
+            ...clipart,
+            id: nextId,
+            name: `${clipart.name.replace(/\s+copy$/i, "")} copy`,
+            x: clampFreeCellCoordinate(clipart.x + COPY_OFFSET_CELLS, clipart.x),
+            y: clampFreeCellCoordinate(clipart.y + COPY_OFFSET_CELLS, clipart.y),
+            locked: false,
+            visible: true,
+          },
+        ],
+      };
+    });
+    if (copiedLayer.type === "source") selectSourceLayer(nextId);
+    else if (copiedLayer.type === "cell") selectCellLayer(nextId);
+    else if (copiedLayer.type === "shape") selectGeneratedShape(nextId);
+    else selectClipartLayer(nextId);
+    setNotice({ tone: "ok", text: "Layer pasted." });
+    return true;
+  }
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -2137,12 +3574,27 @@ export function EditorClient({ project }: { project: Project }) {
         nudgeSelectedSource(nudge[0], nudge[1]);
         return;
       }
+      if ((event.key === "Delete" || event.key === "Backspace") && (selectedSourceId || selectedDrawingLayerId) && !isFormControlTarget(event.target)) {
+        event.preventDefault();
+        deleteSelectedLayer({ skipConfirm: true });
+        return;
+      }
       if (!(event.ctrlKey || event.metaKey)) return;
       const key = event.key.toLowerCase();
       if ((key === "z" || key === "y") && !isTextEditingTarget(event.target)) {
         event.preventDefault();
         restoreSettingsHistory(key === "y" || event.shiftKey ? "redo" : "undo");
         return;
+      }
+      if ((key === "c" || key === "v") && !isFormControlTarget(event.target)) {
+        if (key === "c" && copySelectedLayer()) {
+          event.preventDefault();
+          return;
+        }
+        if (key === "v" && pasteCopiedLayer()) {
+          event.preventDefault();
+          return;
+        }
       }
       if (key !== "c" || !selectedFillRegion || isFormControlTarget(event.target)) return;
 
@@ -2162,7 +3614,7 @@ export function EditorClient({ project }: { project: Project }) {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [nudgeSelectedSource, restoreSettingsHistory, selectedDrawingLayerId, selectedFillRegion, selectedFillRegionColor, selectedSourceId]);
+  }, [copiedLayer, nudgeSelectedSource, restoreSettingsHistory, selectedDrawingLayerId, selectedFillRegion, selectedFillRegionColor, selectedSourceId]);
 
   useEffect(() => {
     return () => {
@@ -2173,6 +3625,13 @@ export function EditorClient({ project }: { project: Project }) {
 
   async function uploadSourceImages(filesInput: File[] | FileList, successText = "Source images added.", replaceSourceId?: string) {
     setNotice(null);
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setNotice({
+        tone: "error",
+        text: "Adding, replacing, or cropping source images needs a connection. You can keep editing loaded images and save an offline draft.",
+      });
+      return false;
+    }
     const files = Array.from(filesInput);
     if (!files.length) return false;
     if (replaceSourceId && files.length !== 1) {
@@ -2229,6 +3688,7 @@ export function EditorClient({ project }: { project: Project }) {
           topPadding: replacedSource?.topPadding ?? 0,
           bottomPadding: replacedSource?.bottomPadding ?? 0,
           locked: replacedSource?.locked ?? false,
+          visible: replacedSource?.visible ?? true,
           rotationDegrees: replacedSource?.rotationDegrees ?? 0,
           flipX: replacedSource?.flipX ?? false,
           flipY: replacedSource?.flipY ?? false,
@@ -2325,26 +3785,241 @@ export function EditorClient({ project }: { project: Project }) {
       message: error instanceof Error ? error.message : "Unable to save source images to the project.",
     }));
 
-    setNotice(result.ok ? { tone: "ok", text: successText } : { tone: "error", text: result.message });
+    if (result.ok) {
+      removeEditorSessionDraft(project.id);
+      setHasSessionDraft(false);
+      setNotice({ tone: "ok", text: successText });
+    } else {
+      setNotice({ tone: "error", text: result.message });
+    }
     setUploadingSources(false);
     setReplacingSourceId(null);
     return true;
   }
 
-  function selectFullSourceCrop() {
-    const sourceCanvas = sourceCanvasRef.current;
+  function getDefaultClipartName(file: File) {
+    const trimmedName = file.name.trim();
+    const withoutExtension = trimmedName.replace(/\.[^.]+$/i, "");
+    return normalizeClipartName(withoutExtension || trimmedName, "Clipart");
+  }
+
+  function normalizeClipartName(name: string, fallback: string) {
+    const trimmed = name.trim();
+    return trimmed || fallback;
+  }
+
+  function promptClipartName(file: File) {
+    const fallback = getDefaultClipartName(file);
+    const nextName = window.prompt("Name this clipart to save it for reuse", fallback);
+    return normalizeClipartName(nextName ?? "", fallback);
+  }
+
+  async function uploadClipartAssets(filesInput: File[] | FileList) {
+    setNotice(null);
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setNotice({ tone: "error", text: "Uploading reusable cliparts needs a connection." });
+      return false;
+    }
+    const files = Array.from(filesInput);
+    if (!files.length) return false;
+    for (const file of files) {
+      if (!isAllowedImageFile(file) || isPdfFile(file)) {
+        setNotice({ tone: "error", text: "Use PNG, JPG, WEBP, or SVG cliparts only." });
+        return false;
+      }
+      if (file.size > MAX_CLIPART_UPLOAD_BYTES) {
+        setNotice({ tone: "error", text: `Each clipart must be ${bytesToSize(MAX_CLIPART_UPLOAD_BYTES)} or smaller.` });
+        return false;
+      }
+    }
+
+    setUploadingCliparts(true);
+    setNotice({ tone: "info", text: "Uploading cliparts..." });
+    try {
+      const namedFiles = files.map((file) => ({
+        id: crypto.randomUUID(),
+        file,
+        name: promptClipartName(file),
+      }));
+      const prepared = await mapWithConcurrency(namedFiles, 2, async (item) => {
+        const canvas = await loadImageToCanvas(item.file, item.file.name);
+        return {
+          id: item.id,
+          file: item.file,
+          name: item.name,
+          width: Math.max(1, canvas.width),
+          height: Math.max(1, canvas.height),
+          url: URL.createObjectURL(item.file),
+        };
+      });
+      uploadedSourceObjectUrlsRef.current.push(...prepared.map((item) => item.url));
+
+      const formData = new FormData();
+      for (const item of prepared) {
+        formData.append("files", item.file);
+        formData.append("ids", item.id);
+        formData.append("names", item.name);
+      }
+
+      let uploadedAssets: UploadedClipartAsset[];
+      if (isPersistableProjectId(project.id)) {
+        const response = await fetch(`/api/projects/${project.id}/cliparts`, {
+          method: "POST",
+          body: formData,
+        });
+        const payload = (await response.json().catch(() => ({}))) as ClipartUploadResponse;
+        if (!response.ok) {
+          throw new Error(typeof payload.message === "string" ? payload.message : "Unable to upload cliparts.");
+        }
+        uploadedAssets = Array.isArray(payload.assets) ? payload.assets.filter(isUploadedClipartAsset) : [];
+        if (uploadedAssets.length !== prepared.length) throw new Error("Unable to read uploaded clipart details.");
+      } else {
+        uploadedAssets = prepared.map((item) => ({
+          id: item.id,
+          name: item.name,
+          path: "",
+          url: item.url,
+          mimeType: item.file.type || "image/png",
+          createdAt: new Date().toISOString(),
+        }));
+      }
+
+      const preparedById = new Map(prepared.map((item) => [item.id, item] as const));
+      const addedAssets: GraphClipartAsset[] = uploadedAssets.map((asset) => {
+        const preparedItem = preparedById.get(asset.id);
+        return {
+          id: asset.id,
+          name: normalizeClipartName(asset.name, preparedItem?.name || "Clipart"),
+          path: asset.path || null,
+          url: asset.url || preparedItem?.url || null,
+          dataUrl: null,
+          mimeType: asset.mimeType || preparedItem?.file.type || "image/png",
+          width: preparedItem?.width ?? 1,
+          height: preparedItem?.height ?? 1,
+          createdAt: asset.createdAt,
+        };
+      });
+      const nextSettings = deriveGraphSettings({
+        ...settingsRef.current,
+        clipartAssets: [...settingsRef.current.clipartAssets, ...addedAssets],
+      });
+      settingsRef.current = nextSettings;
+      setSettings(nextSettings);
+      setSelectedClipartAssetId(addedAssets[0]?.id ?? selectedClipartAssetId);
+      setInspectorTab("draw");
+      setDrawTab("clipart");
+      setGeneratedImagesCollapsed(false);
+
+      if (isPersistableProjectId(project.id)) {
+        const result = await saveProjectState({
+          projectId: project.id,
+          title: title.trim(),
+          description: description.trim(),
+          settings: nextSettings,
+          width: processedCanvasRef.current?.width ?? nextSettings.outputWidth,
+          height: processedCanvasRef.current?.height ?? nextSettings.outputHeight,
+          colorCount: palette.length,
+          palettes: palette.map((color, index) => ({ ...color, sortOrder: index })),
+        }).catch((error) => ({
+          ok: false as const,
+          message: error instanceof Error ? error.message : "Unable to save cliparts to the project.",
+        }));
+        if (!result.ok) {
+          setNotice({ tone: "error", text: result.message });
+          setUploadingCliparts(false);
+          return false;
+        }
+      }
+
+      setNotice({ tone: "ok", text: `${addedAssets.length} clipart${addedAssets.length === 1 ? "" : "s"} uploaded.` });
+      setUploadingCliparts(false);
+      return true;
+    } catch (error) {
+      setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to upload cliparts." });
+      setUploadingCliparts(false);
+      return false;
+    }
+  }
+
+  async function deleteClipartAsset(assetId: string) {
+    const current = settingsRef.current;
+    const asset = current.clipartAssets.find((item) => item.id === assetId);
+    if (!asset) return false;
+    if (deletingClipartAssetId) return false;
+
+    const nextSettings = deriveGraphSettings({
+      ...current,
+      clipartAssets: current.clipartAssets.filter((item) => item.id !== assetId),
+      clipartImages: current.clipartImages.filter((clipart) => clipart.assetId !== assetId),
+    });
+
+    setDeletingClipartAssetId(assetId);
+    setSettingsWithHistory(nextSettings);
+    setSelectedClipartAssetId((currentId) => (currentId === assetId ? null : currentId));
+    if (placingClipartAssetId === assetId) setPlacingClipartAssetId(null);
+    setSelectedDrawingLayerId((currentId) => {
+      if (!currentId?.startsWith("clipart:")) return currentId;
+      const selectedId = currentId.split(":")[1] ?? "";
+      return nextSettings.clipartImages.some((clipart) => clipart.id === selectedId) ? currentId : null;
+    });
+
+    if (isPersistableProjectId(project.id)) {
+      const result = await saveProjectState({
+        projectId: project.id,
+        title: title.trim(),
+        description: description.trim(),
+        settings: nextSettings,
+        width: processedCanvasRef.current?.width ?? nextSettings.outputWidth,
+        height: processedCanvasRef.current?.height ?? nextSettings.outputHeight,
+        colorCount: palette.length,
+        palettes: palette.map((color, index) => ({ ...color, sortOrder: index })),
+      }).catch((error) => ({
+        ok: false as const,
+        message: error instanceof Error ? error.message : "Unable to delete clipart from the project.",
+      }));
+
+      if (!result.ok) {
+        setNotice({ tone: "error", text: result.message });
+        setDeletingClipartAssetId(null);
+        return false;
+      }
+
+      removeEditorSessionDraft(project.id);
+      setHasSessionDraft(false);
+      setNotice({ tone: "ok", text: `"${asset.name}" deleted.` });
+      setDeletingClipartAssetId(null);
+      return true;
+    }
+
+    setNotice({ tone: "ok", text: `"${asset.name}" removed from this editor.` });
+    setDeletingClipartAssetId(null);
+    return true;
+  }
+
+  function selectFullSourceCrop(sourceId = cropSource?.id) {
+    const sourceCanvas = sourceId ? sourceCanvasesRef.current.get(sourceId) ?? null : sourceCanvasRef.current;
     if (!sourceCanvas) return;
     setSourceCropArea(fullCrop(sourceCanvas.width, sourceCanvas.height));
   }
 
+  function openSourceCrop(sourceId = cropSource?.id) {
+    if (!sourceId) return;
+    setSelectedSourceId(sourceId);
+    setSelectedDrawingLayerId(null);
+    setSourceCropMode(true);
+    setSourcesSectionCollapsed(true);
+    selectFullSourceCrop(sourceId);
+  }
+
   async function applySourceCrop() {
-    const sourceCanvas = sourceCanvasRef.current;
-    if (!sourceCanvas || !sourceCropArea) return;
+    if (!cropSource || !sourceCropArea) return;
+    const sourceCanvas = sourceCanvasesRef.current.get(cropSource.id) ?? null;
+    if (!sourceCanvas) return;
 
     setSourceCropPending(true);
     try {
-      const croppedFile = await cropCanvasToFile(sourceCanvas, sourceCropArea, sourceName, "image/png");
-      const ok = primarySource ? await uploadSourceImages([croppedFile], "Source crop applied.", primarySource.id) : false;
+      const croppedFile = await cropCanvasToFile(sourceCanvas, sourceCropArea, cropSource.name, "image/png");
+      const ok = await uploadSourceImages([croppedFile], "Source crop applied.", cropSource.id);
       if (ok) {
         setSourceCropMode(false);
         setSourceCropArea(null);
@@ -2371,8 +4046,39 @@ export function EditorClient({ project }: { project: Project }) {
     }
   }
 
+  function saveSessionDraft(message: string, tone: Notice["tone"] = "ok") {
+    try {
+      const canvas = processedCanvasRef.current;
+      const currentSettings = settingsRef.current;
+      const draft = createEditorSessionDraft({
+        projectId: project.id,
+        title,
+        description,
+        settings: currentSettings,
+        palette,
+        width: canvas?.width ?? currentSettings.outputWidth,
+        height: canvas?.height ?? currentSettings.outputHeight,
+        colorCount: palette.length,
+      });
+      writeEditorSessionDraft(draft);
+      setHasSessionDraft(true);
+      setNotice({ tone, text: message });
+      return true;
+    } catch (error) {
+      setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to save offline draft." });
+      return false;
+    }
+  }
+
   function saveProject() {
     const canvas = processedCanvasRef.current;
+    const online = typeof navigator === "undefined" ? true : navigator.onLine;
+    if (!online) {
+      setIsOnline(false);
+      saveSessionDraft("Offline draft saved in this browser session.");
+      return;
+    }
+
     startTransition(async () => {
       try {
         const result = await saveProjectState({
@@ -2387,14 +4093,17 @@ export function EditorClient({ project }: { project: Project }) {
         });
 
         if (!result.ok) {
-          setNotice({ tone: "error", text: result.message });
+          saveSessionDraft(`Database save failed. A session draft was saved instead. ${result.message}`, "info");
           return;
         }
 
         await saveProcessedImage();
+        removeEditorSessionDraft(project.id);
+        setHasSessionDraft(false);
         setNotice({ tone: "ok", text: "Project saved." });
       } catch (error) {
-        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to save project." });
+        const detail = error instanceof Error ? error.message : "Unable to save project.";
+        saveSessionDraft(`Could not reach the database. Offline draft saved in this browser session. ${detail}`, "info");
       }
     });
   }
@@ -2402,562 +4111,646 @@ export function EditorClient({ project }: { project: Project }) {
   function exportPNG() {
     const canvas = processedCanvasRef.current;
     if (!canvas) return;
-    exportCanvasAsPNG(canvas, `${filename}.png`);
+    void import("@/lib/canvas/exports")
+      .then(({ exportCanvasAsPNG }) => exportCanvasAsPNG(canvas, `${filename}.png`))
+      .catch((error) => {
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to export PNG." });
+      });
   }
 
   function exportPDF() {
     const canvas = processedCanvasRef.current;
     if (!canvas) return;
-    void exportCanvasAsPDF(canvas, `${filename}.pdf`, settings);
+    void import("@/lib/canvas/exports")
+      .then(({ exportCanvasAsPDF }) => exportCanvasAsPDF(canvas, `${filename}.pdf`, settings))
+      .catch((error) => {
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to export PDF." });
+      });
   }
 
   function printGraph() {
     const canvas = processedCanvasRef.current;
     if (!canvas) return;
-    try {
-      printCanvas(canvas, settings, title || "Graph pixel chart");
-    } catch (error) {
-      setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to open print view." });
-    }
+    void import("@/lib/canvas/exports")
+      .then(({ printCanvas }) => {
+        printCanvas(canvas, settings, title || "Graph pixel chart");
+      })
+      .catch((error) => {
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to open print view." });
+      });
   }
 
   function exportJSON() {
-    exportSettingsAsJSON(`${filename}.json`, settings, palette, {
-      projectId: project.id,
-      title,
-      description,
-      sourceName,
-      exportedAt: new Date().toISOString(),
-    });
+    void import("@/lib/canvas/exports")
+      .then(({ exportSettingsAsJSON }) => {
+        exportSettingsAsJSON(`${filename}.json`, settings, palette, {
+          projectId: project.id,
+          title,
+          description,
+          sourceName,
+          exportedAt: new Date().toISOString(),
+        });
+      })
+      .catch((error) => {
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to export JSON." });
+      });
   }
 
-  const sourcePanel = (
-    <aside className="relative space-y-4 rounded-md border border-[var(--line)] bg-white p-4 shadow-sm lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950">
-          <ImageIcon size={16} aria-hidden="true" />
-          Source
-        </h2>
-        <div className="flex gap-2">
-          {sourcePreviewUrl ? (
-            sourceCropMode ? (
-              <>
-                <button
-                  type="button"
-                  onClick={applySourceCrop}
-                  disabled={!sourceCropArea || sourceCropPending}
-                  className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                  title="Apply crop"
-                >
-                  {sourceCropPending ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={selectFullSourceCrop}
-                  className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
-                  title="Full image"
-                >
-                  <Maximize2 size={15} aria-hidden="true" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSourceCropMode(false);
-                    setSourceCropArea(null);
-                  }}
-                  className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
-                  title="Cancel crop"
-                >
-                  <X size={15} aria-hidden="true" />
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  setSourceCropMode(true);
-                  selectFullSourceCrop();
-                }}
-                className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
-                title="Crop source"
-              >
-                <Crop size={15} aria-hidden="true" />
-              </button>
-            )
-          ) : null}
-          <label className={`grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 ${uploadingSources ? "cursor-wait opacity-70" : "cursor-pointer"}`} title="Add images">
-            {uploadingSources ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Upload size={15} aria-hidden="true" />}
-            <input
-              type="file"
-              accept={IMAGE_ACCEPT}
-              multiple
-              disabled={uploadingSources}
-              className="sr-only"
-              onChange={(event) => {
-                const files = Array.from(event.target.files ?? []);
-                event.target.value = "";
-                if (files.length) void uploadSourceImages(files);
-              }}
-            />
-          </label>
-        </div>
-      </div>
+  const selectedCellLayer =
+    selectedDrawingLayerId?.startsWith("cell:")
+      ? settings.cellPaints.find((cell) => selectedDrawingLayerId === drawingLayerKey("cell", cell.id)) ?? null
+      : null;
+  const selectedShapeLayer =
+    selectedDrawingLayerId?.startsWith("shape:")
+      ? settings.graphShapes.find((shape) => selectedDrawingLayerId === drawingLayerKey("shape", shape.id)) ?? null
+      : null;
+  const selectedClipartLayer =
+    selectedDrawingLayerId?.startsWith("clipart:")
+      ? settings.clipartImages.find((clipart) => selectedDrawingLayerId === drawingLayerKey("clipart", clipart.id)) ?? null
+      : null;
+  const selectedSourceIndex = selectedSource ? settings.sourceImages.findIndex((source) => source.id === selectedSource.id) : -1;
+  const selectedCellIndex = selectedCellLayer ? settings.cellPaints.findIndex((cell) => cell.id === selectedCellLayer.id) : -1;
+  const selectedShapeIndex = selectedShapeLayer ? settings.graphShapes.findIndex((shape) => shape.id === selectedShapeLayer.id) : -1;
+  const selectedClipartIndex = selectedClipartLayer ? settings.clipartImages.findIndex((clipart) => clipart.id === selectedClipartLayer.id) : -1;
+  const selectedLayerLocked = Boolean(selectedSource?.locked || selectedCellLayer?.locked || selectedShapeLayer?.locked || selectedClipartLayer?.locked);
+  const hasSelectedLayer = Boolean(selectedSource || selectedCellLayer || selectedShapeLayer || selectedClipartLayer);
+  const sourceErrorCount = Object.values(sourceStatus).filter((status) => status.error).length;
+  const totalCells = Math.round(settings.graphWidth * settings.graphHeight);
+  const visibleLayerCount = settings.sourceImages.length + settings.cellPaints.length + settings.graphShapes.length + settings.clipartImages.length;
+  const generatedLayerCount = settings.graphShapes.length + settings.clipartImages.length;
+  const statusLabel = sourceErrorCount ? "Source needs attention" : processing ? "Processing graph" : sourceReady || !settings.sourceImages.length ? "Processing complete" : "Loading source files";
+  const statusMeta = sourceErrorCount ? `${sourceErrorCount} issue${sourceErrorCount === 1 ? "" : "s"}` : processing ? "Working" : sourceReady || !settings.sourceImages.length ? "Ready" : "Loading";
+  const draftShapePreviewDimensions = draftShapeDimensionsCells();
+  const draftClipartPreviewDimensions = draftClipartDimensionsCells(selectedClipartAsset);
+  const filteredClipartAssets = useMemo(() => {
+    const search = clipartSearch.trim().toLowerCase();
+    if (!search) return settings.clipartAssets;
+    return settings.clipartAssets.filter((asset) => asset.name.toLowerCase().includes(search));
+  }, [clipartSearch, settings.clipartAssets]);
 
-      <div className="rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
-        <p className="truncate text-sm font-semibold text-slate-950">{title || "Graph preview"}</p>
-        <p className="mt-1 text-xs text-slate-500">
-          {settings.sourceImages.length
-            ? sourceReady
-              ? `${settings.sourceImages.length} source${settings.sourceImages.length === 1 ? "" : "s"} ready`
-              : "Loading source files"
-            : settings.cellPaints.length || settings.graphShapes.length
-              ? `${settings.cellPaints.length + settings.graphShapes.length} drawing layer${settings.cellPaints.length + settings.graphShapes.length === 1 ? "" : "s"}`
-              : "Waiting for source files"}
-        </p>
-      </div>
+  function formatCount(value: number) {
+    return Math.max(0, Math.round(value)).toLocaleString("en-US");
+  }
 
-      {sourceCropMode && sourcePreviewUrl ? (
-        <div className="overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)]">
-          <ManualCropper imageUrl={sourcePreviewUrl} crop={sourceCropArea} onCropChange={setSourceCropArea} className="h-[min(75vh,42rem)] p-3" />
-        </div>
-      ) : settings.sourceImages.length || settings.cellPaints.length || settings.graphShapes.length ? (
-        <div className="overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
-          <canvas ref={overviewCanvasRef} className="max-h-72 w-full rounded bg-white object-contain shadow-sm" style={{ height: "auto" }} />
-        </div>
-      ) : (
-        <div className="grid min-h-48 place-items-center rounded-md border border-dashed border-slate-300 bg-[var(--panel)] text-center text-sm text-slate-500">
-          Upload source files
-        </div>
-      )}
+  function selectedLayerCanMove(direction: -1 | 1) {
+    if (selectedSource) {
+      const next = selectedSourceIndex + direction;
+      return selectedSourceIndex >= 0 && next >= 0 && next < settings.sourceImages.length && !selectedSource.locked && !settings.sourceImages[next]?.locked;
+    }
+    if (selectedCellLayer) {
+      const next = selectedCellIndex + direction;
+      return selectedCellIndex >= 0 && next >= 0 && next < settings.cellPaints.length && !selectedCellLayer.locked && !settings.cellPaints[next]?.locked;
+    }
+    if (selectedShapeLayer) {
+      const next = selectedShapeIndex + direction;
+      return selectedShapeIndex >= 0 && next >= 0 && next < settings.graphShapes.length && !selectedShapeLayer.locked && !settings.graphShapes[next]?.locked;
+    }
+    if (selectedClipartLayer) {
+      const next = selectedClipartIndex + direction;
+      return selectedClipartIndex >= 0 && next >= 0 && next < settings.clipartImages.length && !selectedClipartLayer.locked && !settings.clipartImages[next]?.locked;
+    }
+    return false;
+  }
 
-      {settings.sourceImages.length || settings.cellPaints.length || settings.graphShapes.length ? (
-        <div className="space-y-3">
-          {settings.sourceImages.map((source, index) => {
-            const status = sourceStatus[source.id];
-            const expanded = Boolean(expandedSourceIds[source.id]);
-            const selected = selectedSourceId === source.id;
-            const replacing = replacingSourceId === source.id;
-            const previousLocked = Boolean(settings.sourceImages[index - 1]?.locked);
-            const nextLocked = Boolean(settings.sourceImages[index + 1]?.locked);
-            return (
-              <div key={source.id} className={`space-y-3 rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
-                <div className="grid gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedSourceId(source.id);
-                      setSelectedDrawingLayerId(null);
-                      toggleSourceCard(source.id);
-                    }}
-                    className="grid min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
-                  >
-                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-[var(--teal)] text-xs font-bold text-white">{index + 1}</span>
-                    {status?.previewUrl ? (
-                      <img src={status.previewUrl} alt="" className="h-12 w-12 shrink-0 rounded border border-[var(--line)] bg-[var(--panel)] object-contain p-1" />
-                    ) : (
-                      <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] text-slate-400">
-                        <ImageIcon size={16} aria-hidden="true" />
-                      </span>
-                    )}
-                    <span className="min-w-0">
-                      <span className="block truncate text-sm font-semibold text-slate-950">{source.name}</span>
-                      <span className="mt-1 inline-flex items-center gap-1 text-xs text-slate-500">
-                        {source.locked ? <Lock size={12} aria-hidden="true" /> : <Unlock size={12} aria-hidden="true" />}
-                        {status?.ready ? "Ready" : status?.error || "Loading"}
-                      </span>
-                    </span>
-                    {expanded ? <ChevronDown size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" /> : <ChevronRight size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" />}
-                  </button>
-                  <div className="grid grid-cols-5 gap-1">
-                    <button
-                      type="button"
-                      onClick={() => moveSourceImage(source.id, -1)}
-                      disabled={source.locked || previousLocked || index === 0}
-                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                      title="Move up"
-                    >
-                      <ArrowUp size={14} aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => moveSourceImage(source.id, 1)}
-                      disabled={source.locked || nextLocked || index === settings.sourceImages.length - 1}
-                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                      title="Move down"
-                    >
-                      <ArrowDown size={14} aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => toggleSourceLock(source.id)}
-                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
-                      title={source.locked ? "Unlock image" : "Lock image"}
-                    >
-                      {source.locked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
-                    </button>
-                    <label
-                      className={`grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 ${
-                        uploadingSources ? "cursor-wait opacity-40" : "cursor-pointer"
-                      }`}
-                      title="Replace image and keep current position, size, and transform"
-                    >
-                      {replacing ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={14} aria-hidden="true" />}
-                      <input
-                        type="file"
-                        accept={IMAGE_ACCEPT}
-                        disabled={uploadingSources}
-                        className="sr-only"
-                        onChange={(event) => {
-                          const file = event.target.files?.[0] ?? null;
-                          event.target.value = "";
-                          if (file) void uploadSourceImages([file], `"${source.name}" replaced.`, source.id);
-                        }}
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => removeSourceImage(source.id)}
-                      disabled={source.locked}
-                      className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40"
-                      title="Remove source"
-                    >
-                      {deletingSourceId === source.id ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Trash2 size={14} aria-hidden="true" />}
-                    </button>
-                  </div>
-                </div>
-                {expanded ? (
-                <div className="grid min-w-0 grid-cols-2 gap-2">
-                  <NumberField
-                    label="Width (CM)"
-                    value={sourcePhysicalWidthCm(source)}
-                    min={0.01}
-                    max={1000}
-                    step={0.1}
-                    allowDecimalInput
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImagePhysicalWidthCm(source.id, value)}
-                  />
-                  <NumberField
-                    label={`Height (${MEASUREMENT_UNIT_LABELS[source.measurementUnit]})`}
-                    value={sourcePhysicalHeight(source)}
-                    min={0.01}
-                    max={roundMeasure(cmToUnit(1000 * settings.cellSizeCm, source.measurementUnit))}
-                    step={0.1}
-                    allowDecimalInput
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImagePhysicalHeight(source.id, value)}
-                  />
-                  <label className="grid min-w-0 gap-1.5">
-                    <span className="text-xs font-semibold text-slate-500">Size unit</span>
-                    <select
-                      value={source.measurementUnit}
-                      onChange={(event) => updateSourceImage(source.id, { measurementUnit: event.target.value as GraphSettings["measurementUnit"] })}
-                      className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-                    >
-                      <option value="cm">CM</option>
-                      <option value="in">IN</option>
-                    </select>
-                  </label>
-                  <NumberField
-                    label="Line size"
-                    value={source.imageLineThickness}
-                    min={MIN_IMAGE_LINE_THICKNESS}
-                    max={MAX_IMAGE_LINE_THICKNESS}
-                    step={0.01}
-                    allowDecimalInput
-                    onChange={(value) => updateSourceImage(source.id, { imageLineThickness: value })}
-                  />
-                  <NumberField
-                    label="Left padding (cells)"
-                    value={source.x}
-                    min={-1000}
-                    max={1000}
-                    step={1}
-                    allowDecimalInput
-                    wholeStep
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImage(source.id, { x: value })}
-                  />
-                  <NumberField
-                    label="Right padding (cells)"
-                    value={sourceRightPadding(source)}
-                    min={-1000}
-                    max={1000}
-                    step={1}
-                    allowDecimalInput
-                    wholeStep
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImage(source.id, { x: settings.graphWidth - source.width - value })}
-                  />
-                  <NumberField
-                    label="Top padding (cells)"
-                    value={source.y}
-                    min={-1000}
-                    max={1000}
-                    step={1}
-                    allowDecimalInput
-                    wholeStep
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImage(source.id, { y: value })}
-                  />
-                  <NumberField
-                    label="Bottom padding (cells)"
-                    value={sourceBottomPadding(source)}
-                    min={-1000}
-                    max={1000}
-                    step={1}
-                    allowDecimalInput
-                    wholeStep
-                    disabled={source.locked}
-                    onChange={(value) => updateSourceImage(source.id, { y: settings.graphHeight - source.height - value })}
-                  />
-                  <NumberField
-                    label="Fill detection"
-                    value={source.sourceFillThreshold}
-                    min={MIN_SOURCE_FILL_THRESHOLD}
-                    max={MAX_SOURCE_FILL_THRESHOLD}
-                    step={0.01}
-                    allowDecimalInput
-                    onChange={(value) => updateSourceImage(source.id, { sourceFillThreshold: value })}
-                  />
-                  <NumberField
-                    label="Fill width"
-                    value={source.sourceFillMinStrokePixels}
-                    min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS}
-                    max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS}
-                    onChange={(value) => updateSourceImage(source.id, { sourceFillMinStrokePixels: value })}
-                  />
-                  <NumberField
-                    label="Gap closing"
-                    value={source.strokeGapClosePixels}
-                    min={MIN_STROKE_GAP_CLOSE_PIXELS}
-                    max={MAX_STROKE_GAP_CLOSE_PIXELS}
-                    onChange={(value) => updateSourceImage(source.id, { strokeGapClosePixels: value })}
-                  />
-                  <button type="button" onClick={() => rotateSourceImage(source.id, -1)} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left">
-                    <RotateCcw size={15} aria-hidden="true" />
-                  </button>
-                  <button type="button" onClick={() => rotateSourceImage(source.id, 1)} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right">
-                    <RotateCw size={15} aria-hidden="true" />
-                  </button>
-                  <button type="button" onClick={() => flipSourceImage(source.id, "x")} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal">
-                    <FlipHorizontal size={15} aria-hidden="true" />
-                  </button>
-                  <button type="button" onClick={() => flipSourceImage(source.id, "y")} disabled={source.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical">
-                    <FlipVertical size={15} aria-hidden="true" />
-                  </button>
-                </div>
-                ) : null}
-              </div>
-            );
-          })}
-          {settings.cellPaints.map((cell, index) => {
-            const key = drawingLayerKey("cell", cell.id);
-            const expanded = Boolean(expandedDrawingLayerIds[key]);
-            const selected = selectedDrawingLayerId === key;
-            const previousLocked = Boolean(settings.cellPaints[index - 1]?.locked);
-            const nextLocked = Boolean(settings.cellPaints[index + 1]?.locked);
-            return (
-              <div key={key} className={`space-y-3 rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
-                <div className="grid gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedSourceId(null);
-                      setSelectedDrawingLayerId(key);
-                      toggleDrawingLayerCard(key);
-                    }}
-                    className="grid min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
-                  >
-                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-700 text-xs font-bold text-white">{settings.sourceImages.length + index + 1}</span>
-                    <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] p-1">
-                      <span className="h-8 w-8 border-2" style={{ borderColor: cell.lineColor, backgroundColor: isTransparentFillColor(cell.fillColor) ? "transparent" : cell.fillColor }} />
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block truncate text-sm font-semibold text-slate-950">{cell.name}</span>
-                      <span className="mt-1 inline-flex items-center gap-1 text-xs text-slate-500">
-                        {cell.locked ? <Lock size={12} aria-hidden="true" /> : <Unlock size={12} aria-hidden="true" />}
-                        Painted cell
-                      </span>
-                    </span>
-                    {expanded ? <ChevronDown size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" /> : <ChevronRight size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" />}
-                  </button>
-                  <div className="grid grid-cols-4 gap-1">
-                    <button type="button" onClick={() => moveDrawingLayer("cell", cell.id, -1)} disabled={cell.locked || previousLocked || index === 0} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move up">
-                      <ArrowUp size={14} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => moveDrawingLayer("cell", cell.id, 1)} disabled={cell.locked || nextLocked || index === settings.cellPaints.length - 1} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move down">
-                      <ArrowDown size={14} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => toggleDrawingLock("cell", cell.id)} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50" title={cell.locked ? "Unlock drawing" : "Lock drawing"}>
-                      {cell.locked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
-                    </button>
-                    <button type="button" onClick={() => removeDrawingLayer("cell", cell.id, cell.name, cell.locked)} disabled={cell.locked} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Remove drawing">
-                      <Trash2 size={14} aria-hidden="true" />
-                    </button>
-                  </div>
-                </div>
-                {expanded ? (
-                  <div className="grid min-w-0 grid-cols-2 gap-2">
-                    <NumberField label="Width (cells)" value={cell.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { width: value })} />
-                    <NumberField label="Height (cells)" value={cell.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { height: value })} />
-                    <NumberField label="Left padding (cells)" value={cell.x} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: value })} />
-                    <NumberField label="Right padding (cells)" value={drawingRightPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: settings.graphWidth - cell.width - value })} />
-                    <NumberField label="Top padding (cells)" value={cell.y} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: value })} />
-                    <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: settings.graphHeight - cell.height - value })} />
-                    <NumberField label="Line size" value={cell.lineWidth} min={1} max={24} disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { lineWidth: value })} />
-                    <ColorPresetField label="Line" value={cell.lineColor} onChange={(value) => updateCellPaint(cell.id, { lineColor: value })} />
-                    <ColorPresetField label="Fill" value={cell.fillColor} onChange={(value) => updateCellPaint(cell.id, { fillColor: value })} allowTransparent />
-                    <div className="grid grid-cols-2 gap-1">
-                      {CELL_LINE_SIDE_KEYS.map((side) => (
-                        <label key={side} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
-                          <input
-                            type="checkbox"
-                            checked={cell.sides.includes(side)}
-                            disabled={cell.locked}
-                            onChange={() => updateCellPaint(cell.id, { sides: cell.sides.includes(side) ? cell.sides.filter((item) => item !== side) : [...cell.sides, side] })}
-                            className="h-4 w-4 accent-[var(--teal)]"
-                          />
-                          {CELL_LINE_SIDE_LABELS[side]}
-                        </label>
-                      ))}
-                    </div>
-                    <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, -1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left">
-                      <RotateCcw size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, 1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right">
-                      <RotateCw size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "x")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal">
-                      <FlipHorizontal size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "y")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical">
-                      <FlipVertical size={15} aria-hidden="true" />
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-          {settings.graphShapes.map((shape, index) => {
-            const key = drawingLayerKey("shape", shape.id);
-            const expanded = Boolean(expandedDrawingLayerIds[key]);
-            const selected = selectedDrawingLayerId === key;
-            const previousLocked = Boolean(settings.graphShapes[index - 1]?.locked);
-            const nextLocked = Boolean(settings.graphShapes[index + 1]?.locked);
-            return (
-              <div key={key} className={`space-y-3 rounded-md border bg-white p-3 ${selected ? "border-[var(--teal)] ring-2 ring-teal-100" : "border-[var(--line)]"}`}>
-                <div className="grid gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedSourceId(null);
-                      setSelectedDrawingLayerId(key);
-                      toggleDrawingLayerCard(key);
-                    }}
-                    className="grid min-w-0 grid-cols-[1.75rem_3rem_minmax(0,1fr)_auto] items-center gap-2 text-left"
-                  >
-                    <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-700 text-xs font-bold text-white">{settings.sourceImages.length + settings.cellPaints.length + index + 1}</span>
-                    <span className="grid h-12 w-12 shrink-0 place-items-center rounded border border-[var(--line)] bg-[var(--panel)] p-1 text-slate-500">
-                      <Maximize2 size={18} aria-hidden="true" />
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block truncate text-sm font-semibold text-slate-950">{shape.name}</span>
-                      <span className="mt-1 inline-flex items-center gap-1 text-xs text-slate-500">
-                        {shape.locked ? <Lock size={12} aria-hidden="true" /> : <Unlock size={12} aria-hidden="true" />}
-                        {GRAPH_SHAPE_KIND_LABELS[shape.kind]}
-                      </span>
-                    </span>
-                    {expanded ? <ChevronDown size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" /> : <ChevronRight size={15} className="ml-auto shrink-0 text-slate-500" aria-hidden="true" />}
-                  </button>
-                  <div className="grid grid-cols-4 gap-1">
-                    <button type="button" onClick={() => moveDrawingLayer("shape", shape.id, -1)} disabled={shape.locked || previousLocked || index === 0} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move up">
-                      <ArrowUp size={14} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => moveDrawingLayer("shape", shape.id, 1)} disabled={shape.locked || nextLocked || index === settings.graphShapes.length - 1} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Move down">
-                      <ArrowDown size={14} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50" title={shape.locked ? "Unlock drawing" : "Lock drawing"}>
-                      {shape.locked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
-                    </button>
-                    <button type="button" onClick={() => removeDrawingLayer("shape", shape.id, shape.name, shape.locked)} disabled={shape.locked} className="grid h-8 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Remove drawing">
-                      <Trash2 size={14} aria-hidden="true" />
-                    </button>
-                  </div>
-                </div>
-                {expanded ? (
-                  <div className="grid min-w-0 grid-cols-2 gap-2">
-                    <label className="grid min-w-0 gap-1.5">
-                      <span className="text-xs font-semibold text-slate-500">Shape</span>
-                      <select value={shape.kind} disabled={shape.locked} onChange={(event) => updateGraphShape(shape.id, { kind: event.target.value as GraphShapeKind })} className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60">
-                        {GRAPH_SHAPE_KIND_KEYS.map((kind) => (
-                          <option key={kind} value={kind}>{GRAPH_SHAPE_KIND_LABELS[kind]}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <NumberField label="Line size" value={shape.strokeWidth} min={1} max={24} disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { strokeWidth: value })} />
-                    <NumberField label="Width (cells)" value={shape.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { width: value })} />
-                    <NumberField label="Height (cells)" value={shape.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { height: value })} />
-                    <NumberField label="Left padding (cells)" value={shape.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: value })} />
-                    <NumberField label="Right padding (cells)" value={drawingRightPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: settings.graphWidth - shape.width - value })} />
-                    <NumberField label="Top padding (cells)" value={shape.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: value })} />
-                    <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: settings.graphHeight - shape.height - value })} />
-                    <ColorPresetField label="Line" value={shape.strokeColor} onChange={(value) => updateGraphShape(shape.id, { strokeColor: value })} />
-                    <ColorPresetField label="Fill" value={shape.fillColor} onChange={(value) => updateGraphShape(shape.id, { fillColor: value })} allowTransparent />
-                    <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, -1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left">
-                      <RotateCcw size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, 1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right">
-                      <RotateCw size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "x")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal">
-                      <FlipHorizontal size={15} aria-hidden="true" />
-                    </button>
-                    <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "y")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical">
-                      <FlipVertical size={15} aria-hidden="true" />
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
+  function moveSelectedLayer(direction: -1 | 1) {
+    if (selectedSource) moveSourceImage(selectedSource.id, direction);
+    else if (selectedCellLayer) moveDrawingLayer("cell", selectedCellLayer.id, direction);
+    else if (selectedShapeLayer) moveDrawingLayer("shape", selectedShapeLayer.id, direction);
+    else if (selectedClipartLayer) moveDrawingLayer("clipart", selectedClipartLayer.id, direction);
+  }
 
-      <label className={`inline-flex h-10 w-full items-center justify-center gap-2 rounded-md border border-dashed border-slate-300 bg-[var(--panel)] px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100 ${uploadingSources ? "cursor-wait opacity-70" : "cursor-pointer"}`}>
-        {uploadingSources ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Upload size={15} aria-hidden="true" />}
-        {uploadingSources ? "Adding..." : "Add images"}
-        <input
-          type="file"
-          accept={IMAGE_ACCEPT}
-          multiple
-          disabled={uploadingSources}
-          className="sr-only"
-          onChange={(event) => {
+  function toggleSelectedLayerLock() {
+    if (selectedSource) toggleSourceLock(selectedSource.id);
+    else if (selectedCellLayer) toggleDrawingLock("cell", selectedCellLayer.id);
+    else if (selectedShapeLayer) toggleDrawingLock("shape", selectedShapeLayer.id);
+    else if (selectedClipartLayer) toggleDrawingLock("clipart", selectedClipartLayer.id);
+  }
+
+  function deleteSelectedLayer(options: { skipConfirm?: boolean } = {}) {
+    if (selectedSource) removeSourceImage(selectedSource.id, { skipConfirm: options.skipConfirm });
+    else if (selectedCellLayer) removeDrawingLayer("cell", selectedCellLayer.id, selectedCellLayer.name, selectedCellLayer.locked, options);
+    else if (selectedShapeLayer) removeDrawingLayer("shape", selectedShapeLayer.id, selectedShapeLayer.name, selectedShapeLayer.locked, options);
+    else if (selectedClipartLayer) removeDrawingLayer("clipart", selectedClipartLayer.id, selectedClipartLayer.name, selectedClipartLayer.locked, options);
+  }
+
+  function renderLayerActionToolbar() {
+    return (
+      <div className="grid grid-cols-6 border-b border-[#e8edf2] bg-[#fbfcfd] text-[11px] font-semibold text-[#344054]">
+        <label className={`flex h-14 cursor-pointer flex-col items-center justify-center gap-1 border-r border-[#e8edf2] ${uploadingSources ? "opacity-50" : ""}`} title="Add images">
+          <Plus size={16} aria-hidden="true" />
+          <span>Add</span>
+          <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
             const files = Array.from(event.target.files ?? []);
             event.target.value = "";
             if (files.length) void uploadSourceImages(files, "Images added to the end.");
-          }}
-        />
-      </label>
+          }} />
+        </label>
+        <label className={`flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] ${!selectedSource || selectedSource.locked || uploadingSources ? "cursor-not-allowed opacity-40" : "cursor-pointer"}`} title="Replace selected source">
+          {replacingSourceId ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
+          <span>Replace</span>
+          <input type="file" accept={IMAGE_ACCEPT} disabled={!selectedSource || selectedSource.locked || uploadingSources} className="sr-only" onChange={(event) => {
+            const file = event.target.files?.[0] ?? null;
+            event.target.value = "";
+            if (file && selectedSource) void uploadSourceImages([file], `"${selectedSource.name}" replaced.`, selectedSource.id);
+          }} />
+        </label>
+        <button type="button" onClick={() => deleteSelectedLayer()} disabled={!hasSelectedLayer || selectedLayerLocked} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] text-red-500 disabled:text-[#98a2b3]" title="Delete selected layer">
+          <Trash2 size={16} aria-hidden="true" />
+          <span>Delete</span>
+        </button>
+        <button type="button" onClick={toggleSelectedLayerLock} disabled={!hasSelectedLayer} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] disabled:text-[#98a2b3]" title="Lock selected layer">
+          {selectedLayerLocked ? <Unlock size={16} aria-hidden="true" /> : <Lock size={16} aria-hidden="true" />}
+          <span>{selectedLayerLocked ? "Unlock" : "Lock"}</span>
+        </button>
+        <button type="button" onClick={() => moveSelectedLayer(-1)} disabled={!selectedLayerCanMove(-1)} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] disabled:text-[#98a2b3]" title="Move selected layer up">
+          <ArrowUp size={16} aria-hidden="true" />
+          <span>Up</span>
+        </button>
+        <button type="button" onClick={() => moveSelectedLayer(1)} disabled={!selectedLayerCanMove(1)} className="flex h-14 flex-col items-center justify-center gap-1 disabled:text-[#98a2b3]" title="Move selected layer down">
+          <ArrowDown size={16} aria-hidden="true" />
+          <span>Down</span>
+        </button>
+      </div>
+    );
+  }
 
-      <div className="space-y-3">
-        <label className="grid gap-1.5">
-          <span className="text-xs font-semibold text-slate-500">Project name</span>
-          <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-          />
+  function renderSourceThumbnail(source: GraphSourceImage, className = "h-12 w-12") {
+    const previewUrl = sourceStatus[source.id]?.previewUrl;
+    return previewUrl ? (
+      <img src={previewUrl} alt="" className={`${className} shrink-0 rounded border border-[#d7dde5] bg-white object-contain p-1`} />
+    ) : (
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#d7dde5] bg-[#f8fafc] text-[#98a2b3]`}>
+        <ImageIcon size={16} aria-hidden="true" />
+      </span>
+    );
+  }
+
+  function renderCellThumbnail(cell: GraphCellPaint, className = "h-12 w-12") {
+    return (
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#d7dde5] bg-white p-1`}>
+        <span className="h-[70%] w-[70%] border-2" style={{ borderColor: cell.lineColor, backgroundColor: isTransparentFillColor(cell.fillColor) ? "transparent" : cell.fillColor }} />
+      </span>
+    );
+  }
+
+  function renderShapeThumbnail(shape: GraphShapeDrawing, className = "h-12 w-12") {
+    return (
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#d7dde5] bg-white p-1`}>
+        <ShapePreviewSvg kind={shape.kind} sides={shape.sides} fillColor={shape.fillColor} strokeColor={shape.strokeColor} strokeWidth={shape.strokeWidth} widthCells={shape.width} heightCells={shape.height} />
+        <span className="sr-only">{GRAPH_SHAPE_KIND_LABELS[shape.kind]}</span>
+      </span>
+    );
+  }
+
+  function renderClipartThumbnail(clipart: GraphClipartImage, className = "h-12 w-12") {
+    const asset = settings.clipartAssets.find((item) => item.id === clipart.assetId);
+    const previewUrl = asset?.url ?? asset?.dataUrl ?? null;
+    return previewUrl ? (
+      <img src={previewUrl} alt="" className={`${className} shrink-0 rounded border border-[#d7dde5] bg-white object-contain p-1`} />
+    ) : (
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#d7dde5] bg-[#f8fafc] text-[#98a2b3]`}>
+        <ImageIcon size={16} aria-hidden="true" />
+      </span>
+    );
+  }
+
+  function renderClipartAdvanced(clipart: GraphClipartImage) {
+    return (
+      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[#e8edf2] bg-[#f8fafc] p-3">
+        <NumberField label="Width (CM)" value={roundMeasure(clipart.width * settings.cellSizeCm)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={clipart.locked} onChange={(value) => updateClipartPhysicalWidthCm(clipart.id, value)} />
+        <NumberField label="Height (CM)" value={roundMeasure(clipart.height * settings.cellSizeCm)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={clipart.locked} onChange={(value) => updateClipartPhysicalHeightCm(clipart.id, value)} />
+        <NumberField label="Line size" value={clipart.imageLineThickness} min={MIN_IMAGE_LINE_THICKNESS} max={MAX_IMAGE_LINE_THICKNESS} step={1} disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { imageLineThickness: value })} />
+        <NumberField label="Fill threshold" value={clipart.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} allowDecimalInput disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { sourceFillThreshold: value })} />
+        <NumberField label="Min stroke px" value={clipart.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} step={1} disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { sourceFillMinStrokePixels: Math.round(value) })} />
+        <NumberField label="Gap close px" value={clipart.strokeGapClosePixels} min={MIN_STROKE_GAP_CLOSE_PIXELS} max={MAX_STROKE_GAP_CLOSE_PIXELS} step={1} disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { strokeGapClosePixels: Math.round(value) })} />
+        <NumberField label="Left padding" value={clipart.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { x: value })} />
+        <NumberField label="Top padding" value={clipart.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { y: value })} />
+        <ColorPresetField label="Stroke" value={clipart.strokeColor} onChange={(value) => updateClipartImage(clipart.id, { strokeColor: value })} />
+        <ColorPresetField label="Fill" value={clipart.fillColor} onChange={(value) => updateClipartImage(clipart.id, { fillColor: value })} allowTransparent />
+        <div className="grid grid-cols-4 gap-1 col-span-2">
+          <button type="button" onClick={() => rotateDrawingLayer("clipart", clipart.id, -1)} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("clipart", clipart.id, 1)} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("clipart", clipart.id, "x")} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("clipart", clipart.id, "y")} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderShapeAdvanced(shape: GraphShapeDrawing) {
+    const fillMode = shapeFillMode(shape);
+    const supportsSides = shapeSupportsSides(shape.kind);
+    return (
+      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[#e8edf2] bg-[#f8fafc] p-3">
+        <label className="grid min-w-0 gap-1.5">
+          <span className="text-xs font-semibold text-slate-500">Shape</span>
+          <select value={shape.kind} disabled={shape.locked} onChange={(event) => updateGraphShape(shape.id, { kind: event.target.value as GraphShapeKind })} className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60">
+            {GENERATED_SHAPE_KIND_KEYS.includes(shape.kind as GeneratedShapeKind) ? null : <option value={shape.kind}>Legacy {GRAPH_SHAPE_KIND_LABELS[shape.kind]}</option>}
+            {GENERATED_SHAPE_KIND_KEYS.map((kind) => <option key={kind} value={kind}>{GRAPH_SHAPE_KIND_LABELS[kind]}</option>)}
+          </select>
         </label>
-        <label className="grid gap-1.5">
-          <span className="text-xs font-semibold text-slate-500">Description</span>
-          <textarea
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            className="min-h-24 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-          />
+        <label className="grid min-w-0 gap-1.5">
+          <span className="text-xs font-semibold text-slate-500">Type</span>
+          <select
+            value={fillMode}
+            disabled={shape.locked}
+            onChange={(event) =>
+              updateGraphShape(
+                shape.id,
+                event.target.value === "filled"
+                  ? { fillColor: draftShapeFillColor, sides: [...CELL_LINE_SIDE_KEYS] }
+                  : { fillColor: TRANSPARENT_FILL_COLOR },
+              )
+            }
+            className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60"
+          >
+            <option value="outline">Outline</option>
+            <option value="filled">Filled</option>
+          </select>
         </label>
+        <NumberField label={shapeUsesSingleSize(shape.kind) ? "Size (CM)" : "Width (CM)"} value={shapePhysicalWidthCm(shape)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={shape.locked} onChange={(value) => updateGraphShapePhysicalWidthCm(shape.id, value)} />
+        <NumberField label={shapeUsesSingleSize(shape.kind) ? "Size (CM)" : "Height (CM)"} value={shapePhysicalHeightCm(shape)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={shape.locked} onChange={(value) => updateGraphShapePhysicalHeightCm(shape.id, value)} />
+        <NumberField label="Stroke width" value={shape.strokeWidth} min={1} max={24} disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { strokeWidth: value })} />
+        <NumberField label="Left padding (cells)" value={shape.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: value })} />
+        <NumberField label="Right padding (cells)" value={drawingRightPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: settings.graphWidth - shape.width - value })} />
+        <NumberField label="Top padding (cells)" value={shape.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: value })} />
+        <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: settings.graphHeight - shape.height - value })} />
+        <ColorPresetField label="Line" value={shape.strokeColor} onChange={(value) => updateGraphShape(shape.id, { strokeColor: value })} />
+        {fillMode === "filled" ? <ColorPresetField label="Fill" value={shape.fillColor} onChange={(value) => updateGraphShape(shape.id, { fillColor: value })} allowTransparent /> : null}
+        {supportsSides ? (
+          <div className="col-span-2 grid grid-cols-4 gap-1">
+            {CELL_LINE_SIDE_KEYS.map((side) => (
+              <label key={`shape-${shape.id}-${side}`} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] bg-white px-2 text-xs font-semibold text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={shape.sides.includes(side)}
+                  disabled={shape.locked}
+                  onChange={(event) => {
+                    const nextSides = event.target.checked ? [...shape.sides, side] : shape.sides.filter((item) => item !== side);
+                    updateGraphShape(shape.id, { sides: nextSides.length ? nextSides : shape.sides });
+                  }}
+                  className="h-4 w-4 accent-[var(--teal)]"
+                />
+                {CELL_LINE_SIDE_LABELS[side]}
+              </label>
+            ))}
+          </div>
+        ) : null}
+        <div className="grid grid-cols-4 gap-1 col-span-2">
+          <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, -1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, 1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "x")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "y")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderCellAdvanced(cell: GraphCellPaint) {
+    return (
+      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[#e8edf2] bg-[#f8fafc] p-3">
+        <NumberField label="Width (cells)" value={cell.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { width: value })} />
+        <NumberField label="Height (cells)" value={cell.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { height: value })} />
+        <NumberField label="Left padding (cells)" value={cell.x} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: value })} />
+        <NumberField label="Right padding (cells)" value={drawingRightPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: settings.graphWidth - cell.width - value })} />
+        <NumberField label="Top padding (cells)" value={cell.y} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: value })} />
+        <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: settings.graphHeight - cell.height - value })} />
+        <NumberField label="Line size" value={cell.lineWidth} min={1} max={24} disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { lineWidth: value })} />
+        <ColorPresetField label="Line" value={cell.lineColor} onChange={(value) => updateCellPaint(cell.id, { lineColor: value })} />
+        <ColorPresetField label="Fill" value={cell.fillColor} onChange={(value) => updateCellPaint(cell.id, { fillColor: value })} allowTransparent />
+        <div className="grid grid-cols-2 gap-1">
+          {CELL_LINE_SIDE_KEYS.map((side) => (
+            <label key={side} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
+              <input type="checkbox" checked={cell.sides.includes(side)} disabled={cell.locked} onChange={() => updateCellPaint(cell.id, { sides: cell.sides.includes(side) ? cell.sides.filter((item) => item !== side) : [...cell.sides, side] })} className="h-4 w-4 accent-[var(--teal)]" />
+              {CELL_LINE_SIDE_LABELS[side]}
+            </label>
+          ))}
+        </div>
+        <div className="grid grid-cols-4 gap-1 col-span-2">
+          <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, -1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, 1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "x")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "y")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50 disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
+        </div>
+      </div>
+    );
+  }
+
+  const sourcePanel = (
+    <aside className="editor-panel relative flex min-h-0 flex-col">
+      <div className="min-h-0 flex-1">
+        <section className="border-b border-[#d7dde5] bg-white">
+          <div className="flex h-10 items-center justify-between border-b border-[#d7dde5] px-3">
+            <button
+              type="button"
+              onClick={() => {
+                if (sourceCropMode) {
+                  setSourceCropMode(false);
+                  setSourceCropArea(null);
+                  setSourcesSectionCollapsed(false);
+                  return;
+                }
+                setSourcesSectionCollapsed((value) => !value);
+              }}
+              className="inline-flex min-w-0 items-center gap-2 text-left"
+              aria-expanded={!sourceCropMode && !sourcesSectionCollapsed}
+            >
+              {sourceCropMode || sourcesSectionCollapsed ? <ChevronRight size={15} className="shrink-0 text-[#667085]" aria-hidden="true" /> : <ChevronDown size={15} className="shrink-0 text-[#667085]" aria-hidden="true" />}
+              <span className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">Sources</span>
+              <span className="rounded bg-[#f2f4f7] px-1.5 py-0.5 text-[11px] font-semibold text-[#667085]">{settings.sourceImages.length}</span>
+            </button>
+            <div className="flex items-center gap-1">
+              <label className={`grid h-8 w-8 place-items-center rounded text-[#344054] hover:bg-[#f2f4f7] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add images">
+                {uploadingSources ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}
+                <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
+                  const files = Array.from(event.target.files ?? []);
+                  event.target.value = "";
+                  if (files.length) void uploadSourceImages(files);
+                }} />
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!cropSourcePreviewUrl || !cropSource) return;
+                  if (sourceCropMode) {
+                    setSourceCropMode(false);
+                    setSourceCropArea(null);
+                  } else {
+                    openSourceCrop(cropSource.id);
+                  }
+                }}
+                disabled={!cropSourcePreviewUrl || !cropSource}
+                className="grid h-8 w-8 place-items-center rounded text-[#344054] hover:bg-[#f2f4f7] disabled:opacity-35"
+                title={sourceCropMode ? "Close source crop tools" : "Crop source images"}
+              >
+                <MoreVertical size={18} aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+          {sourceCropMode ? (
+            <div className="border-b border-[#d7dde5] bg-[#f8fafc] p-2">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="truncate text-[12px] font-bold uppercase tracking-wide text-[#344054]">Crop source image</span>
+                <button type="button" onClick={() => { setSourceCropMode(false); setSourceCropArea(null); }} className="ui-btn h-8 px-2 text-xs"><X size={14} aria-hidden="true" />Close</button>
+              </div>
+              {settings.sourceImages.length > 1 ? (
+                <div className="mb-2 max-h-28 overflow-y-auto rounded border border-[#d7dde5] bg-white">
+                  {settings.sourceImages.map((source) => {
+                    const active = cropSource?.id === source.id;
+                    return (
+                      <button
+                        key={`crop-source-${source.id}`}
+                        type="button"
+                        onClick={() => openSourceCrop(source.id)}
+                        className={`grid w-full grid-cols-[38px_minmax(0,1fr)_22px] items-center gap-2 border-b border-[#e8edf2] px-2 py-1.5 text-left last:border-b-0 ${active ? "bg-[#ecfeff]" : "hover:bg-[#f8fafc]"}`}
+                      >
+                        {renderSourceThumbnail(source, "h-9 w-9")}
+                        <span className="min-w-0">
+                          <span className="block truncate text-[12px] font-semibold text-[#101828]">{source.name}</span>
+                          <span className="block text-[11px] text-[#667085]">{roundCells(source.width)} x {roundCells(source.height)}</span>
+                        </span>
+                        {active ? <Check size={15} className="text-[#008c8f]" aria-hidden="true" /> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {cropSourcePreviewUrl ? (
+                <>
+                  <div className="mb-2 grid grid-cols-2 gap-1">
+                    <button type="button" onClick={applySourceCrop} disabled={!sourceCropArea || sourceCropPending} className="ui-btn h-8 px-2 text-xs disabled:opacity-50">
+                      {sourceCropPending ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
+                      Apply crop
+                    </button>
+                    <button type="button" onClick={() => selectFullSourceCrop()} className="ui-btn h-8 px-2 text-xs"><Maximize2 size={14} aria-hidden="true" />Full image</button>
+                  </div>
+                  <div className="overflow-hidden rounded border border-[#d7dde5] bg-white">
+                    <ManualCropper imageUrl={cropSourcePreviewUrl} crop={sourceCropArea} onCropChange={setSourceCropArea} className="h-64 p-2" />
+                  </div>
+                </>
+              ) : (
+                <div className="rounded border border-[#d7dde5] bg-white px-3 py-4 text-center text-sm text-[#667085]">Select a loaded source image to crop.</div>
+              )}
+            </div>
+          ) : null}
+          {!sourceCropMode && !sourcesSectionCollapsed && settings.sourceImages.length ? (
+            <div className="divide-y divide-[#e8edf2]">
+              {settings.sourceImages.map((source) => {
+                const status = sourceStatus[source.id];
+                const selected = selectedSourceId === source.id;
+                const ready = Boolean(status?.ready);
+                const pending = !ready && !status?.error;
+                return (
+                  <button
+                    key={`source-list-${source.id}`}
+                    type="button"
+                    onClick={() => selectSourceLayer(source.id)}
+                    className={`grid w-full grid-cols-[64px_minmax(0,1fr)_32px] items-center gap-3 px-3 py-2 text-left ${selected ? "bg-[#ecfeff]" : "bg-white hover:bg-[#f8fafc]"}`}
+                  >
+                    {renderSourceThumbnail(source, "h-16 w-16")}
+                    <span className="min-w-0">
+                      <span className="block truncate text-[13px] font-semibold text-[#101828]">{source.name}</span>
+                      <span className="mt-1 block text-[12px] text-[#475467]">{roundCells(source.width)} x {roundCells(source.height)}</span>
+                    </span>
+                    <span className={`grid h-6 w-6 place-items-center rounded-full border ${status?.error ? "border-red-300 text-red-600" : selected && ready ? "border-[#22c55e] text-[#16a34a]" : "border-[#cfd7df] text-[#98a2b3]"}`}>
+                      {status?.error ? <X size={14} aria-hidden="true" /> : pending ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : selected ? <Check size={15} aria-hidden="true" /> : null}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : !sourceCropMode && !sourcesSectionCollapsed ? (
+            <div className="grid min-h-28 place-items-center px-4 py-6 text-center text-sm text-[#667085]">Upload source files</div>
+          ) : null}
+        </section>
+
+        <section className="border-b border-[#d7dde5] bg-white">
+          <div className="flex h-10 items-center justify-between border-b border-[#d7dde5] px-3">
+            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">Layers</h2>
+            <label className={`grid h-8 w-8 place-items-center rounded text-[#344054] hover:bg-[#f2f4f7] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add layer image">
+              {uploadingSources ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}
+              <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
+                const files = Array.from(event.target.files ?? []);
+                event.target.value = "";
+                if (files.length) void uploadSourceImages(files, "Images added to the end.");
+              }} />
+            </label>
+          </div>
+          {renderLayerActionToolbar()}
+          {visibleLayerCount ? (
+            <div className="divide-y divide-[#e8edf2]">
+              {settings.sourceImages.length > 0 ? (
+                <div className="max-h-[504px] overflow-y-auto scrollbar-thin divide-y divide-[#e8edf2]">
+                  {settings.sourceImages.map((source) => {
+                    const selected = selectedSourceId === source.id;
+                    const hidden = source.visible === false;
+                    return (
+                      <div
+                        key={`layer-source-${source.id}`}
+                        onDragOver={handleLayerDragOver("source")}
+                        onDrop={handleLayerDrop("source", source.id)}
+                        className={selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}
+                      >
+                        <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                          <button type="button" onClick={() => toggleSourceVisibility(source.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
+                          <button type="button" onClick={() => selectSourceLayer(source.id)} className="h-11 w-11">
+                            {renderSourceThumbnail(source, "h-full w-full")}
+                          </button>
+                          <button type="button" onClick={() => selectSourceLayer(source.id)} className="min-w-0 text-left">
+                            <span className="block truncate text-[13px] font-semibold">{source.name}</span>
+                            <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>{hidden ? "Hidden" : "Visible"}</span>
+                          </button>
+                          <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
+                          <button type="button" onClick={() => toggleSourceLock(source.id)} className={selected ? "text-white" : "text-[#667085]"} title={source.locked ? "Unlock layer" : "Lock layer"}>{source.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                          <button type="button" draggable onDragStart={handleLayerDragStart("source", source.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-white/90" : "text-[#667085]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {generatedLayerCount ? (
+                <div className="bg-white text-[#101828]">
+                  <button
+                    type="button"
+                    onClick={() => setGeneratedImagesCollapsed((value) => !value)}
+                    className="flex h-10 w-full items-center justify-between gap-3 border-y border-[#e8edf2] bg-[#fbfcfd] px-3 text-left"
+                    aria-expanded={!generatedImagesCollapsed}
+                  >
+                    <span className="inline-flex min-w-0 items-center gap-2">
+                      {generatedImagesCollapsed ? <ChevronRight size={15} className="shrink-0 text-[#667085]" aria-hidden="true" /> : <ChevronDown size={15} className="shrink-0 text-[#667085]" aria-hidden="true" />}
+                      <span className="truncate text-[12px] font-bold uppercase tracking-wide text-[#344054]">Generated images</span>
+                    </span>
+                    <span className="rounded bg-[#eef4ff] px-1.5 py-0.5 text-[11px] font-semibold text-[#344054]">{generatedLayerCount}</span>
+                  </button>
+                  {!generatedImagesCollapsed ? (
+                    <>
+                      {renderLayerActionToolbar()}
+                      <div className="max-h-[504px] overflow-y-auto scrollbar-thin divide-y divide-[#e8edf2]">
+                        {settings.clipartImages.map((clipart) => {
+                        const key = drawingLayerKey("clipart", clipart.id);
+                        const selected = selectedDrawingLayerId === key;
+                        const hidden = clipart.visible === false;
+                        return (
+                          <div
+                            key={`layer-clipart-${clipart.id}`}
+                            onDragOver={handleLayerDragOver("clipart")}
+                            onDrop={handleLayerDrop("clipart", clipart.id)}
+                            className={selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}
+                          >
+                            <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                              <button type="button" onClick={() => toggleDrawingVisibility("clipart", clipart.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show clipart" : "Hide clipart"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
+                              <button type="button" onClick={() => selectClipartLayer(clipart.id)} className="h-11 w-11">
+                                {renderClipartThumbnail(clipart, "h-full w-full")}
+                              </button>
+                              <button type="button" onClick={() => selectClipartLayer(clipart.id)} className="min-w-0 text-left">
+                                <span className="block truncate text-[13px] font-semibold">{clipart.name}</span>
+                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>{hidden ? "Hidden" : "Visible"}</span>
+                              </button>
+                              <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
+                              <button type="button" onClick={() => toggleDrawingLock("clipart", clipart.id)} className={selected ? "text-white" : "text-[#667085]"} title={clipart.locked ? "Unlock clipart" : "Lock clipart"}>{clipart.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                              <button type="button" draggable onDragStart={handleLayerDragStart("clipart", clipart.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-white/90" : "text-[#667085]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {settings.graphShapes.map((shape) => {
+                        const key = drawingLayerKey("shape", shape.id);
+                        const selected = selectedDrawingLayerId === key;
+                        const hidden = shape.visible === false;
+                        return (
+                          <div
+                            key={`layer-shape-${shape.id}`}
+                            onDragOver={handleLayerDragOver("shape")}
+                            onDrop={handleLayerDrop("shape", shape.id)}
+                            className={selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}
+                          >
+                            <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                              <button type="button" onClick={() => toggleDrawingVisibility("shape", shape.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show generated image" : "Hide generated image"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
+                              <button type="button" onClick={() => selectGeneratedShape(shape.id)} className="h-11 w-11">
+                                {renderShapeThumbnail(shape, "h-full w-full")}
+                              </button>
+                              <button type="button" onClick={() => selectGeneratedShape(shape.id)} className="min-w-0 text-left">
+                                <span className="block truncate text-[13px] font-semibold">{shape.name}</span>
+                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>{hidden ? "Hidden" : "Visible"}</span>
+                              </button>
+                              <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
+                              <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className={selected ? "text-white" : "text-[#667085]"} title={shape.locked ? "Unlock generated image" : "Lock generated image"}>{shape.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                              <button type="button" draggable onDragStart={handleLayerDragStart("shape", shape.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-white/90" : "text-[#667085]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+              {settings.cellPaints.map((cell) => {
+                const key = drawingLayerKey("cell", cell.id);
+                const selected = selectedDrawingLayerId === key;
+                const hidden = cell.visible === false;
+                return (
+                  <div
+                    key={`layer-cell-${cell.id}`}
+                    onDragOver={handleLayerDragOver("cell")}
+                    onDrop={handleLayerDrop("cell", cell.id)}
+                    className={selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}
+                  >
+                    <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                      <button type="button" onClick={() => toggleDrawingVisibility("cell", cell.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
+                      <button type="button" onClick={() => selectCellLayer(cell.id)} className="h-11 w-11">
+                        {renderCellThumbnail(cell, "h-full w-full")}
+                      </button>
+                      <button type="button" onClick={() => selectCellLayer(cell.id)} className="min-w-0 text-left">
+                        <span className="block truncate text-[13px] font-semibold">{cell.name}</span>
+                        <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>{hidden ? "Hidden" : "Visible"}</span>
+                      </button>
+                      <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
+                      <button type="button" onClick={() => toggleDrawingLock("cell", cell.id)} className={selected ? "text-white" : "text-[#667085]"} title={cell.locked ? "Unlock layer" : "Lock layer"}>{cell.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                      <button type="button" draggable onDragStart={handleLayerDragStart("cell", cell.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-white/90" : "text-[#667085]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="grid min-h-24 place-items-center px-4 py-6 text-center text-sm text-[#667085]">No layers yet</div>
+          )}
+        </section>
+
+        <section className="border-b border-[#d7dde5] bg-white">
+          <div className="flex h-10 items-center justify-between border-b border-[#d7dde5] px-3">
+            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">Status</h2>
+            <ChevronDown size={16} className="text-[#667085]" aria-hidden="true" />
+          </div>
+          <div className="space-y-3 p-3 text-[13px] text-[#475467]">
+            <div className="flex items-center justify-between gap-3">
+              <span className="inline-flex min-w-0 items-center gap-2 font-semibold text-[#344054]">
+                <span className={`grid h-5 w-5 place-items-center rounded-full ${sourceErrorCount ? "bg-red-500" : processing || (!sourceReady && settings.sourceImages.length) ? "bg-[#98a2b3]" : "bg-[#22c55e]"} text-white`}>
+                  {sourceErrorCount ? <X size={12} aria-hidden="true" /> : processing || (!sourceReady && settings.sourceImages.length) ? <Loader2 size={12} className="animate-spin" aria-hidden="true" /> : <Check size={12} aria-hidden="true" />}
+                </span>
+                <span className="truncate">{statusLabel}</span>
+              </span>
+              <span className="shrink-0 text-[#475467]">{statusMeta}</span>
+            </div>
+            <p>Cells: {settings.graphWidth} x {settings.graphHeight} ({formatCount(totalCells)})</p>
+            <p>Colors: {palette.length}</p>
+            <p>Stitches (est.): {formatCount(totalCells)}</p>
+            <p>Layers: {visibleLayerCount}</p>
+          </div>
+        </section>
+
+        <section className="space-y-3 bg-white p-3">
+          <label className="grid gap-1.5">
+            <span className="text-xs font-semibold text-slate-500">Project name</span>
+            <input value={title} onChange={(event) => setTitle(event.target.value)} className="h-10 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100" />
+          </label>
+          <label className="grid gap-1.5">
+            <span className="text-xs font-semibold text-slate-500">Description</span>
+            <textarea value={description} onChange={(event) => setDescription(event.target.value)} className="min-h-24 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100" />
+          </label>
+        </section>
       </div>
       <button
         type="button"
@@ -2969,7 +4762,10 @@ export function EditorClient({ project }: { project: Project }) {
         onPointerCancel={endPanelResize}
         className="group absolute inset-y-0 right-0 hidden w-3 cursor-col-resize touch-none place-items-center lg:grid"
       >
-        <span className="absolute inset-y-0 right-1.5 w-px bg-slate-200 transition-colors group-hover:bg-[var(--teal)]" aria-hidden="true" />
+        <span
+          className="absolute top-1/2 right-1.5 h-[80vh] w-px -translate-y-1/2 bg-slate-200 opacity-0 transition-colors transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-hover:bg-[var(--teal)]"
+          aria-hidden="true"
+        />
         <span
           className={`grid h-6 w-6 place-items-center rounded-full border border-[var(--line)] bg-white text-slate-500 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${
             resizingPanelSide === "left" ? "opacity-100" : "opacity-0"
@@ -3059,38 +4855,53 @@ export function EditorClient({ project }: { project: Project }) {
       </div>
     ) : null;
 
-  const settingsPanel = (
-    <aside className="relative space-y-4 rounded-md border border-[var(--line)] bg-white p-4 shadow-sm lg:sticky lg:top-24 lg:max-h-[calc(100vh-7rem)] lg:overflow-y-auto">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950">
-          <Settings2 size={16} aria-hidden="true" />
-          Controls
-        </h2>
-        <button
-          type="button"
-          onClick={() => {
-            setSettingsWithHistory((current) => editorDefaultGraphSettings(current));
-            setSelectedFillRegionId(null);
-            setFloatingPalette(null);
-            setCopiedFillColor(null);
-          }}
-          className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50"
-          title="Reset settings"
-        >
-          <RefreshCw size={15} aria-hidden="true" />
-        </button>
-      </div>
+  const inspectorTabs: { id: InspectorTab; label: string }[] = [
+    { id: "graph", label: "Graph" },
+    { id: "source", label: "Source" },
+    { id: "draw", label: "Draw" },
+    { id: "palette", label: "Palette" },
+  ];
+  const drawTabs: { id: DrawTab; label: string }[] = [
+    { id: "shape", label: "Shape" },
+    { id: "clipart", label: "Clipart" },
+  ];
 
-      <div className="space-y-4">
-        <CollapsibleSection title="Parameters" open={!collapsedSections.parameters} onToggle={() => toggleSection("parameters")}>
-          <div className="grid min-w-0 grid-cols-2 gap-3">
-            <NumberField label="Width (cells)" value={settings.graphWidth} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphWidth", value)} />
-            <NumberField label="Height (cells)" value={settings.graphHeight} min={1} max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)} onChange={(value) => updateSetting("graphHeight", value)} />
+  const selectedSourceInspector = (
+    <div className={inspectorTab === "source" ? "space-y-3" : "hidden"}>
+      {selectedSource ? (
+        <>
+          <div className="ui-panel-subtle p-3">
+            <p className="truncate text-sm font-semibold text-slate-950">{selectedSource.name}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              {selectedSource.locked ? "Locked" : "Editable"} / {sourceStatus[selectedSource.id]?.ready ? "Ready" : sourceStatus[selectedSource.id]?.error || "Loading"}
+            </p>
+          </div>
+          <div className="grid min-w-0 grid-cols-2 gap-2">
+            <NumberField
+              label="Width (CM)"
+              value={sourcePhysicalWidthCm(selectedSource)}
+              min={0.01}
+              max={1000}
+              step={0.1}
+              allowDecimalInput
+              disabled={selectedSource.locked}
+              onChange={(value) => updateSourceImagePhysicalWidthCm(selectedSource.id, value)}
+            />
+            <NumberField
+              label={`Height (${MEASUREMENT_UNIT_LABELS[selectedSource.measurementUnit]})`}
+              value={sourcePhysicalHeight(selectedSource)}
+              min={0.01}
+              max={roundMeasure(cmToUnit(1000 * settings.cellSizeCm, selectedSource.measurementUnit))}
+              step={0.1}
+              allowDecimalInput
+              disabled={selectedSource.locked}
+              onChange={(value) => updateSourceImagePhysicalHeight(selectedSource.id, value)}
+            />
             <label className="grid min-w-0 gap-1.5">
               <span className="text-xs font-semibold text-slate-500">Size unit</span>
               <select
-                value={settings.measurementUnit}
-                onChange={(event) => updateMeasurementUnit(event.target.value as GraphSettings["measurementUnit"])}
+                value={selectedSource.measurementUnit}
+                onChange={(event) => updateSourceImage(selectedSource.id, { measurementUnit: event.target.value as GraphSettings["measurementUnit"] })}
                 className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
               >
                 <option value="cm">CM</option>
@@ -3098,246 +4909,581 @@ export function EditorClient({ project }: { project: Project }) {
               </select>
             </label>
             <NumberField
-              label={`Graph height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
-              value={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
-              min={0.01}
-              max={roundMeasure(cmToUnit(Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS) * DEFAULT_CELL_SIZE_CM, settings.measurementUnit))}
-              step={0.1}
+              label="Line size"
+              value={selectedSource.imageLineThickness}
+              min={MIN_IMAGE_LINE_THICKNESS}
+              max={MAX_IMAGE_LINE_THICKNESS}
+              step={0.01}
               allowDecimalInput
-              onChange={updateGraphPhysicalHeight}
+              onChange={(value) => updateSourceImage(selectedSource.id, { imageLineThickness: value })}
             />
-            <NumberField
-              label="Image width (CM)"
-              value={roundMeasure(settings.imageWidth * settings.cellSizeCm)}
-              min={0.01}
-              max={roundMeasure(settings.graphWidth * settings.cellSizeCm)}
-              step={0.1}
-              allowDecimalInput
-              onChange={updateImageWidthCm}
-            />
-            <NumberField
-              label={`Image height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
-              value={roundMeasure(cmToUnit(settings.imageHeight * settings.cellSizeCm, settings.measurementUnit))}
-              min={0.01}
-              max={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
-              step={0.1}
-              allowDecimalInput
-              onChange={updateImageHeightPhysical}
-            />
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Graph lines layer</span>
-              <select
-                value={settings.gridLineLayer}
-                onChange={(event) => updateSetting("gridLineLayer", event.target.value as GraphSettings["gridLineLayer"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {GRAPH_LINE_LAYER_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {GRAPH_LINE_LAYER_LABELS[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="flex h-10 min-w-0 items-center gap-2 self-end rounded-md border border-[var(--line)] bg-white px-3 text-sm font-semibold text-slate-600">
-              <input
-                type="checkbox"
-                checked={settings.showNumbers}
-                onChange={(event) => updateSetting("showNumbers", event.target.checked)}
-                className="h-4 w-4 accent-[var(--teal)]"
-              />
-              <span>Show grid numbers</span>
-            </label>
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Grid number position</span>
-              <select
-                value={settings.gridNumberPlacement}
-                onChange={(event) => updateSetting("gridNumberPlacement", event.target.value as GraphSettings["gridNumberPlacement"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {(["inside", "outside"] as const).map((key) => (
-                  <option key={key} value={key}>
-                    {GRID_NUMBER_PLACEMENT_LABELS[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="flex h-10 min-w-0 items-center gap-2 self-end rounded-md border border-[var(--line)] bg-white px-3 text-sm font-semibold text-slate-600">
-              <input
-                type="checkbox"
-                checked={settings.showPageBreaks}
-                onChange={(event) => updateSetting("showPageBreaks", event.target.checked)}
-                className="h-4 w-4 accent-[var(--teal)]"
-              />
-              <span>Show page breaks</span>
-            </label>
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Print paper</span>
-              <select
-                value={settings.printPaperSize}
-                onChange={(event) => updateSetting("printPaperSize", event.target.value as GraphSettings["printPaperSize"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {PRINT_PAPER_SIZE_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {PRINT_PAPER_SIZES[key].label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Orientation</span>
-              <select
-                value={settings.printOrientation}
-                onChange={(event) => updateSetting("printOrientation", event.target.value as GraphSettings["printOrientation"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {PRINT_ORIENTATION_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {PRINT_ORIENTATION_LABELS[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Horizontal align</span>
-              <select
-                value={settings.printHorizontalAlignment}
-                onChange={(event) => updateSetting("printHorizontalAlignment", event.target.value as GraphSettings["printHorizontalAlignment"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {PRINT_HORIZONTAL_ALIGNMENT_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {PRINT_HORIZONTAL_ALIGNMENT_LABELS[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Vertical align</span>
-              <select
-                value={settings.printVerticalAlignment}
-                onChange={(event) => updateSetting("printVerticalAlignment", event.target.value as GraphSettings["printVerticalAlignment"])}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {PRINT_VERTICAL_ALIGNMENT_KEYS.map((key) => (
-                  <option key={key} value={key}>
-                    {PRINT_VERTICAL_ALIGNMENT_LABELS[key]}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <NumberField label="Left padding" value={selectedSource.x} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { x: value })} />
+            <NumberField label="Right padding" value={sourceRightPadding(selectedSource)} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { x: settings.graphWidth - selectedSource.width - value })} />
+            <NumberField label="Top padding" value={selectedSource.y} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { y: value })} />
+            <NumberField label="Bottom padding" value={sourceBottomPadding(selectedSource)} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { y: settings.graphHeight - selectedSource.height - value })} />
+            <NumberField label="Fill detection" value={selectedSource.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} allowDecimalInput onChange={(value) => updateSourceImage(selectedSource.id, { sourceFillThreshold: value })} />
+            <NumberField label="Fill width" value={selectedSource.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSourceImage(selectedSource.id, { sourceFillMinStrokePixels: value })} />
+            <NumberField label="Gap closing" value={selectedSource.strokeGapClosePixels} min={MIN_STROKE_GAP_CLOSE_PIXELS} max={MAX_STROKE_GAP_CLOSE_PIXELS} onChange={(value) => updateSourceImage(selectedSource.id, { strokeGapClosePixels: value })} />
           </div>
-
-          <div className="min-w-0 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--panel)] p-3">
-            <p className="break-words font-mono text-xs text-slate-600">
-              Graph {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / {GRAPH_LINE_LAYER_LABELS[settings.gridLineLayer].toLowerCase()} grid / {settings.showNumbers ? `${GRID_NUMBER_PLACEMENT_LABELS[settings.gridNumberPlacement].toLowerCase()} numbers` : "numbers off"} / {settings.showPageBreaks ? "page breaks on" : "page breaks off"} / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
-            </p>
+          <div className="grid grid-cols-4 gap-1">
+            <button type="button" onClick={() => rotateSourceImage(selectedSource.id, -1)} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Rotate left">
+              <RotateCcw size={15} aria-hidden="true" />
+            </button>
+            <button type="button" onClick={() => rotateSourceImage(selectedSource.id, 1)} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Rotate right">
+              <RotateCw size={15} aria-hidden="true" />
+            </button>
+            <button type="button" onClick={() => flipSourceImage(selectedSource.id, "x")} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Flip horizontal">
+              <FlipHorizontal size={15} aria-hidden="true" />
+            </button>
+            <button type="button" onClick={() => flipSourceImage(selectedSource.id, "y")} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Flip vertical">
+              <FlipVertical size={15} aria-hidden="true" />
+            </button>
           </div>
-        </CollapsibleSection>
+        </>
+      ) : (
+        <div className="ui-panel-subtle grid min-h-32 place-items-center p-4 text-center text-sm text-slate-500">
+          Select a source layer to edit its size, padding, transform, and detection settings.
+        </div>
+      )}
+    </div>
+  );
 
-        <CollapsibleSection
-          title="Drawing"
-          summary={<span className="text-xs font-semibold text-slate-500">{settings.cellPaints.length + settings.graphShapes.length}</span>}
-          open={!collapsedSections.drawing}
-          onToggle={() => toggleSection("drawing")}
-        >
-          <div className="space-y-3">
-            <div className="grid grid-cols-3 gap-2">
-              {(["image", "cell", "shape"] as DrawingTool[]).map((tool) => (
+  const settingsPanel = (
+    <aside
+      className="editor-panel relative space-y-0"
+      style={{ overflowY: inspectorTab === "palette" && !isPaletteSectionExpanded ? "hidden" : "auto", overflowX: "hidden" }}
+    >
+      <div className="flex h-11 items-center justify-between border-b border-[#d7dde5] px-3">
+        <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">
+          Inspector
+        </h2>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setSettingsWithHistory((current) => editorDefaultGraphSettings(current));
+              setSelectedFillRegionId(null);
+              setFloatingPalette(null);
+              setCopiedFillColor(null);
+            }}
+            className="ui-btn-icon"
+            title="Reset settings"
+          >
+            <RefreshCw size={15} aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-4 border-b border-[#d7dde5] bg-white text-[12px]">
+        {inspectorTabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setInspectorTab(tab.id)}
+            className={`h-9 border-r border-[#d7dde5] font-medium ${inspectorTab === tab.id ? "bg-[#008c8f] text-white" : "text-[#344054]"}`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="space-y-4 p-3">
+        {selectedSourceInspector}
+        {inspectorTab === "graph" ? (
+          <div className="space-y-4">
+            <InspectorGroup title="Dimensions">
+              <div className="grid min-w-0 grid-cols-2 gap-2">
+                <NumberField
+                  label="Width (cells)"
+                  value={settings.graphWidth}
+                  min={1}
+                  max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)}
+                  inputClassName={inspectorControlClass}
+                  onChange={(value) => updateSetting("graphWidth", value)}
+                />
+                <NumberField
+                  label="Height (cells)"
+                  value={settings.graphHeight}
+                  min={1}
+                  max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)}
+                  inputClassName={inspectorControlClass}
+                  onChange={(value) => updateSetting("graphHeight", value)}
+                />
+              </div>
+              <InspectorCheckbox label="Square cells" checked disabled />
+            </InspectorGroup>
+
+            <InspectorGroup title="Measurements">
+              <InspectorRow label="Units">
+                <InspectorSelect
+                  label="Measurement units"
+                  value={settings.measurementUnit}
+                  options={[
+                    { value: "cm", label: "Centimeters" },
+                    { value: "in", label: "Inches" },
+                  ]}
+                  onChange={(value) => updateMeasurementUnit(value as GraphSettings["measurementUnit"])}
+                />
+              </InspectorRow>
+              <InspectorRow label="Cell size">
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
+                  <input value={(settings.cellSizeCm * 10).toFixed(2)} readOnly className={inspectorControlClass} aria-label="Cell size millimeters" />
+                  <span className="grid h-9 place-items-center rounded-md border border-[#d7dde5] bg-[#f8fafc] text-[12px] font-semibold text-[#475467]">mm</span>
+                </div>
+              </InspectorRow>
+              <p className="text-[12px] leading-5 text-[#667085]">
+                {settings.graphWidth.toFixed(0)} x {settings.graphHeight.toFixed(0)} cells = {imageWidthCm} x {imageHeightCm} cm
+              </p>
+              <InspectorRow label={`Graph height`}>
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
+                  <NumberField
+                    label={`Graph height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
+                    value={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
+                    min={0.01}
+                    max={roundMeasure(cmToUnit(Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS) * DEFAULT_CELL_SIZE_CM, settings.measurementUnit))}
+                    step={0.1}
+                    allowDecimalInput
+                    hideLabel
+                    inputClassName={inspectorControlClass}
+                    onChange={updateGraphPhysicalHeight}
+                  />
+                  <span className="grid h-9 place-items-center rounded-md border border-[#d7dde5] bg-[#f8fafc] text-[12px] font-semibold text-[#475467]">
+                    {MEASUREMENT_UNIT_LABELS[settings.measurementUnit]}
+                  </span>
+                </div>
+              </InspectorRow>
+              <InspectorRow label="Artwork">
+                <div className="grid min-w-0 grid-cols-2 gap-2">
+                  <NumberField
+                    label="Artwork width (CM)"
+                    value={roundMeasure(settings.imageWidth * settings.cellSizeCm)}
+                    min={0.01}
+                    max={roundMeasure(settings.graphWidth * settings.cellSizeCm)}
+                    step={0.1}
+                    allowDecimalInput
+                    inputClassName={inspectorControlClass}
+                    onChange={updateImageWidthCm}
+                  />
+                  <NumberField
+                    label={`Artwork height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
+                    value={roundMeasure(cmToUnit(settings.imageHeight * settings.cellSizeCm, settings.measurementUnit))}
+                    min={0.01}
+                    max={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
+                    step={0.1}
+                    allowDecimalInput
+                    inputClassName={inspectorControlClass}
+                    onChange={updateImageHeightPhysical}
+                  />
+                </div>
+              </InspectorRow>
+            </InspectorGroup>
+
+            <InspectorGroup title="Grid Lines">
+              <InspectorRow label="Line color">
+                <InspectorColorControl label="Graph line color" value={settings.gridLineColor} onChange={(value) => updateSetting("gridLineColor", value)} />
+              </InspectorRow>
+              <InspectorRow label="Layer">
+                <InspectorSelect
+                  label="Graph lines layer"
+                  value={settings.gridLineLayer}
+                  options={GRAPH_LINE_LAYER_KEYS.map((key) => ({ value: key, label: GRAPH_LINE_LAYER_LABELS[key] }))}
+                  onChange={(value) => updateSetting("gridLineLayer", value as GraphSettings["gridLineLayer"])}
+                />
+              </InspectorRow>
+              <div className="grid grid-cols-2 gap-2">
+                <InspectorCheckbox label="Show numbers" checked={settings.showNumbers} onChange={(checked) => updateSetting("showNumbers", checked)} />
+                <InspectorCheckbox label="Show guides" checked={settings.showPageBreaks} onChange={(checked) => updateSetting("showPageBreaks", checked)} />
+              </div>
+              <InspectorRow label="Numbers">
+                <InspectorSelect
+                  label="Grid number position"
+                  value={settings.gridNumberPlacement}
+                  options={(["inside", "outside"] as const).map((key) => ({ value: key, label: GRID_NUMBER_PLACEMENT_LABELS[key] }))}
+                  onChange={(value) => updateSetting("gridNumberPlacement", value as GraphSettings["gridNumberPlacement"])}
+                />
+              </InspectorRow>
+            </InspectorGroup>
+
+            <InspectorGroup title="Print Settings">
+              <InspectorRow label="Paper size">
+                <InspectorSelect
+                  label="Print paper size"
+                  value={settings.printPaperSize}
+                  options={PRINT_PAPER_SIZE_KEYS.map((key) => ({ value: key, label: paperSizeOptionLabel(key) }))}
+                  onChange={(value) => updateSetting("printPaperSize", value as GraphSettings["printPaperSize"])}
+                />
+              </InspectorRow>
+              <InspectorRow label="Orientation">
+                <InspectorSegmented
+                  label="Print orientation"
+                  value={settings.printOrientation}
+                  options={PRINT_ORIENTATION_KEYS.map((key) => ({ value: key, label: PRINT_ORIENTATION_LABELS[key] }))}
+                  onChange={(value) => updateSetting("printOrientation", value as GraphSettings["printOrientation"])}
+                />
+              </InspectorRow>
+              <InspectorRow label="Margin">
+                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
+                  <NumberField
+                    label="Page margin"
+                    value={settings.pageMargin ?? 24}
+                    min={0}
+                    max={400}
+                    wholeStep
+                    hideLabel
+                    inputClassName={inspectorControlClass}
+                    onChange={(value) => updateSetting("pageMargin", Math.round(value))}
+                  />
+                  <span className="grid h-9 place-items-center rounded-md border border-[#d7dde5] bg-[#f8fafc] text-[12px] font-semibold text-[#475467]">px</span>
+                </div>
+              </InspectorRow>
+              <InspectorRow label="Align">
+                <div className="grid min-w-0 grid-cols-2 gap-2">
+                  <InspectorSelect
+                    label="Horizontal print alignment"
+                    value={settings.printHorizontalAlignment}
+                    options={PRINT_HORIZONTAL_ALIGNMENT_KEYS.map((key) => ({ value: key, label: PRINT_HORIZONTAL_ALIGNMENT_LABELS[key] }))}
+                    onChange={(value) => updateSetting("printHorizontalAlignment", value as GraphSettings["printHorizontalAlignment"])}
+                  />
+                  <InspectorSelect
+                    label="Vertical print alignment"
+                    value={settings.printVerticalAlignment}
+                    options={PRINT_VERTICAL_ALIGNMENT_KEYS.map((key) => ({ value: key, label: PRINT_VERTICAL_ALIGNMENT_LABELS[key] }))}
+                    onChange={(value) => updateSetting("printVerticalAlignment", value as GraphSettings["printVerticalAlignment"])}
+                  />
+                </div>
+              </InspectorRow>
+            </InspectorGroup>
+
+            <div className="min-w-0 overflow-hidden rounded-md border border-[#d7dde5] bg-[#f8fafc] p-3">
+              <p className="break-words font-mono text-[11px] leading-5 text-[#667085]">
+                Graph {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / {GRAPH_LINE_LAYER_LABELS[settings.gridLineLayer].toLowerCase()} grid / {settings.showNumbers ? `${GRID_NUMBER_PLACEMENT_LABELS[settings.gridNumberPlacement].toLowerCase()} numbers` : "numbers off"} / {settings.showPageBreaks ? "page guides on" : "page guides off"} / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
+              </p>
+            </div>
+          </div>
+        ) : null}
+
+        {inspectorTab === "draw" ? (
+          <div className="space-y-4">
+            <div className="grid h-9 grid-cols-2 overflow-hidden rounded-md border border-[#d7dde5] text-[12px]">
+              {drawTabs.map((tab) => (
                 <button
-                  key={tool}
+                  key={tab.id}
                   type="button"
-                  onClick={() => setDrawingTool(tool)}
-                  className={`h-9 rounded-md border text-xs font-semibold capitalize ${
-                    drawingTool === tool ? "border-[var(--teal)] bg-teal-50 text-[var(--teal)]" : "border-[var(--line)] text-slate-600"
-                  }`}
+                  onClick={() => setDrawTab(tab.id)}
+                  className={`h-full font-medium ${drawTab === tab.id ? "bg-[#008c8f] text-white" : "text-[#344054]"} ${tab.id === "shape" ? "border-r border-[#d7dde5]" : ""}`}
                 >
-                  {tool}
+                  {tab.label}
                 </button>
               ))}
             </div>
 
-            <div className="rounded-md border border-[var(--line)] p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs font-semibold text-slate-500">Cell borders</span>
-                <button type="button" onClick={setAllCellPaintSides} className="h-8 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
-                  All
-                </button>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                {CELL_LINE_SIDE_KEYS.map((side) => (
-                  <label key={side} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
-                    <input
-                      type="checkbox"
-                      checked={cellPaintSides.includes(side)}
-                      onChange={() => toggleCellPaintSide(side)}
-                      className="h-4 w-4 accent-[var(--teal)]"
+            {drawTab === "shape" ? (
+              <InspectorGroup title="Shape Generator">
+                <div className="grid grid-cols-2 gap-2">
+                  {GENERATED_SHAPE_KIND_KEYS.map((kind) => (
+                    <button
+                      key={`draft-shape-${kind}`}
+                      type="button"
+                      onClick={() => {
+                        setDraftShapeKind(kind);
+                        if (shapeUsesSingleSize(kind)) setDraftShapeHeightCm(draftShapeWidthCm);
+                      }}
+                      className={`h-9 rounded-md border text-xs font-semibold ${draftShapeKind === kind ? "border-[#008c8f] bg-teal-50 text-[#007174]" : "border-[#d7dde5] bg-white text-[#344054]"}`}
+                    >
+                      {GRAPH_SHAPE_KIND_LABELS[kind]}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <NumberField
+                    label={shapeUsesSingleSize(draftShapeKind) ? "Size (CM)" : "Width (CM)"}
+                    value={draftShapeWidthCm}
+                    min={0.01}
+                    max={1000}
+                    step={0.1}
+                    allowDecimalInput
+                    inputClassName={inspectorControlClass}
+                    onChange={(value) => {
+                      setDraftShapeWidthCm(value);
+                      if (shapeUsesSingleSize(draftShapeKind)) setDraftShapeHeightCm(value);
+                    }}
+                  />
+                  <NumberField
+                    label={shapeUsesSingleSize(draftShapeKind) ? "Size (CM)" : "Height (CM)"}
+                    value={shapeUsesSingleSize(draftShapeKind) ? draftShapeWidthCm : draftShapeHeightCm}
+                    min={0.01}
+                    max={1000}
+                    step={0.1}
+                    allowDecimalInput
+                    inputClassName={inspectorControlClass}
+                    disabled={shapeUsesSingleSize(draftShapeKind)}
+                    onChange={setDraftShapeHeightCm}
+                  />
+                </div>
+
+                <InspectorSegmented
+                  label="Shape type"
+                  value={draftShapeFillMode}
+                  options={(["outline", "filled"] as ShapeFillMode[]).map((mode) => ({ value: mode, label: GENERATED_SHAPE_FILL_MODE_LABELS[mode] }))}
+                  onChange={(value) => setDraftShapeFillMode(value as ShapeFillMode)}
+                />
+
+                {draftShapeFillMode === "outline" && shapeSupportsSides(draftShapeKind) ? (
+                  <div className="grid grid-cols-4 gap-1">
+                    {CELL_LINE_SIDE_KEYS.map((side) => (
+                      <label key={`draft-side-${side}`} className="flex h-9 items-center gap-1.5 rounded-md border border-[#d7dde5] bg-white px-2 text-[11px] font-semibold text-[#344054]">
+                        <input
+                          type="checkbox"
+                          checked={draftShapeSides.includes(side)}
+                          onChange={(event) => setDraftShapeSide(side, event.target.checked)}
+                          className="h-4 w-4 accent-[#008c8f]"
+                        />
+                        {CELL_LINE_SIDE_LABELS[side]}
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
+
+                <NumberField
+                  label="Stroke width"
+                  value={draftShapeStrokeWidth}
+                  min={1}
+                  max={24}
+                  inputClassName={inspectorControlClass}
+                  onChange={(value) => setDraftShapeStrokeWidth(Math.round(value))}
+                />
+                <ColorPresetField label="Stroke color" value={draftShapeStrokeColor} onChange={setDraftShapeStrokeColor} />
+                {draftShapeFillMode === "filled" ? <ColorPresetField label="Fill color" value={draftShapeFillColor} onChange={setDraftShapeFillColor} allowTransparent /> : null}
+
+                <div className="overflow-hidden rounded-md border border-[#d7dde5] bg-[#f8fafc]">
+                  <div
+                    draggable
+                    onDragStart={handleGeneratedShapeDragStart}
+                    onDragEnd={() => setPlacingGeneratedShape(false)}
+                    className="grid h-36 cursor-grab place-items-center bg-white p-3 active:cursor-grabbing"
+                    title="Drag to canvas"
+                  >
+                    <ShapePreviewSvg
+                      kind={draftShapeKind}
+                      sides={shapeSupportsSides(draftShapeKind) ? draftShapeSides : CELL_LINE_SIDE_KEYS}
+                      fillColor={draftShapeFillMode === "filled" ? draftShapeFillColor : TRANSPARENT_FILL_COLOR}
+                      strokeColor={draftShapeStrokeColor}
+                      strokeWidth={draftShapeStrokeWidth}
+                      widthCells={draftShapePreviewDimensions.width}
+                      heightCells={draftShapePreviewDimensions.height}
+                      className="h-full max-h-28 w-full"
                     />
-                    {CELL_LINE_SIDE_LABELS[side]}
-                  </label>
-                ))}
-              </div>
-              <div className="mt-2 grid grid-cols-2 gap-2">
-                <label className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={cellPaintLineEnabled}
-                    onChange={(event) => setCellPaintLineEnabled(event.target.checked)}
-                    className="h-4 w-4 accent-[var(--teal)]"
-                  />
-                  Line
-                </label>
-                <label className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-slate-600">
-                  <input
-                    type="checkbox"
-                    checked={cellPaintFillEnabled}
-                    onChange={(event) => setCellPaintFillEnabled(event.target.checked)}
-                    className="h-4 w-4 accent-[var(--teal)]"
-                  />
-                  Fill
-                </label>
-              </div>
-            </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 border-t border-[#e8edf2] p-2">
+                    <button
+                      type="button"
+                      onClick={() => setPlacingGeneratedShape((value) => !value)}
+                      className={`h-9 rounded-md border text-xs font-semibold ${placingGeneratedShape ? "border-[#008c8f] bg-[#008c8f] text-white" : "border-[#d7dde5] bg-white text-[#344054]"}`}
+                    >
+                      Place on canvas
+                    </button>
+                    <button type="button" onClick={clearGraphShapes} disabled={!settings.graphShapes.length} className="h-9 rounded-md border border-[#d7dde5] bg-white text-xs font-semibold text-[#344054] disabled:opacity-45">
+                      Clear generated
+                    </button>
+                  </div>
+                </div>
+              </InspectorGroup>
+            ) : null}
 
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Shape</span>
-              <select
-                value={shapeKind}
-                onChange={(event) => {
-                  setShapeKind(event.target.value as GraphShapeKind);
-                  setDrawingTool("shape");
-                }}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                {GRAPH_SHAPE_KIND_KEYS.map((kind) => (
-                  <option key={kind} value={kind}>
-                    {GRAPH_SHAPE_KIND_LABELS[kind]}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {drawTab === "clipart" ? (
+              <InspectorGroup title="Clipart Library">
+                <label className={`flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md border border-[#d7dde5] bg-white text-sm font-semibold text-[#344054] hover:bg-[#f8fafc] ${uploadingCliparts ? "opacity-60" : ""}`}>
+                  {uploadingCliparts ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Upload size={16} aria-hidden="true" />}
+                  Upload cliparts
+                  <input
+                    type="file"
+                    accept={CLIPART_ACCEPT}
+                    multiple
+                    disabled={uploadingCliparts}
+                    className="sr-only"
+                    onChange={(event) => {
+                      const files = Array.from(event.target.files ?? []);
+                      event.target.value = "";
+                      if (files.length) void uploadClipartAssets(files);
+                    }}
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="text-xs font-semibold text-slate-500">Search clipart by name</span>
+                  <div className="relative">
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" aria-hidden="true" />
+                    <input
+                      type="text"
+                      value={clipartSearch}
+                      onChange={(event) => setClipartSearch(event.target.value)}
+                      placeholder="Search clipart"
+                      className="h-10 w-full rounded-md border border-[var(--line)] bg-white py-2 pr-3 pl-9 text-sm outline-none focus:border-[#008c8f] focus:ring-2 focus:ring-teal-100"
+                    />
+                  </div>
+                </label>
 
-            <div className="grid grid-cols-2 gap-2">
-              <button type="button" onClick={clearCellPaints} className="h-9 rounded-md border border-[var(--line)] text-xs font-semibold text-slate-600">
-                Clear cells
-              </button>
-              <button type="button" onClick={clearGraphShapes} className="h-9 rounded-md border border-[var(--line)] text-xs font-semibold text-slate-600">
-                Clear shapes
-              </button>
-            </div>
+                {settings.clipartAssets.length ? (
+                  filteredClipartAssets.length ? (
+                    <div className="grid max-h-44 gap-1 overflow-y-auto rounded-md border border-[#d7dde5] bg-white p-1">
+                      {filteredClipartAssets.map((asset) => {
+                        const selected = selectedClipartAsset?.id === asset.id;
+                        const previewUrl = asset.url ?? asset.dataUrl ?? null;
+                        return (
+                          <button
+                            key={`clipart-asset-${asset.id}`}
+                            type="button"
+                            onClick={() => {
+                              setSelectedClipartAssetId(asset.id);
+                              const aspect = clipartAssetAspect(asset);
+                              if (draftClipartHeightCm === draftClipartWidthCm) setDraftClipartHeightCm(roundMeasure(draftClipartWidthCm / aspect));
+                            }}
+                            className={`grid min-h-14 grid-cols-[44px_minmax(0,1fr)_24px] items-center gap-2 rounded px-2 py-1.5 text-left ${selected ? "bg-[#ecfeff] text-[#0f766e]" : "hover:bg-[#f8fafc]"}`}
+                          >
+                            {previewUrl ? (
+                              <img src={previewUrl} alt="" className="h-11 w-11 rounded border border-[#d7dde5] bg-white object-contain p-1" />
+                            ) : (
+                              <span className="grid h-11 w-11 place-items-center rounded border border-[#d7dde5] bg-[#f8fafc] text-[#98a2b3]">
+                                <ImageIcon size={15} aria-hidden="true" />
+                              </span>
+                            )}
+                            <span className="min-w-0">
+                              <span className="block truncate text-[12px] font-semibold text-[#101828]">{asset.name}</span>
+                              <span className="block truncate text-[11px] text-[#667085]">{asset.width} x {asset.height}</span>
+                            </span>
+                            {selected ? <Check size={16} aria-hidden="true" /> : null}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="rounded-md border border-dashed border-[#cfd7df] bg-[#f8fafc] px-3 py-5 text-center text-xs font-medium text-[#667085]">
+                      No cliparts match "{clipartSearch}"
+                    </div>
+                  )
+                ) : (
+                  <div className="rounded-md border border-dashed border-[#cfd7df] bg-[#f8fafc] px-3 py-5 text-center text-xs font-medium text-[#667085]">
+                    Upload cliparts to reuse in this project.
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-2">
+                  <NumberField
+                    label="Width (CM)"
+                    value={draftClipartWidthCm}
+                    min={0.01}
+                    max={1000}
+                    step={0.1}
+                    allowDecimalInput
+                    inputClassName={inspectorControlClass}
+                    onChange={(value) => {
+                      const aspect = clipartAssetAspect();
+                      setDraftClipartWidthCm(value);
+                      setDraftClipartHeightCm(roundMeasure(value / aspect));
+                    }}
+                  />
+                  <NumberField
+                    label="Height (CM)"
+                    value={draftClipartHeightCm}
+                    min={0.01}
+                    max={1000}
+                    step={0.1}
+                    allowDecimalInput
+                    inputClassName={inspectorControlClass}
+                    onChange={setDraftClipartHeightCm}
+                  />
+                </div>
+                <NumberField label="Line size" value={draftClipartStrokeWidth} min={1} max={24} inputClassName={inspectorControlClass} onChange={(value) => setDraftClipartStrokeWidth(Math.round(value))} />
+                <ColorPresetField label="Stroke color" value={draftClipartStrokeColor} onChange={setDraftClipartStrokeColor} />
+                <ColorPresetField label="Fill color" value={draftClipartFillColor} onChange={setDraftClipartFillColor} allowTransparent />
+
+                <div className="overflow-hidden rounded-md border border-[#d7dde5] bg-[#f8fafc]">
+                  <div
+                    draggable={Boolean(selectedClipartAsset)}
+                    onDragStart={selectedClipartAsset ? handleClipartDragStart(selectedClipartAsset.id) : undefined}
+                    onDragEnd={() => setPlacingClipartAssetId(null)}
+                    className={`grid h-36 place-items-center bg-white p-3 ${selectedClipartAsset ? "cursor-grab active:cursor-grabbing" : "text-[#98a2b3]"}`}
+                    title={selectedClipartAsset ? "Drag to canvas" : "Upload or select a clipart"}
+                  >
+                    {selectedClipartAsset?.url || selectedClipartAsset?.dataUrl ? (
+                      <div
+                        className="grid h-full max-h-28 w-full overflow-hidden place-items-center rounded border bg-[#f8fafc] p-2"
+                        style={{ borderColor: draftClipartStrokeColor }}
+                      >
+                        <img
+                          src={selectedClipartAsset.url ?? selectedClipartAsset.dataUrl ?? ""}
+                          alt=""
+                          className="h-full w-full max-h-24 max-w-full object-contain"
+                          style={{
+                            aspectRatio: `${Math.max(0.01, draftClipartPreviewDimensions.width)} / ${Math.max(0.01, draftClipartPreviewDimensions.height)}`,
+                          }}
+                        />
+                      </div>
+                    ) : (
+                      <ImageIcon size={28} aria-hidden="true" />
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 border-t border-[#e8edf2] p-2">
+                    <button
+                      type="button"
+                      onClick={() => selectedClipartAsset && setPlacingClipartAssetId((value) => (value === selectedClipartAsset.id ? null : selectedClipartAsset.id))}
+                      disabled={!selectedClipartAsset}
+                      className={`h-9 rounded-md border text-xs font-semibold disabled:opacity-45 ${placingClipartAssetId === selectedClipartAsset?.id ? "border-[#008c8f] bg-[#008c8f] text-white" : "border-[#d7dde5] bg-white text-[#344054]"}`}
+                    >
+                      Place clipart
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedClipartAsset) void deleteClipartAsset(selectedClipartAsset.id);
+                      }}
+                      disabled={!selectedClipartAsset || deletingClipartAssetId !== null}
+                      className="h-9 rounded-md border border-[#d7dde5] bg-white text-xs font-semibold text-[#b42318] disabled:opacity-45"
+                    >
+                      {selectedClipartAsset && deletingClipartAssetId === selectedClipartAsset.id ? <Loader2 size={14} className="animate-spin" /> : "Delete clipart"}
+                    </button>
+                    <button type="button" onClick={() => setGeneratedImagesCollapsed(false)} disabled={!settings.clipartImages.length} className="h-9 rounded-md border border-[#d7dde5] bg-white text-xs font-semibold text-[#344054] disabled:opacity-45">
+                      Show placed
+                    </button>
+                  </div>
+                </div>
+              </InspectorGroup>
+            ) : null}
+
+            {drawTab === "shape" && selectedShapeLayer ? (
+              <InspectorGroup title="Selected Generated Image">
+                <div className="rounded-md border border-[#d7dde5] bg-white">
+                  {renderShapeAdvanced(selectedShapeLayer)}
+                </div>
+              </InspectorGroup>
+            ) : null}
+            {drawTab === "clipart" && selectedClipartLayer ? (
+              <InspectorGroup title="Selected Clipart Image">
+                <div className="rounded-md border border-[#d7dde5] bg-white">
+                  {renderClipartAdvanced(selectedClipartLayer)}
+                </div>
+              </InspectorGroup>
+            ) : null}
+            {selectedCellLayer ? (
+              <InspectorGroup title="Selected Cell Paint">
+                <div className="rounded-md border border-[#d7dde5] bg-white">
+                  {renderCellAdvanced(selectedCellLayer)}
+                </div>
+              </InspectorGroup>
+            ) : null}
           </div>
-        </CollapsibleSection>
+        ) : null}
 
-        <CollapsibleSection title="Outline" summary={<ColorSummary value={settings.outlineColor} />} open={!collapsedSections.outline} onToggle={() => toggleSection("outline")}>
+        <CollapsibleSection title="Outline" summary={<ColorSummary value={settings.outlineColor} />} open={!collapsedSections.outline} onToggle={() => toggleSection("outline")} className={inspectorTab === "palette" ? "" : "hidden"}>
           <ColorPresetField label="Outline" value={settings.outlineColor} onChange={updateOutlineColor} />
         </CollapsibleSection>
 
-        <CollapsibleSection title="Default fill" summary={<ColorSummary value={settings.fillColor} />} open={!collapsedSections.fill} onToggle={() => toggleSection("fill")}>
+        <CollapsibleSection title="Default fill" summary={<ColorSummary value={settings.fillColor} />} open={!collapsedSections.fill} onToggle={() => toggleSection("fill")} className={inspectorTab === "palette" ? "" : "hidden"}>
           <ColorPresetField label="Default fill" value={settings.fillColor} onChange={(value) => updateSetting("fillColor", value)} allowTransparent />
         </CollapsibleSection>
 
         {selectedFillRegion ? (
-          <CollapsibleSection title={`Selected fill ${selectedFillRegion.id}`} summary={<ColorSummary value={selectedFillRegionColor} />} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")}>
+          <CollapsibleSection title={`Selected fill ${selectedFillRegion.id}`} summary={<ColorSummary value={selectedFillRegionColor} />} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")} className={inspectorTab === "palette" ? "" : "hidden"}>
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs font-semibold text-slate-500">{selectedFillRegion.kind === "source" ? "Source fill" : "Manual fill"}</span>
               <button
@@ -3358,7 +5504,7 @@ export function EditorClient({ project }: { project: Project }) {
           </CollapsibleSection>
         ) : null}
 
-        <CollapsibleSection title="Graph lines" summary={<ColorSummary value={settings.gridLineColor} />} open={!collapsedSections.graphLines} onToggle={() => toggleSection("graphLines")}>
+        <CollapsibleSection title="Graph lines" summary={<ColorSummary value={settings.gridLineColor} />} open={!collapsedSections.graphLines} onToggle={() => toggleSection("graphLines")} className={inspectorTab === "palette" ? "" : "hidden"}>
           <ColorPresetField
             label="Graph lines"
             value={settings.gridLineColor}
@@ -3377,7 +5523,10 @@ export function EditorClient({ project }: { project: Project }) {
         onPointerCancel={endPanelResize}
         className="group absolute inset-y-0 left-0 hidden w-3 cursor-col-resize touch-none place-items-center lg:grid"
       >
-        <span className="absolute inset-y-0 left-1.5 w-px bg-slate-200 transition-colors group-hover:bg-[var(--teal)]" aria-hidden="true" />
+        <span
+          className="absolute top-1/2 left-1.5 h-[50vh] w-px -translate-y-1/2 bg-slate-200 opacity-0 transition-colors transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-hover:bg-[var(--teal)]"
+          aria-hidden="true"
+        />
         <span
           className={`grid h-6 w-6 place-items-center rounded-full border border-[var(--line)] bg-white text-slate-500 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${
             resizingPanelSide === "right" ? "opacity-100" : "opacity-0"
@@ -3388,35 +5537,6 @@ export function EditorClient({ project }: { project: Project }) {
         </span>
       </button>
     </aside>
-  );
-
-  const exportPanel = (
-    <div className="rounded-md border border-[var(--line)] bg-white p-3 shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-950">
-          <Download size={16} aria-hidden="true" />
-          Export
-        </h2>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={exportPNG} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-            <ImageDown size={16} aria-hidden="true" />
-            PNG
-          </button>
-          <button type="button" onClick={exportPDF} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-            <FileText size={16} aria-hidden="true" />
-            PDF
-          </button>
-          <button type="button" onClick={printGraph} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-            <Printer size={16} aria-hidden="true" />
-            Print
-          </button>
-          <button type="button" onClick={exportJSON} className="inline-flex h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-            <FileJson size={16} aria-hidden="true" />
-            JSON
-          </button>
-        </div>
-      </div>
-    </div>
   );
 
   const graphPreviewWidth = Math.max(1, previewCanvasSize.width * zoom);
@@ -3499,24 +5619,36 @@ export function EditorClient({ project }: { project: Project }) {
           height: Math.max(1, Math.round(selectedSourceLayout.height * GRAPH_MAJOR_CELL_PIXELS * zoom)),
         }
       : null;
+  const selectedShapeBox =
+    selectedShapeLayer && !showOriginal
+      ? {
+          left: Math.round(outsideNumberMargin + Math.min(selectedShapeLayer.x, selectedShapeLayer.x + selectedShapeLayer.width) * GRAPH_MAJOR_CELL_PIXELS * zoom),
+          top: Math.round(outsideNumberMargin + Math.min(selectedShapeLayer.y, selectedShapeLayer.y + selectedShapeLayer.height) * GRAPH_MAJOR_CELL_PIXELS * zoom),
+          width: Math.max(1, Math.round(Math.abs(selectedShapeLayer.width) * GRAPH_MAJOR_CELL_PIXELS * zoom)),
+          height: Math.max(1, Math.round(Math.abs(selectedShapeLayer.height) * GRAPH_MAJOR_CELL_PIXELS * zoom)),
+        }
+      : null;
+  const selectedClipartBox =
+    selectedClipartLayer && !showOriginal
+      ? {
+          left: Math.round(outsideNumberMargin + Math.min(selectedClipartLayer.x, selectedClipartLayer.x + selectedClipartLayer.width) * GRAPH_MAJOR_CELL_PIXELS * zoom),
+          top: Math.round(outsideNumberMargin + Math.min(selectedClipartLayer.y, selectedClipartLayer.y + selectedClipartLayer.height) * GRAPH_MAJOR_CELL_PIXELS * zoom),
+          width: Math.max(1, Math.round(Math.abs(selectedClipartLayer.width) * GRAPH_MAJOR_CELL_PIXELS * zoom)),
+          height: Math.max(1, Math.round(Math.abs(selectedClipartLayer.height) * GRAPH_MAJOR_CELL_PIXELS * zoom)),
+        }
+      : null;
 
   const canvasPanel = (
-    <section className="min-w-0 space-y-4">
-      {exportPanel}
-
-      <div className="rounded-md border border-[var(--line)] bg-white p-3 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] pb-3">
+    <section className="editor-canvas-panel grid min-h-0 grid-rows-[40px_minmax(0,1fr)_36px]">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#d7dde5] bg-white px-3">
           <div className="min-w-0">
-            <h1 className="truncate text-xl font-semibold text-slate-950">{title || "Untitled project"}</h1>
-            <p className="mt-1 text-xs text-slate-500">
-              {settings.graphWidth} x {settings.graphHeight} cells
-            </p>
+            <h1 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">Canvas</h1>
           </div>
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
               onClick={() => setSourcePanelCollapsed((value) => !value)}
-              className="hidden h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 lg:grid"
+              className="hidden h-9 w-9 place-items-center rounded-md border border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50 lg:grid"
               title={sourcePanelCollapsed ? "Show source panel" : "Hide source panel"}
             >
               {sourcePanelCollapsed ? <PanelLeftOpen size={16} aria-hidden="true" /> : <PanelLeftClose size={16} aria-hidden="true" />}
@@ -3524,53 +5656,87 @@ export function EditorClient({ project }: { project: Project }) {
             <button
               type="button"
               onClick={() => setSettingsPanelCollapsed((value) => !value)}
-              className="hidden h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600 lg:grid"
+              className="hidden h-9 w-9 place-items-center rounded-md border border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50 lg:grid"
               title={settingsPanelCollapsed ? "Show controls panel" : "Hide controls panel"}
             >
               {settingsPanelCollapsed ? <PanelRightOpen size={16} aria-hidden="true" /> : <PanelRightClose size={16} aria-hidden="true" />}
             </button>
-            <button type="button" onClick={() => setShowOriginal((value) => !value)} className="grid h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600" title={showOriginal ? "Show processed" : "Show original"}>
-              {showOriginal ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}
-            </button>
-            <button type="button" onClick={() => setZoom((value) => Math.max(0.35, value - 0.15))} className="grid h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600" title="Zoom out">
-              <ZoomOut size={16} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={() => setZoom((value) => Math.min(2.5, value + 0.15))} className="grid h-10 w-10 place-items-center rounded-md border border-[var(--line)] text-slate-600" title="Zoom in">
-              <ZoomIn size={16} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={saveProject} disabled={isPending || processing || !title.trim()} className="inline-flex h-10 items-center gap-2 rounded-md bg-[var(--teal)] px-4 text-sm font-semibold text-white disabled:opacity-60">
+            <button
+              type="button"
+              onClick={saveProject}
+              disabled={isPending || processing || !title.trim()}
+              title={!isOnline ? "Save an offline session draft" : hasSessionDraft ? "Sync session draft to the database" : "Save project"}
+              className="hidden"
+            >
               {isPending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Save size={16} aria-hidden="true" />}
               Save
             </button>
           </div>
         </div>
 
-        {notice ? (
-          <p className={`mt-3 rounded-md border px-3 py-2 text-sm ${
-            notice.tone === "error"
-              ? "border-red-200 bg-red-50 text-red-700"
-              : notice.tone === "ok"
-                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                : "border-slate-200 bg-slate-50 text-slate-600"
-          }`}>
-            {notice.text}
-          </p>
-        ) : null}
-
         <div
           ref={canvasScrollRef}
+          onDragOver={handleGeneratedShapeDragOver}
+          onDrop={handleGeneratedShapeDrop}
           onPointerDown={(event) => {
             if (event.target === event.currentTarget) {
               setSelectedSourceId(null);
               setSelectedDrawingLayerId(null);
+              setLayerChooser(null);
             }
           }}
-          className="relative mt-3 min-h-[520px] overflow-auto rounded-md border border-[var(--line)] bg-[linear-gradient(45deg,#f8fafc_25%,transparent_25%),linear-gradient(-45deg,#f8fafc_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#f8fafc_75%),linear-gradient(-45deg,transparent_75%,#f8fafc_75%)] bg-[length:24px_24px] bg-[position:0_0,0_12px,12px_-12px,-12px_0] p-4"
+          className="ui-canvas-bg relative min-h-0 overflow-auto p-8"
         >
+          {notice ? (
+            <div className={`absolute left-24 top-3 z-20 flex min-h-8 w-[min(560px,calc(100%-8rem))] items-start gap-2 rounded-md border px-3 py-2 text-sm shadow-sm ${
+              notice.tone === "error"
+                ? "border-red-200 bg-red-50 text-red-700"
+                : notice.tone === "ok"
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border-slate-200 bg-white text-slate-600"
+            }`}>
+              <span className="min-w-0 flex-1 leading-5">{notice.text}</span>
+              <button
+                type="button"
+                onClick={() => setNotice(null)}
+                className="rounded-sm p-0.5 text-current transition hover:opacity-70"
+                title="Close"
+                aria-label="Close notification"
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          ) : null}
           {processing ? (
             <div className="absolute right-3 top-3 inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-white px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm">
               <Loader2 size={14} className="animate-spin" aria-hidden="true" />
               Processing
+            </div>
+          ) : null}
+          {layerChooser ? (
+            <div
+              className="fixed z-40 w-64 overflow-hidden rounded-md border border-[#d7dde5] bg-white text-sm shadow-xl"
+              style={{ left: layerChooser.x + 8, top: layerChooser.y + 8 }}
+            >
+              <div className="border-b border-[#e8edf2] px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-[#667085]">Select layer</div>
+              <div className="max-h-64 overflow-y-auto">
+                {layerChooser.choices.map((choice) => (
+                  <button
+                    key={choice.key}
+                    type="button"
+                    onClick={() => selectLayerChoice(choice)}
+                    className="grid w-full grid-cols-[24px_minmax(0,1fr)] items-center gap-2 border-b border-[#eef2f6] px-3 py-2 text-left last:border-b-0 hover:bg-[#f8fafc]"
+                  >
+                    <span className="grid h-6 w-6 place-items-center rounded border border-[#d7dde5] bg-[#f8fafc] text-[#667085]">
+                      {choice.type === "source" || choice.type === "clipart" ? <ImageIcon size={14} aria-hidden="true" /> : <Maximize2 size={14} aria-hidden="true" />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block truncate text-[12px] font-semibold text-[#101828]">{choice.name}</span>
+                      <span className="block truncate text-[11px] text-[#667085]">{choice.detail}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           ) : null}
           {showOriginal && sourcePreviewUrl ? (
@@ -3579,9 +5745,12 @@ export function EditorClient({ project }: { project: Project }) {
             <div
               ref={graphStageRef}
               className="relative mx-auto"
+              onDragOver={handleGeneratedShapeDragOver}
+              onDrop={handleGeneratedShapeDrop}
               style={{
                 width: `${graphPreviewWidth + outsideNumberMargin * 2}px`,
                 height: `${graphPreviewHeight + outsideNumberMargin * 2}px`,
+                transform: `translate(${canvasPan.x}px, ${canvasPan.y}px)`,
               }}
               onPointerDown={(event) => {
                 if (event.target === event.currentTarget) {
@@ -3596,6 +5765,8 @@ export function EditorClient({ project }: { project: Project }) {
                 onPointerMove={dragGraph}
                 onPointerUp={endGraphDrag}
                 onPointerCancel={endGraphDrag}
+                onDragOver={handleGeneratedShapeDragOver}
+                onDrop={handleGeneratedShapeDrop}
                 title="Drag image to move it; arrow keys move selected image by 0.1cm; Space or Ctrl plus drag pans the view"
                 className="absolute left-0 top-0 rounded bg-white shadow-sm"
                 style={{
@@ -3603,7 +5774,7 @@ export function EditorClient({ project }: { project: Project }) {
                   top: `${outsideNumberMargin}px`,
                   width: `${graphPreviewWidth}px`,
                   height: `${graphPreviewHeight}px`,
-                  cursor: isDraggingGraph ? "grabbing" : copiedFillColor ? "copy" : "crosshair",
+                  cursor: isDraggingGraph ? "grabbing" : canvasTool === "hand" ? "grab" : placingGeneratedShape || placingClipartAssetId ? "copy" : copiedFillColor ? "copy" : "crosshair",
                   imageRendering: "auto",
                   touchAction: "none",
                 }}
@@ -3678,6 +5849,34 @@ export function EditorClient({ project }: { project: Project }) {
                   ))}
                 </div>
               ) : null}
+              {selectedShapeBox && selectedShapeLayer ? (
+                <div
+                  className="pointer-events-none absolute border border-teal-700/75 bg-transparent shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
+                  style={selectedShapeBox}
+                >
+                  {SOURCE_RESIZE_HANDLES.map((handle) => (
+                    <button
+                      key={handle}
+                      type="button"
+                      aria-label={`Resize ${handle}`}
+                      disabled={selectedShapeLayer.locked}
+                      onPointerDown={(event) => beginShapeResize(event, selectedShapeLayer, handle)}
+                      onPointerMove={dragGraph}
+                      onPointerUp={endGraphDrag}
+                      onPointerCancel={endGraphDrag}
+                      className={sourceResizeHandleClass(handle, selectedShapeLayer.locked)}
+                    >
+                      <span className={sourceResizeHandleIconClass(handle)}>{sourceResizeHandleIcon(handle)}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {selectedClipartBox ? (
+                <div
+                  className="pointer-events-none absolute border border-teal-700/75 bg-teal-500/5 shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
+                  style={selectedClipartBox}
+                />
+              ) : null}
               {selectedSourceBox && selectedSourceLayout ? (
                 <div
                   className="pointer-events-none absolute border border-teal-700/75 bg-transparent shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
@@ -3703,21 +5902,169 @@ export function EditorClient({ project }: { project: Project }) {
             </div>
           )}
         </div>
+      <div className="flex items-center gap-8 border-t border-[#d7dde5] bg-white px-4 text-xs text-[#475467]">
+        <span>X: 37</span>
+        <span>Y: 112</span>
+        <span>Cell: 0,0</span>
+        <span className="flex items-center gap-2">Color: #000000 <span className="h-4 w-4 bg-black" /></span>
+        <span className="ml-auto rounded bg-[#008c8f] px-3 py-2 text-white">Snap: On</span>
       </div>
-
     </section>
   );
 
   return (
-    <div className="p-3 sm:p-4 lg:p-5">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <Link href="/dashboard" className="text-sm font-semibold text-slate-600 hover:text-[var(--teal)]">
-          Back to dashboard
-        </Link>
-        <span className="hidden text-xs font-semibold text-slate-500 sm:inline">Brevo OTP private workspace</span>
+    <div className="editor-dark-shell">
+      <header className="editor-dark-toolbar">
+        <div className="flex min-w-max items-center gap-3">
+          <Link href="/dashboard" className="flex items-center gap-3 pr-3 text-white" aria-label="Back to dashboard">
+            <LogoMark className="h-9 w-9 shrink-0" />
+            <span className="text-lg font-semibold">Graph Pixel Maker</span>
+          </Link>
+          <span className="h-8 w-px bg-white/16" aria-hidden="true" />
+          <button type="button" onClick={openMainMenu} className="editor-dark-btn w-10 px-0" title="Menu">
+            <Menu size={18} aria-hidden="true" />
+          </button>
+          <button type="button" onClick={() => restoreSettingsHistory("undo")} className="editor-dark-btn w-10 px-0" title="Undo">
+            <Undo2 size={18} aria-hidden="true" />
+          </button>
+          <button type="button" onClick={() => restoreSettingsHistory("redo")} className="editor-dark-btn w-10 px-0" title="Redo">
+            <Redo2 size={18} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setCanvasTool("hand")}
+            className={`editor-dark-btn ${canvasTool === "hand" ? "border-[#008c8f] bg-[#10242d] text-[#6fe7ea]" : ""}`}
+            title="Pan (hand)"
+          >
+            <Hand size={18} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setCanvasTool("pointer")}
+            className={`editor-dark-btn ${canvasTool === "pointer" ? "border-[#008c8f] bg-[#10242d] text-[#6fe7ea]" : ""}`}
+            title="Select (pointer)"
+          >
+            <MousePointer2 size={18} aria-hidden="true" />
+          </button>
+          <button type="button" onClick={() => setShowOriginal((value) => !value)} className="editor-dark-btn" title={showOriginal ? "Show processed" : "Show original"}>
+            {showOriginal ? <EyeOff size={17} aria-hidden="true" /> : <Eye size={17} aria-hidden="true" />}
+            <span>Show Original</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              lastProcessedSignatureRef.current = null;
+              setRenderKey((key) => key + 1);
+            }}
+            className="editor-dark-btn"
+            title="Refresh render"
+          >
+            <RefreshCw size={17} aria-hidden="true" />
+            <span>Refresh</span>
+          </button>
+          <button type="button" onClick={() => updateSetting("showNumbers", !settings.showNumbers)} className="editor-dark-btn" title="Toggle graph numbers">
+            <Grid3X3 size={17} aria-hidden="true" />
+            <span>Grid</span>
+          </button>
+          <div className="flex h-9 items-center overflow-hidden rounded-[5px] border border-[#334152] bg-[#141d27]">
+            <button type="button" onClick={() => setZoom((value) => Math.max(0.35, value - 0.15))} className="grid h-9 w-10 place-items-center text-white/80" title="Zoom out">
+              <ZoomOut size={16} aria-hidden="true" />
+            </button>
+            <span className="border-x border-[#334152] px-4 text-sm font-semibold">{Math.round(zoom * 100)}%</span>
+            <button type="button" onClick={() => setZoom((value) => Math.min(2.5, value + 0.15))} className="grid h-9 w-10 place-items-center text-white/80" title="Zoom in">
+              <ZoomIn size={16} aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex min-w-max items-center gap-2">
+          <button
+            type="button"
+            onClick={saveProject}
+            disabled={isPending || processing || !title.trim()}
+            className="editor-dark-btn border-[#00a3a7] bg-[#00969a] text-white disabled:opacity-60"
+            title={!isOnline ? "Save an offline session draft" : hasSessionDraft ? "Sync session draft to the database" : "Save project"}
+          >
+            {isPending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}
+            Save
+          </button>
+          <div className="relative" ref={exportMenuRef}>
+            <button
+              type="button"
+              onClick={() => setIsExportMenuOpen((open) => !open)}
+              className="editor-dark-btn"
+              title="Export"
+              aria-expanded={isExportMenuOpen}
+              ref={exportMenuButtonRef}
+            >
+              <Download size={16} aria-hidden="true" />
+              Export
+              <ChevronDown size={15} aria-hidden="true" />
+            </button>
+          </div>
+          {isExportMenuOpen && exportMenuStyle
+            ? createPortal(
+                <div
+                  ref={exportMenuPortalRef}
+                  className="editor-export-menu editor-export-menu--portal"
+                  role="menu"
+                  aria-label="Export format"
+                  style={exportMenuStyle}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      exportPNG();
+                    }}
+                    className="editor-export-option"
+                    role="menuitem"
+                  >
+                    <ImageDown size={16} aria-hidden="true" />
+                    PNG
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      exportPDF();
+                    }}
+                    className="editor-export-option"
+                    role="menuitem"
+                  >
+                    <FileText size={16} aria-hidden="true" />
+                    PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      exportJSON();
+                    }}
+                    className="editor-export-option"
+                    role="menuitem"
+                  >
+                    <FileJson size={16} aria-hidden="true" />
+                    JSON
+                  </button>
+                </div>,
+                document.body,
+              )
+            : null}
+          <button type="button" onClick={printGraph} className="editor-dark-btn" title="Print">
+            <Printer size={16} aria-hidden="true" />
+            Print
+          </button>
+        </div>
+      </header>
+
+      <div className="editor-workspace" style={editorGridStyle}>
+        <div className={`editor-side-column ${mobileTab === "source" ? "block" : "hidden"} ${sourcePanelCollapsed ? "lg:hidden" : "lg:block"}`}>{sourcePanel}</div>
+        <div className={mobileTab === "canvas" ? "block" : "hidden lg:block"}>{canvasPanel}</div>
+        <div className={`editor-side-column ${mobileTab === "controls" ? "block" : "hidden"} ${settingsPanelCollapsed ? "lg:hidden" : "lg:block"}`}>{settingsPanel}</div>
       </div>
 
-      <div className="mb-3 grid grid-cols-3 rounded-md border border-[var(--line)] bg-white p-1 lg:hidden">
+      <div className="grid h-16 grid-cols-3 border-t border-[#d7dde5] bg-white lg:hidden">
         {[
           ["source", "Source"],
           ["canvas", "Canvas"],
@@ -3727,17 +6074,18 @@ export function EditorClient({ project }: { project: Project }) {
             key={value}
             type="button"
             onClick={() => setMobileTab(value as MobileTab)}
-            className={`h-10 rounded text-sm font-semibold ${mobileTab === value ? "bg-teal-50 text-[var(--teal)]" : "text-slate-600"}`}
+            className={`flex flex-col items-center justify-center gap-1 text-xs font-semibold ${mobileTab === value ? "text-[#008c8f]" : "text-[#344054]"}`}
           >
+            {value === "source" ? <ImageIcon size={20} aria-hidden="true" /> : value === "canvas" ? <Grid3X3 size={20} aria-hidden="true" /> : <Settings2 size={20} aria-hidden="true" />}
             {label}
           </button>
         ))}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[var(--editor-grid-columns)]" style={editorGridStyle}>
-        <div className={`${mobileTab === "source" ? "block" : "hidden"} ${sourcePanelCollapsed ? "lg:hidden" : "lg:block"}`}>{sourcePanel}</div>
-        <div className={mobileTab === "canvas" ? "block" : "hidden lg:block"}>{canvasPanel}</div>
-        <div className={`${mobileTab === "controls" ? "block" : "hidden"} ${settingsPanelCollapsed ? "lg:hidden" : "lg:block"}`}>{settingsPanel}</div>
+      <div className={`flex h-9 shrink-0 items-center gap-3 px-4 text-xs text-white ${isOnline ? "bg-[#008c8f]" : "bg-[#594407]"}`}>
+        <span className="font-semibold">{isOnline ? "Online save" : "Offline draft"}</span>
+        <span className="ml-auto">{hasSessionDraft ? "Changes saved locally" : isOnline ? "Database sync ready" : "Changes will sync when online."}</span>
+        <Check size={16} aria-hidden="true" />
       </div>
       {floatingPaletteNode}
     </div>

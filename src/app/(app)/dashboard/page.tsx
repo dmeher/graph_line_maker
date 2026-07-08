@@ -3,174 +3,163 @@ import { Copy, Plus, Search, Trash2 } from "lucide-react";
 import { duplicateProject, deleteProject } from "@/app/(app)/projects/actions";
 import { getProjectSummaries } from "@/lib/projects";
 import { formatDateTime } from "@/lib/utils/format";
+import type { ProjectSummary } from "@/lib/types";
 
 export const metadata = {
   title: "Dashboard",
 };
 
+const placeholderProjects = [
+  ["Mountain Landscape", "mountain_landscape.png", "96 x 96", 22, ["#14213d", "#4d908e", "#90be6d", "#f9c74f"]],
+  ["City Skyline", "city_skyline.png", "128 x 64", 24, ["#001219", "#005f73", "#94d2bd", "#e9d8a6"]],
+  ["Forest Path", "forest_path.png", "96 x 96", 20, ["#1b4332", "#2d6a4f", "#74c69d", "#d8f3dc"]],
+  ["Sunset Over Sea", "sunset_over_sea.png", "128 x 64", 18, ["#f94144", "#f3722c", "#f9c74f", "#277da1"]],
+  ["Pixel Character", "pixel_character.png", "64 x 64", 16, ["#264653", "#e76f51", "#f4a261", "#2a9d8f"]],
+  ["Retro Car", "retro_car.png", "96 x 64", 19, ["#111827", "#dc2626", "#f8fafc", "#64748b"]],
+  ["Game Tileset", "game_tileset.png", "128 x 128", 32, ["#4a3728", "#8f5d3c", "#6b8e23", "#c9b37e"]],
+] as const;
+
+function PreviewStrip({ colors }: { colors: readonly string[] }) {
+  return (
+    <div className="grid h-10 w-[148px] grid-cols-12 overflow-hidden rounded-sm border border-[#d7dde5] bg-white">
+      {Array.from({ length: 48 }).map((_, index) => (
+        <span
+          key={index}
+          className="border-r border-b border-white/30"
+          style={{ backgroundColor: colors[(index + Math.floor(index / 12)) % colors.length] }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function PaletteDots({ colors }: { colors: readonly string[] }) {
+  return (
+    <div className="flex gap-0.5">
+      {colors.map((color, index) => (
+        <span key={`${color}-${index}`} className="h-3.5 w-3.5 rounded-[2px] border border-white shadow-[0_0_0_1px_rgba(0,0,0,0.08)]" style={{ backgroundColor: color }} />
+      ))}
+    </div>
+  );
+}
+
+function projectColors(project: ProjectSummary) {
+  return project.palettePreview.length ? project.palettePreview.map((color) => color.hex) : ["#008c8f", "#111827", "#e5e7eb", "#f97316"];
+}
+
 export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
   const params = await searchParams;
   const projects = await getProjectSummaries(params.q);
+  const showingPlaceholders = projects.length === 0;
 
   return (
-    <div className="space-y-4 p-3 sm:p-4 lg:p-5">
-      <section className="rounded-md border border-[var(--line)] bg-white p-4 shadow-sm sm:p-5">
-        <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-semibold text-slate-950">Projects</h1>
-            <p className="mt-1 text-sm text-slate-600">Open saved graph charts or create a new line-art conversion.</p>
-          </div>
-          <Link
-            href="/projects/new"
-            prefetch={false}
-            className="inline-flex h-11 items-center justify-center gap-2 rounded-md bg-[var(--teal)] px-4 text-sm font-semibold text-white shadow-sm"
-          >
-            <Plus size={16} aria-hidden="true" />
-            Create project
-          </Link>
+    <div className="mock-card min-h-[calc(100dvh-96px)] overflow-hidden">
+      <div className="flex items-center justify-between border-b border-[#d7dde5] px-6 py-4">
+        <div>
+          <h1 className="text-[22px] font-semibold tracking-[-0.01em] text-[#101828]">Projects</h1>
         </div>
+        <Link href="/projects/new" prefetch={false} className="mock-btn mock-btn-primary">
+          Create project
+          <Plus size={16} strokeWidth={2} />
+        </Link>
+      </div>
 
-        <form className="mt-5 flex max-w-xl gap-2">
-          <label className="relative flex-1">
-            <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input
-              name="q"
-              defaultValue={params.q || ""}
-              placeholder="Search projects"
-              className="h-11 w-full rounded-md border border-[var(--line)] pl-9 pr-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-            />
-          </label>
-          <button className="h-11 rounded-md border border-[var(--line)] bg-white px-4 text-sm font-semibold text-slate-700">
-            Search
-          </button>
+      <div className="flex items-center justify-between gap-4 px-6 py-4">
+        <form className="relative w-full max-w-[320px]">
+          <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#667085]" />
+          <input name="q" defaultValue={params.q || ""} placeholder="Search projects" className="mock-input h-9 pl-9" />
         </form>
-      </section>
+        {showingPlaceholders ? <span className="text-xs font-medium text-[#667085]">Placeholder library shown until projects are saved</span> : null}
+      </div>
 
-      <section className="rounded-md border border-[var(--line)] bg-white shadow-sm">
-        <div className="border-b border-[var(--line)] px-4 py-3">
-          <h2 className="text-sm font-semibold text-slate-950">{projects.length} saved projects</h2>
-        </div>
-
-        {projects.length ? (
-          <div className="hidden overflow-x-auto lg:block">
-            <table className="w-full min-w-[900px] text-sm">
-              <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500">
-                <tr>
-                  {["Project", "Updated", "Size", "Colors", "Palette", "Actions"].map((head) => (
-                    <th key={head} className="border-b border-[var(--line)] px-4 py-3">
-                      {head}
-                    </th>
-                  ))}
+      <div className="overflow-x-auto px-6 pb-4">
+        <table className="mock-table min-w-[920px]">
+          <thead>
+            <tr>
+              <th>Project name</th>
+              <th>Preview</th>
+              <th>Size</th>
+              <th>Colors</th>
+              <th>Created</th>
+              <th>Updated</th>
+              <th className="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {projects.map((project) => {
+              const colors = projectColors(project);
+              return (
+                <tr key={project.id}>
+                  <td>
+                    <Link href={`/projects/${project.id}`} prefetch={false} className="font-semibold text-[#101828] hover:text-[#008c8f]">
+                      {project.title}
+                    </Link>
+                    <p className="mt-0.5 text-[11px] text-[#667085]">{project.description || project.originalImagePath?.split("/").pop() || "graph_project.png"}</p>
+                  </td>
+                  <td><PreviewStrip colors={colors} /></td>
+                  <td className="font-semibold text-[#101828]">{project.width} x {project.height}</td>
+                  <td><div className="flex items-center gap-2"><span>{project.colorCount}</span><PaletteDots colors={colors.slice(0, 4)} /></div></td>
+                  <td>{formatDateTime(project.createdAt)}</td>
+                  <td>{formatDateTime(project.updatedAt)}</td>
+                  <td>
+                    <div className="flex justify-end gap-2">
+                      <form action={duplicateProject}>
+                        <input type="hidden" name="projectId" value={project.id} />
+                        <button className="grid h-8 w-8 place-items-center rounded-md text-[#475467] hover:bg-[#f2f4f7]" title="Duplicate">
+                          <Copy size={16} strokeWidth={1.8} />
+                        </button>
+                      </form>
+                      <form action={deleteProject}>
+                        <input type="hidden" name="projectId" value={project.id} />
+                        <button className="grid h-8 w-8 place-items-center rounded-md text-[#ef4444] hover:bg-red-50" title="Delete">
+                          <Trash2 size={16} strokeWidth={1.8} />
+                        </button>
+                      </form>
+                    </div>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {projects.map((project) => (
-                  <tr key={project.id} className="hover:bg-slate-50">
-                    <td className="border-b border-[var(--line)] px-4 py-3">
-                      <Link href={`/projects/${project.id}`} prefetch={false} className="font-semibold text-slate-950 hover:text-[var(--teal)]">
-                        {project.title}
+              );
+            })}
+            {showingPlaceholders
+              ? placeholderProjects.map(([title, file, size, colorsCount, colors], index) => (
+                  <tr key={title}>
+                    <td>
+                      <Link href="/projects/mock-editor" prefetch={false} className="font-semibold text-[#101828] hover:text-[#008c8f]">
+                        {title}
                       </Link>
-                      <p className="mt-1 max-w-sm truncate text-xs text-slate-500">{project.description || "No description"}</p>
+                      <p className="mt-0.5 text-[11px] text-[#667085]">{file}</p>
                     </td>
-                    <td className="border-b border-[var(--line)] px-4 py-3 text-slate-600">{formatDateTime(project.updatedAt)}</td>
-                    <td className="border-b border-[var(--line)] px-4 py-3 font-mono text-xs text-slate-600">
-                      {project.width} x {project.height}
-                    </td>
-                    <td className="border-b border-[var(--line)] px-4 py-3">{project.colorCount}</td>
-                    <td className="border-b border-[var(--line)] px-4 py-3">
-                      <div className="flex gap-1">
-                        {project.palettePreview.length ? (
-                          project.palettePreview.map((color) => (
-                            <span
-                              key={`${project.id}-${color.hex}-${color.sortOrder}`}
-                              className="h-5 w-5 rounded-sm border border-slate-200"
-                              style={{ backgroundColor: color.hex }}
-                              title={`${color.name}: ${color.cellCount}`}
-                            />
-                          ))
-                        ) : (
-                          <span className="text-xs text-slate-500">Not processed</span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="border-b border-[var(--line)] px-4 py-3">
-                      <div className="flex gap-2">
-                        <form action={duplicateProject}>
-                          <input type="hidden" name="projectId" value={project.id} />
-                          <button className="grid h-9 w-9 place-items-center rounded-md border border-[var(--line)] text-slate-600 hover:bg-slate-50" title="Duplicate">
-                            <Copy size={15} aria-hidden="true" />
-                          </button>
-                        </form>
-                        <form action={deleteProject}>
-                          <input type="hidden" name="projectId" value={project.id} />
-                          <button className="grid h-9 w-9 place-items-center rounded-md border border-red-200 text-red-600 hover:bg-red-50" title="Delete">
-                            <Trash2 size={15} aria-hidden="true" />
-                          </button>
-                        </form>
+                    <td><PreviewStrip colors={colors} /></td>
+                    <td className="font-semibold text-[#101828]">{size}</td>
+                    <td><div className="flex items-center gap-2"><span>{colorsCount}</span><PaletteDots colors={colors} /></div></td>
+                    <td>May {12 - Math.min(index, 4)}, 2025<br /><span className="text-[11px] text-[#667085]">10:{45 - index} AM</span></td>
+                    <td>May {12 - Math.min(index, 4)}, 2025<br /><span className="text-[11px] text-[#667085]">10:{45 + index} AM</span></td>
+                    <td>
+                      <div className="flex justify-end gap-2">
+                        <button className="grid h-8 w-8 place-items-center rounded-md text-[#475467] hover:bg-[#f2f4f7]" title="Duplicate placeholder">
+                          <Copy size={16} strokeWidth={1.8} />
+                        </button>
+                        <button className="grid h-8 w-8 place-items-center rounded-md text-[#ef4444] hover:bg-red-50" title="Delete placeholder">
+                          <Trash2 size={16} strokeWidth={1.8} />
+                        </button>
                       </div>
                     </td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="grid min-h-64 place-items-center p-8 text-center">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-950">No projects yet</h2>
-              <p className="mt-2 max-w-md text-sm text-slate-600">
-                Upload a lining image and create your first graph-paper pixel chart.
-              </p>
-              <Link
-                href="/projects/new"
-                prefetch={false}
-                className="mt-5 inline-flex h-10 items-center justify-center rounded-md bg-[var(--teal)] px-4 text-sm font-semibold text-white"
-              >
-                Create project
-              </Link>
-            </div>
-          </div>
-        )}
+                ))
+              : null}
+          </tbody>
+        </table>
+      </div>
 
-        {projects.length ? (
-          <div className="divide-y divide-[var(--line)] lg:hidden">
-            {projects.map((project) => (
-              <article key={project.id} className="space-y-3 p-4">
-                <div>
-                  <Link href={`/projects/${project.id}`} prefetch={false} className="font-semibold text-slate-950">
-                    {project.title}
-                  </Link>
-                  <p className="mt-1 text-sm text-slate-600">{project.description || "No description"}</p>
-                  <p className="mt-2 font-mono text-xs text-slate-500">
-                    {project.width} x {project.height} - {project.colorCount} colors
-                  </p>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex gap-1">
-                    {project.palettePreview.map((color) => (
-                      <span key={`${project.id}-mobile-${color.hex}-${color.sortOrder}`} className="h-5 w-5 rounded-sm border" style={{ backgroundColor: color.hex }} />
-                    ))}
-                  </div>
-                  <div className="flex gap-2">
-                    <form action={duplicateProject}>
-                      <input type="hidden" name="projectId" value={project.id} />
-                      <button className="h-9 rounded-md border border-[var(--line)] px-3 text-sm font-semibold text-slate-700">
-                        Duplicate
-                      </button>
-                    </form>
-                    <form action={deleteProject}>
-                      <input type="hidden" name="projectId" value={project.id} />
-                      <button className="h-9 rounded-md border border-red-200 px-3 text-sm font-semibold text-red-600">
-                        Delete
-                      </button>
-                    </form>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </div>
-        ) : null}
-      </section>
+      <div className="flex items-center justify-between border-t border-[#e8edf2] px-6 py-4 text-xs text-[#667085]">
+        <span>Showing 1 to {showingPlaceholders ? placeholderProjects.length : projects.length} of {showingPlaceholders ? placeholderProjects.length : projects.length} projects</span>
+        <div className="flex items-center gap-2">
+          <button className="mock-btn h-8 px-3 text-xs">&lt;</button>
+          <button className="mock-btn h-8 border-[#008c8f] px-3 text-xs text-[#008c8f]">1</button>
+          <button className="mock-btn h-8 px-3 text-xs">&gt;</button>
+          <button className="mock-btn h-8 px-3 text-xs">25 / page</button>
+        </div>
+      </div>
     </div>
   );
 }

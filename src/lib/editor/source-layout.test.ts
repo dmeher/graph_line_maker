@@ -3,9 +3,12 @@ import test from "node:test";
 import {
   applyUnlockedSourcePatch,
   normalizeRotationDegrees,
+  reorderSourceImages,
   snapCellToGrid,
   sourceLayouts,
   sourceProcessingCacheKey,
+  sourceRenderOrder,
+  sourcesUseVerticalStackSlots,
   stackEndCell,
 } from "./source-layout.ts";
 import type { GraphSourceImage } from "@/lib/types";
@@ -28,6 +31,7 @@ function source(overrides: Partial<GraphSourceImage> = {}): GraphSourceImage {
     topPadding: 0,
     bottomPadding: 0,
     locked: false,
+    visible: true,
     rotationDegrees: 0,
     flipX: false,
     flipY: false,
@@ -57,6 +61,39 @@ test("source layouts allow overflow instead of fitting into graph height", () =>
 
   assert.equal(layouts.at(-1)?.y, 20);
   assert.equal(stackEndCell(layouts.map((layout) => layout.source)), 30);
+});
+
+test("source render order draws bottom-to-top from the visible layer list", () => {
+  const first = source({ id: "first" });
+  const second = source({ id: "second" });
+
+  const layouts = sourceRenderOrder([first, second]);
+
+  assert.deepEqual(layouts.map((layout) => layout.source.id), ["second", "first"]);
+});
+
+test("source reorder reflows auto-stacked source slots", () => {
+  const first = source({ id: "first", y: 0, height: 10 });
+  const second = source({ id: "second", y: 10, height: 12 });
+  const third = source({ id: "third", y: 22, height: 8 });
+
+  const reordered = reorderSourceImages([first, second, third], 1, 0);
+
+  assert.equal(sourcesUseVerticalStackSlots([first, second, third]), true);
+  assert.deepEqual(reordered.map((item) => item.id), ["second", "first", "third"]);
+  assert.deepEqual(reordered.map((item) => item.y), [0, 12, 22]);
+});
+
+test("source reorder preserves free-positioned source geometry", () => {
+  const first = source({ id: "first", y: 4, height: 10 });
+  const second = source({ id: "second", y: 9, height: 12 });
+  const third = source({ id: "third", y: 30, height: 8 });
+
+  const reordered = reorderSourceImages([first, second, third], 1, 0);
+
+  assert.equal(sourcesUseVerticalStackSlots([first, second, third]), false);
+  assert.deepEqual(reordered.map((item) => item.id), ["second", "first", "third"]);
+  assert.deepEqual(reordered.map((item) => item.y), [9, 4, 30]);
 });
 
 test("locked source patch leaves geometry and transform unchanged", () => {

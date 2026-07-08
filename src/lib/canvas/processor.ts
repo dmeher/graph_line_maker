@@ -1,6 +1,7 @@
 import { hexToRgb, rgbToHex } from "@/lib/canvas/color";
 import { createGridNumberLabels } from "@/lib/canvas/grid-numbering";
 import { maskFromImageData } from "@/lib/canvas/ink-mask";
+import { mergeLayerPixelMasks } from "@/lib/canvas/layer-mask-merge";
 import { isPdfSource, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
 import { createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
@@ -260,6 +261,11 @@ function fillColorForRegion(settings: GraphSettings, regionId: string, kind: Fil
   return customColor && isFillColor(customColor) ? customColor : defaultFillColorForRegion(settings, kind);
 }
 
+function colorForRegion(settings: GraphSettings, region: FillRegion) {
+  const customColor = settings.fillRegions?.[region.id];
+  return customColor && isFillColor(customColor) ? customColor : region.color;
+}
+
 function labelFillRegions(fillLayers: FillMaskLayer[], width: number, height: number, settings: GraphSettings) {
   const fillRegionMap = new Uint16Array(width * height);
   const queue = new Int32Array(fillRegionMap.length);
@@ -372,7 +378,7 @@ function drawFillRegions(
 
     const region = regionByNumber.get(regionNumber);
     if (!region) continue;
-    const hex = fillColorForRegion(settings, region.id, region.kind);
+    const hex = colorForRegion(settings, region);
     if (isTransparentFillColor(hex)) continue;
     let rgb = colorCache.get(hex);
     if (!rgb) {
@@ -420,6 +426,35 @@ function drawMaskLayer(
   softenedContext.filter = `blur(${blurRadius}px)`;
   softenedContext.drawImage(layer, 0, 0);
   context.drawImage(softened, 0, 0);
+}
+
+function drawColoredMaskLayers(
+  context: ProcessingContext2D,
+  mask: Uint8Array,
+  colorMap: Uint16Array,
+  colorsByNumber: ReadonlyMap<number, string>,
+  width: number,
+  height: number,
+  fallbackColor: string,
+  alpha: number,
+  blurRadius: number,
+) {
+  const masksByColor = new Map<string, Uint8Array>();
+  for (let pixel = 0; pixel < mask.length; pixel += 1) {
+    const value = mask[pixel];
+    if (!value) continue;
+    const color = colorsByNumber.get(colorMap[pixel]) ?? fallbackColor;
+    let colorMask = masksByColor.get(color);
+    if (!colorMask) {
+      colorMask = new Uint8Array(mask.length);
+      masksByColor.set(color, colorMask);
+    }
+    colorMask[pixel] = value;
+  }
+
+  for (const [color, colorMask] of masksByColor) {
+    drawMaskLayer(context, colorMask, width, height, color, alpha, blurRadius);
+  }
 }
 
 function drawGraphPaperGrid(canvas: CanvasLike, settings: GraphSettings) {
@@ -515,6 +550,7 @@ function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
   context.lineCap = "round";
 
   for (const paint of settings.cellPaints ?? []) {
+    if (paint.visible === false) continue;
     const left = paint.x * cellWidth;
     const top = paint.y * cellHeight;
     const width = Math.max(1, paint.width * cellWidth);
@@ -559,6 +595,7 @@ function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
   }
 
   for (const shape of settings.graphShapes ?? []) {
+    if (shape.visible === false) continue;
     const x = shape.x * cellWidth;
     const y = shape.y * cellHeight;
     const width = shape.width * cellWidth;
@@ -604,6 +641,13 @@ function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
 
     if (shape.kind === "circle" || shape.kind === "oval") {
       context.ellipse(centerX, centerY, drawWidth / 2, drawHeight / 2, 0, 0, Math.PI * 2);
+      if (!isTransparentFillColor(shape.fillColor)) context.fill();
+      context.stroke();
+    } else if (shape.kind === "half-circle") {
+      context.moveTo(left, top + drawHeight);
+      context.ellipse(centerX, top + drawHeight, drawWidth / 2, drawHeight, 0, Math.PI, Math.PI * 2);
+      context.lineTo(left, top + drawHeight);
+      context.closePath();
       if (!isTransparentFillColor(shape.fillColor)) context.fill();
       context.stroke();
     } else {
@@ -708,9 +752,22 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
 
   const fillRegionMap = new Uint16Array(width * height);
   const outlineMask = new Uint8Array(width * height);
+  const outlineColorMap = new Uint16Array(width * height);
+  const outlineColorNumbers = new Map<string, number>();
+  const outlineColorsByNumber = new Map<number, string>();
   const regions: FillRegion[] = [];
   let nextRegionId = 0;
   let maxLineThickness = 0;
+
+  function outlineColorNumber(color: string) {
+    const normalized = rgbToHex(hexToRgb(color));
+    const existing = outlineColorNumbers.get(normalized);
+    if (existing) return existing;
+    const next = outlineColorNumbers.size + 1;
+    outlineColorNumbers.set(normalized, next);
+    outlineColorsByNumber.set(next, normalized);
+    return next;
+  }
 
   for (const layer of layers) {
     const fitted =
@@ -728,6 +785,7 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
 
     const sourceData = fittedContext.getImageData(0, 0, width, height);
     const { enclosedFillMask, outlineMask: layerOutlineMask, sourceFillMask } = buildArtworkMasks(sourceData, layer.settings);
+    const layerOutlineColorNumber = outlineColorNumber(layer.settings.outlineColor || layer.settings.lineColor || settings.outlineColor || settings.lineColor);
     const local = labelFillRegions(
       [
         { mask: sourceFillMask, kind: "source" },
@@ -747,20 +805,11 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
       regions.push({
         ...region,
         id: globalId,
-        color: fillColorForRegion(settings, globalId, region.kind),
+        color: fillColorForRegion(layer.settings, region.id, region.kind),
       });
     }
 
-    for (let pixel = 0; pixel < local.fillRegionMap.length; pixel += 1) {
-      const localRegionNumber = local.fillRegionMap[pixel];
-      if (!localRegionNumber) continue;
-      const globalRegionNumber = regionNumberMap.get(localRegionNumber);
-      if (globalRegionNumber) fillRegionMap[pixel] = globalRegionNumber;
-    }
-
-    for (let pixel = 0; pixel < layerOutlineMask.length; pixel += 1) {
-      if (layerOutlineMask[pixel]) outlineMask[pixel] = 1;
-    }
+    mergeLayerPixelMasks(fillRegionMap, outlineMask, local.fillRegionMap, layerOutlineMask, regionNumberMap, outlineColorMap, layerOutlineColorNumber);
     maxLineThickness = Math.max(maxLineThickness, clampImageLineThickness(layer.settings.imageLineThickness));
   }
 
@@ -773,7 +822,7 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     .map((region) => ({
       ...region,
       cellCount: visibleCounts.get(region.id) ?? 0,
-      color: fillColorForRegion(settings, region.id, region.kind),
+      color: colorForRegion(settings, region),
     }))
     .filter((region) => region.cellCount > 0);
 
@@ -781,19 +830,27 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
   outputContext.fillRect(0, 0, output.width, output.height);
   if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
   drawFillRegions(outputContext, fillRegionMap, visibleRegions, output.width, output.height, settings, 0.8);
-  drawMaskLayer(outputContext, outlineMask, output.width, output.height, settings.outlineColor || settings.lineColor, 255, 0.12 * maxLineThickness);
+  drawColoredMaskLayers(outputContext, outlineMask, outlineColorMap, outlineColorsByNumber, output.width, output.height, settings.outlineColor || settings.lineColor, 255, 0.12 * maxLineThickness);
   if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
   drawManualGraphArtwork(output, settings);
   drawGridNumbers(output, settings);
 
-  const outlineHex = rgbToHex(hexToRgb(settings.outlineColor || settings.lineColor));
-  const outlineCount = outlineMask.reduce((sum, value) => sum + value, 0);
+  const outlineCountsByColor = new Map<string, number>();
+  for (let pixel = 0; pixel < outlineMask.length; pixel += 1) {
+    const value = outlineMask[pixel];
+    if (!value) continue;
+    const color = outlineColorsByNumber.get(outlineColorMap[pixel]) ?? rgbToHex(hexToRgb(settings.outlineColor || settings.lineColor));
+    outlineCountsByColor.set(color, (outlineCountsByColor.get(color) ?? 0) + value);
+  }
+  if (!outlineCountsByColor.size) {
+    outlineCountsByColor.set(rgbToHex(hexToRgb(settings.outlineColor || settings.lineColor)), 0);
+  }
   const fillCountsByColor = new Map<string, number>();
   const visibleRegionById = new Map(visibleRegions.map((region) => [region.id, region] as const));
   for (const [regionId, cellCount] of visibleCounts) {
     const region = visibleRegionById.get(regionId);
     if (!region) continue;
-    const color = fillColorForRegion(settings, region.id, region.kind);
+    const color = colorForRegion(settings, region);
     if (isTransparentFillColor(color)) continue;
     const hex = rgbToHex(hexToRgb(color));
     fillCountsByColor.set(hex, (fillCountsByColor.get(hex) ?? 0) + cellCount);
@@ -802,13 +859,19 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
   return {
     canvas: output,
     palette: [
-      { name: "Outline", hex: outlineHex, locked: true, cellCount: outlineCount, sortOrder: 0 },
+      ...Array.from(outlineCountsByColor.entries()).map(([hex, cellCount], index) => ({
+        name: index === 0 ? "Outline" : `Outline ${index + 1}`,
+        hex,
+        locked: true,
+        cellCount,
+        sortOrder: index,
+      })),
       ...Array.from(fillCountsByColor.entries()).map(([hex, cellCount], index) => ({
         name: index === 0 ? "Fill" : `Fill ${index + 1}`,
         hex,
         locked: true,
         cellCount,
-        sortOrder: index + 1,
+        sortOrder: outlineCountsByColor.size + index,
       })),
     ],
     fillRegions: visibleRegions,

@@ -34,23 +34,38 @@ export function editorSessionDraftKey(projectId: string) {
 function sanitizeSettingsForDraft(settings: GraphSettings): GraphSettings {
   return {
     ...settings,
-    sourceImages: settings.sourceImages.map(({ url: _url, ...source }) => ({
+    sourceImages: (settings.sourceImages ?? []).map(({ url: _url, ...source }) => ({
       ...source,
       url: null,
+    })),
+    clipartAssets: (settings.clipartAssets ?? []).map(({ url: _url, dataUrl: _dataUrl, ...asset }) => ({
+      ...asset,
+      url: null,
+      dataUrl: null,
     })),
   };
 }
 
 function reviveDraftSettings(settings: GraphSettings, baseSettings: GraphSettings): GraphSettings {
-  const baseSourcesById = new Map(baseSettings.sourceImages.map((source) => [source.id, source] as const));
+  const baseSourcesById = new Map((baseSettings.sourceImages ?? []).map((source) => [source.id, source] as const));
+  const baseClipartsById = new Map((baseSettings.clipartAssets ?? []).map((asset) => [asset.id, asset] as const));
   return {
     ...settings,
-    sourceImages: settings.sourceImages.map((source) => {
+    sourceImages: (settings.sourceImages ?? []).map((source) => {
       const baseSource = baseSourcesById.get(source.id);
       return {
         ...source,
         path: source.path ?? baseSource?.path ?? null,
         url: baseSource?.url ?? null,
+      };
+    }),
+    clipartAssets: (settings.clipartAssets ?? []).map((asset) => {
+      const baseAsset = baseClipartsById.get(asset.id);
+      return {
+        ...asset,
+        path: asset.path ?? baseAsset?.path ?? null,
+        url: baseAsset?.url ?? null,
+        dataUrl: null,
       };
     }),
   };

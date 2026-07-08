@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition, memo, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -128,6 +128,7 @@ import {
 import type { GraphCellLineSide, GraphCellPaint, GraphClipartAsset, GraphClipartImage, GraphSettings, GraphShapeDrawing, GraphShapeKind, GraphSourceImage, PaletteColor, Project } from "@/lib/types";
 import { createDebouncedAction } from "@/lib/utils/debounce";
 import { bytesToSize } from "@/lib/utils/format";
+import { InspectorCheckbox, InspectorColorControl, InspectorGroup, InspectorRow, InspectorSelect, inspectorControlClass } from "./inspector-controls";
 
 type MobileTab = "source" | "canvas" | "controls";
 type InspectorTab = "graph" | "source" | "draw" | "palette";
@@ -179,7 +180,7 @@ const GENERATED_SHAPE_FILL_MODE_LABELS: Record<ShapeFillMode, string> = {
   filled: "Filled",
 };
 type DragState = {
-  kind: "viewport" | "pan" | "source" | "shape" | "clipart" | "resize-source" | "cell-paint" | "shape-draw";
+  kind: "viewport" | "pan" | "source" | "shape" | "clipart" | "resize-source" | "resize-shape" | "cell-paint" | "shape-draw";
   pointerId: number;
   startClientX: number;
   startClientY: number;
@@ -208,6 +209,8 @@ type DragState = {
   shapeId?: string;
   startShapeX?: number;
   startShapeY?: number;
+  startShapeWidth?: number;
+  startShapeHeight?: number;
   clipartId?: string;
   startClipartX?: number;
   startClipartY?: number;
@@ -252,7 +255,7 @@ const MAX_CANVAS_DIMENSION = 24000;
 const MAX_SETTINGS_HISTORY = 80;
 const MIN_SIDE_PANEL_WIDTH = 280;
 const MAX_SIDE_PANEL_WIDTH = 560;
-const PREVIEW_PROCESSING_DEBOUNCE_MS = 120;
+const PREVIEW_PROCESSING_DEBOUNCE_MS = 250;
 const COPY_OFFSET_CELLS = 0.5;
 const CLIPART_ACCEPT = "image/png,image/jpeg,image/webp,image/svg+xml,.svg";
 const MAX_CLIPART_UPLOAD_BYTES = 6 * 1024 * 1024;
@@ -658,7 +661,7 @@ function normalizeClipartImagesForEditor(
     .slice(0, 500);
 }
 
-function NumberField({
+const NumberField = memo(function NumberField({
   label,
   value,
   min,
@@ -754,9 +757,9 @@ function NumberField({
       />
     </label>
   );
-}
+});
 
-function ColorPresetField({
+const ColorPresetField = memo(function ColorPresetField({
   label,
   value,
   onChange,
@@ -829,7 +832,7 @@ function ColorPresetField({
       ) : null}
     </div>
   );
-}
+});
 
 function CollapsibleSection({
   title,
@@ -880,7 +883,7 @@ function ColorSummary({ value }: { value: string }) {
   );
 }
 
-function ShapePreviewSvg({
+const ShapePreviewSvg = memo(function ShapePreviewSvg({
   kind,
   sides,
   fillColor,
@@ -953,91 +956,11 @@ function ShapePreviewSvg({
       )}
     </svg>
   );
-}
-
-const inspectorControlClass =
-  "h-9 w-full min-w-0 rounded-md border border-[#d7dde5] bg-white px-2.5 text-[13px] font-medium text-[#101828] outline-none focus:border-[#008c8f] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-400";
+});
 
 function paperSizeOptionLabel(key: GraphSettings["printPaperSize"]) {
   const paper = PRINT_PAPER_SIZES[key] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
   return `${paper.label} (${Math.round(paper.widthCm * 10)} x ${Math.round(paper.heightCm * 10)} mm)`;
-}
-
-function InspectorGroup({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="border-t border-[#e8edf2] pt-4 first:border-t-0 first:pt-0">
-      <h3 className="mb-3 text-[12px] font-bold uppercase tracking-wide text-[#5b6675]">{title}</h3>
-      <div className="space-y-3">{children}</div>
-    </section>
-  );
-}
-
-function InspectorRow({ label, children, className = "" }: { label: string; children: ReactNode; className?: string }) {
-  return (
-    <div className={`grid min-w-0 grid-cols-[86px_minmax(0,1fr)] items-center gap-2 ${className}`}>
-      <span className="text-[12px] font-medium text-[#344054]">{label}</span>
-      <div className="min-w-0">{children}</div>
-    </div>
-  );
-}
-
-function InspectorSelect({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: readonly { value: string; label: string }[];
-  onChange: (value: string) => void;
-}) {
-  return (
-    <select value={value} onChange={(event) => onChange(event.target.value)} aria-label={label} className={inspectorControlClass}>
-      {options.map((option) => (
-        <option key={option.value} value={option.value}>
-          {option.label}
-        </option>
-      ))}
-    </select>
-  );
-}
-
-function InspectorCheckbox({
-  label,
-  checked,
-  onChange,
-  disabled = false,
-}: {
-  label: string;
-  checked: boolean;
-  onChange?: (checked: boolean) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <label className="inline-flex min-w-0 items-center gap-2 text-[13px] font-semibold text-[#344054]">
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        readOnly={disabled || !onChange}
-        onChange={(event) => onChange?.(event.target.checked)}
-        className="h-4 w-4 shrink-0 rounded accent-[#008c8f]"
-      />
-      <span className="min-w-0 truncate">{label}</span>
-    </label>
-  );
-}
-
-function InspectorColorControl({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
-  return (
-    <label className={`${inspectorControlClass} flex cursor-pointer items-center gap-2 px-2`} title={`${label}: ${value}`}>
-      <input type="color" value={isHexColor(value) ? value : DEFAULT_GRID_LINE_COLOR} onChange={(event) => onChange(event.target.value)} className="sr-only" aria-label={label} />
-      <span className="h-5 w-5 shrink-0 rounded border border-[#cfd7df]" style={{ backgroundColor: value }} aria-hidden="true" />
-      <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{value.toUpperCase()}</span>
-      <ChevronDown size={14} className="shrink-0 text-[#667085]" aria-hidden="true" />
-    </label>
-  );
 }
 
 function InspectorSegmented({
@@ -1489,6 +1412,7 @@ export function EditorClient({ project }: { project: Project }) {
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [exportMenuStyle, setExportMenuStyle] = useState<CSSProperties | null>(null);
   const [clipartSearch, setClipartSearch] = useState("");
+  const [deletingClipartAssetId, setDeletingClipartAssetId] = useState<string | null>(null);
   const openMainMenu = useCallback(() => {
     if (typeof window === "undefined") return;
     window.dispatchEvent(new Event("graph-pixel-editor-menu"));
@@ -2968,6 +2892,42 @@ export function EditorClient({ project }: { project: Project }) {
     setIsDraggingGraph(true);
   }
 
+  function beginShapeResize(event: ReactPointerEvent<HTMLElement>, shape: GraphShapeDrawing, resizeCorner: SourceResizeHandle) {
+    if (showOriginal || event.button !== 0 || shape.locked) return;
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedSourceId(null);
+    setSelectedDrawingLayerId(drawingLayerKey("shape", shape.id));
+    dragStateRef.current = {
+      kind: "resize-shape",
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startOffsetX: settings.imageOffsetX,
+      startOffsetY: settings.imageOffsetY,
+      shapeId: shape.id,
+      startShapeX: shape.x,
+      startShapeY: shape.y,
+      startShapeWidth: shape.width,
+      startShapeHeight: shape.height,
+      resizeCorner,
+      startScrollLeft: canvasScrollRef.current?.scrollLeft ?? 0,
+      startScrollTop: canvasScrollRef.current?.scrollTop ?? 0,
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      rectWidth: rect.width,
+      rectHeight: rect.height,
+      moved: false,
+      historyRecorded: false,
+    };
+    setIsDraggingGraph(true);
+  }
+
   function dragGraph(event: ReactPointerEvent<HTMLElement>) {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== event.pointerId) {
@@ -3106,6 +3066,58 @@ export function EditorClient({ project }: { project: Project }) {
           sourceImages: current.sourceImages.map((image) =>
             image.id === dragState.sourceId ? { ...image, x, y, width, height } : image,
           ),
+        });
+        settingsRef.current = next;
+        return next;
+      });
+      return;
+    }
+
+    if (
+      dragState.kind === "resize-shape" &&
+      dragState.shapeId &&
+      dragState.startShapeX !== undefined &&
+      dragState.startShapeY !== undefined &&
+      dragState.startShapeWidth !== undefined &&
+      dragState.startShapeHeight !== undefined
+    ) {
+      const deltaCellsX = deltaX / GRAPH_MAJOR_CELL_PIXELS;
+      const deltaCellsY = deltaY / GRAPH_MAJOR_CELL_PIXELS;
+      setSettings((current) => {
+        const shape = current.graphShapes.find((item) => item.id === dragState.shapeId);
+        if (!shape || shape.locked) return current;
+
+        let left = dragState.startShapeX!;
+        let right = dragState.startShapeX! + dragState.startShapeWidth!;
+        let top = dragState.startShapeY!;
+        let bottom = dragState.startShapeY! + dragState.startShapeHeight!;
+        if (dragState.resizeCorner?.includes("w")) left = snapCellToGrid(left + deltaCellsX);
+        if (dragState.resizeCorner?.includes("e")) right = snapCellToGrid(right + deltaCellsX);
+        if (dragState.resizeCorner?.includes("n")) top = snapCellToGrid(top + deltaCellsY);
+        if (dragState.resizeCorner?.includes("s")) bottom = snapCellToGrid(bottom + deltaCellsY);
+
+        const minSize = 0.25;
+        if (right - left < minSize) {
+          if (dragState.resizeCorner?.includes("w")) left = right - minSize;
+          else right = left + minSize;
+        }
+        if (bottom - top < minSize) {
+          if (dragState.resizeCorner?.includes("n")) top = bottom - minSize;
+          else bottom = top + minSize;
+        }
+
+        const width = clampFreeCellCoordinate(right - left, shape.width);
+        const height = clampFreeCellCoordinate(bottom - top, shape.height);
+        const x = clampFreeCellCoordinate(left, shape.x);
+        const y = clampFreeCellCoordinate(top, shape.y);
+        if (shape.x === x && shape.y === y && shape.width === width && shape.height === height) return current;
+        if (!dragState.historyRecorded) {
+          pushUndoSettings(current);
+          dragState.historyRecorded = true;
+        }
+        const next = deriveGraphSettings({
+          ...current,
+          graphShapes: current.graphShapes.map((item) => (item.id === dragState.shapeId ? { ...item, x, y, width, height } : item)),
         });
         settingsRef.current = next;
         return next;
@@ -3929,6 +3941,61 @@ export function EditorClient({ project }: { project: Project }) {
     }
   }
 
+  async function deleteClipartAsset(assetId: string) {
+    const current = settingsRef.current;
+    const asset = current.clipartAssets.find((item) => item.id === assetId);
+    if (!asset) return false;
+    if (deletingClipartAssetId) return false;
+
+    const nextSettings = deriveGraphSettings({
+      ...current,
+      clipartAssets: current.clipartAssets.filter((item) => item.id !== assetId),
+      clipartImages: current.clipartImages.filter((clipart) => clipart.assetId !== assetId),
+    });
+
+    setDeletingClipartAssetId(assetId);
+    setSettingsWithHistory(nextSettings);
+    setSelectedClipartAssetId((currentId) => (currentId === assetId ? null : currentId));
+    if (placingClipartAssetId === assetId) setPlacingClipartAssetId(null);
+    setSelectedDrawingLayerId((currentId) => {
+      if (!currentId?.startsWith("clipart:")) return currentId;
+      const selectedId = currentId.split(":")[1] ?? "";
+      return nextSettings.clipartImages.some((clipart) => clipart.id === selectedId) ? currentId : null;
+    });
+
+    if (isPersistableProjectId(project.id)) {
+      const result = await saveProjectState({
+        projectId: project.id,
+        title: title.trim(),
+        description: description.trim(),
+        settings: nextSettings,
+        width: processedCanvasRef.current?.width ?? nextSettings.outputWidth,
+        height: processedCanvasRef.current?.height ?? nextSettings.outputHeight,
+        colorCount: palette.length,
+        palettes: palette.map((color, index) => ({ ...color, sortOrder: index })),
+      }).catch((error) => ({
+        ok: false as const,
+        message: error instanceof Error ? error.message : "Unable to delete clipart from the project.",
+      }));
+
+      if (!result.ok) {
+        setNotice({ tone: "error", text: result.message });
+        setDeletingClipartAssetId(null);
+        return false;
+      }
+
+      removeEditorSessionDraft(project.id);
+      setHasSessionDraft(false);
+      setNotice({ tone: "ok", text: `"${asset.name}" deleted.` });
+      setDeletingClipartAssetId(null);
+      return true;
+    }
+
+    setNotice({ tone: "ok", text: `"${asset.name}" removed from this editor.` });
+    setDeletingClipartAssetId(null);
+    return true;
+  }
+
   function selectFullSourceCrop(sourceId = cropSource?.id) {
     const sourceCanvas = sourceId ? sourceCanvasesRef.current.get(sourceId) ?? null : sourceCanvasRef.current;
     if (!sourceCanvas) return;
@@ -4166,6 +4233,47 @@ export function EditorClient({ project }: { project: Project }) {
     else if (selectedClipartLayer) removeDrawingLayer("clipart", selectedClipartLayer.id, selectedClipartLayer.name, selectedClipartLayer.locked, options);
   }
 
+  function renderLayerActionToolbar() {
+    return (
+      <div className="grid grid-cols-6 border-b border-[#e8edf2] bg-[#fbfcfd] text-[11px] font-semibold text-[#344054]">
+        <label className={`flex h-14 cursor-pointer flex-col items-center justify-center gap-1 border-r border-[#e8edf2] ${uploadingSources ? "opacity-50" : ""}`} title="Add images">
+          <Plus size={16} aria-hidden="true" />
+          <span>Add</span>
+          <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
+            const files = Array.from(event.target.files ?? []);
+            event.target.value = "";
+            if (files.length) void uploadSourceImages(files, "Images added to the end.");
+          }} />
+        </label>
+        <label className={`flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] ${!selectedSource || selectedSource.locked || uploadingSources ? "cursor-not-allowed opacity-40" : "cursor-pointer"}`} title="Replace selected source">
+          {replacingSourceId ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
+          <span>Replace</span>
+          <input type="file" accept={IMAGE_ACCEPT} disabled={!selectedSource || selectedSource.locked || uploadingSources} className="sr-only" onChange={(event) => {
+            const file = event.target.files?.[0] ?? null;
+            event.target.value = "";
+            if (file && selectedSource) void uploadSourceImages([file], `"${selectedSource.name}" replaced.`, selectedSource.id);
+          }} />
+        </label>
+        <button type="button" onClick={() => deleteSelectedLayer()} disabled={!hasSelectedLayer || selectedLayerLocked} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] text-red-500 disabled:text-[#98a2b3]" title="Delete selected layer">
+          <Trash2 size={16} aria-hidden="true" />
+          <span>Delete</span>
+        </button>
+        <button type="button" onClick={toggleSelectedLayerLock} disabled={!hasSelectedLayer} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] disabled:text-[#98a2b3]" title="Lock selected layer">
+          {selectedLayerLocked ? <Unlock size={16} aria-hidden="true" /> : <Lock size={16} aria-hidden="true" />}
+          <span>{selectedLayerLocked ? "Unlock" : "Lock"}</span>
+        </button>
+        <button type="button" onClick={() => moveSelectedLayer(-1)} disabled={!selectedLayerCanMove(-1)} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] disabled:text-[#98a2b3]" title="Move selected layer up">
+          <ArrowUp size={16} aria-hidden="true" />
+          <span>Up</span>
+        </button>
+        <button type="button" onClick={() => moveSelectedLayer(1)} disabled={!selectedLayerCanMove(1)} className="flex h-14 flex-col items-center justify-center gap-1 disabled:text-[#98a2b3]" title="Move selected layer down">
+          <ArrowDown size={16} aria-hidden="true" />
+          <span>Down</span>
+        </button>
+      </div>
+    );
+  }
+
   function renderSourceThumbnail(source: GraphSourceImage, className = "h-12 w-12") {
     const previewUrl = sourceStatus[source.id]?.previewUrl;
     return previewUrl ? (
@@ -4330,7 +4438,7 @@ export function EditorClient({ project }: { project: Project }) {
 
   const sourcePanel = (
     <aside className="editor-panel relative flex min-h-0 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1">
         <section className="border-b border-[#d7dde5] bg-white">
           <div className="flex h-10 items-center justify-between border-b border-[#d7dde5] px-3">
             <button
@@ -4468,74 +4576,39 @@ export function EditorClient({ project }: { project: Project }) {
               }} />
             </label>
           </div>
-          <div className="grid grid-cols-6 border-b border-[#e8edf2] bg-[#fbfcfd] text-[11px] font-semibold text-[#344054]">
-            <label className={`flex h-14 cursor-pointer flex-col items-center justify-center gap-1 border-r border-[#e8edf2] ${uploadingSources ? "opacity-50" : ""}`} title="Add images">
-              <Plus size={16} aria-hidden="true" />
-              <span>Add</span>
-              <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
-                const files = Array.from(event.target.files ?? []);
-                event.target.value = "";
-                if (files.length) void uploadSourceImages(files, "Images added to the end.");
-              }} />
-            </label>
-            <label className={`flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] ${!selectedSource || selectedSource.locked || uploadingSources ? "cursor-not-allowed opacity-40" : "cursor-pointer"}`} title="Replace selected source">
-              {replacingSourceId ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
-              <span>Replace</span>
-              <input type="file" accept={IMAGE_ACCEPT} disabled={!selectedSource || selectedSource.locked || uploadingSources} className="sr-only" onChange={(event) => {
-                const file = event.target.files?.[0] ?? null;
-                event.target.value = "";
-                if (file && selectedSource) void uploadSourceImages([file], `"${selectedSource.name}" replaced.`, selectedSource.id);
-              }} />
-            </label>
-            <button
-              type="button"
-              onClick={() => deleteSelectedLayer()}
-              disabled={!hasSelectedLayer || selectedLayerLocked}
-              className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] text-red-500 disabled:text-[#98a2b3]"
-              title="Delete selected layer"
-            >
-              <Trash2 size={16} aria-hidden="true" />
-              <span>Delete</span>
-            </button>
-            <button type="button" onClick={toggleSelectedLayerLock} disabled={!hasSelectedLayer} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] disabled:text-[#98a2b3]" title="Lock selected layer">
-              {selectedLayerLocked ? <Unlock size={16} aria-hidden="true" /> : <Lock size={16} aria-hidden="true" />}
-              <span>{selectedLayerLocked ? "Unlock" : "Lock"}</span>
-            </button>
-            <button type="button" onClick={() => moveSelectedLayer(-1)} disabled={!selectedLayerCanMove(-1)} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#e8edf2] disabled:text-[#98a2b3]" title="Move selected layer up">
-              <ArrowUp size={16} aria-hidden="true" />
-              <span>Up</span>
-            </button>
-            <button type="button" onClick={() => moveSelectedLayer(1)} disabled={!selectedLayerCanMove(1)} className="flex h-14 flex-col items-center justify-center gap-1 disabled:text-[#98a2b3]" title="Move selected layer down">
-              <ArrowDown size={16} aria-hidden="true" />
-              <span>Down</span>
-            </button>
-          </div>
+          {renderLayerActionToolbar()}
           {visibleLayerCount ? (
             <div className="divide-y divide-[#e8edf2]">
-              {settings.sourceImages.map((source) => {
-                const selected = selectedSourceId === source.id;
-                const hidden = source.visible === false;
-                return (
-                  <div
-                    key={`layer-source-${source.id}`}
-                    onDragOver={handleLayerDragOver("source")}
-                    onDrop={handleLayerDrop("source", source.id)}
-                    className={selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}
-                  >
-                    <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
-                      <button type="button" onClick={() => toggleSourceVisibility(source.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
-                      {renderSourceThumbnail(source, "h-11 w-11")}
-                      <button type="button" onClick={() => selectSourceLayer(source.id)} className="min-w-0 text-left">
-                        <span className="block truncate text-[13px] font-semibold">{source.name}</span>
-                        <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>{hidden ? "Hidden" : "Visible"}</span>
-                      </button>
-                      <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
-                      <button type="button" onClick={() => toggleSourceLock(source.id)} className={selected ? "text-white" : "text-[#667085]"} title={source.locked ? "Unlock layer" : "Lock layer"}>{source.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
-                      <button type="button" draggable onDragStart={handleLayerDragStart("source", source.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-white/90" : "text-[#667085]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
-                    </div>
-                  </div>
-                );
-              })}
+              {settings.sourceImages.length > 0 ? (
+                <div className="max-h-[504px] overflow-y-auto scrollbar-thin divide-y divide-[#e8edf2]">
+                  {settings.sourceImages.map((source) => {
+                    const selected = selectedSourceId === source.id;
+                    const hidden = source.visible === false;
+                    return (
+                      <div
+                        key={`layer-source-${source.id}`}
+                        onDragOver={handleLayerDragOver("source")}
+                        onDrop={handleLayerDrop("source", source.id)}
+                        className={selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}
+                      >
+                        <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                          <button type="button" onClick={() => toggleSourceVisibility(source.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
+                          <button type="button" onClick={() => selectSourceLayer(source.id)} className="h-11 w-11">
+                            {renderSourceThumbnail(source, "h-full w-full")}
+                          </button>
+                          <button type="button" onClick={() => selectSourceLayer(source.id)} className="min-w-0 text-left">
+                            <span className="block truncate text-[13px] font-semibold">{source.name}</span>
+                            <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>{hidden ? "Hidden" : "Visible"}</span>
+                          </button>
+                          <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
+                          <button type="button" onClick={() => toggleSourceLock(source.id)} className={selected ? "text-white" : "text-[#667085]"} title={source.locked ? "Unlock layer" : "Lock layer"}>{source.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                          <button type="button" draggable onDragStart={handleLayerDragStart("source", source.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-white/90" : "text-[#667085]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
               {generatedLayerCount ? (
                 <div className="bg-white text-[#101828]">
                   <button
@@ -4551,8 +4624,10 @@ export function EditorClient({ project }: { project: Project }) {
                     <span className="rounded bg-[#eef4ff] px-1.5 py-0.5 text-[11px] font-semibold text-[#344054]">{generatedLayerCount}</span>
                   </button>
                   {!generatedImagesCollapsed ? (
-                    <div className="divide-y divide-[#e8edf2]">
-                      {settings.clipartImages.map((clipart) => {
+                    <>
+                      {renderLayerActionToolbar()}
+                      <div className="max-h-[504px] overflow-y-auto scrollbar-thin divide-y divide-[#e8edf2]">
+                        {settings.clipartImages.map((clipart) => {
                         const key = drawingLayerKey("clipart", clipart.id);
                         const selected = selectedDrawingLayerId === key;
                         const hidden = clipart.visible === false;
@@ -4565,12 +4640,12 @@ export function EditorClient({ project }: { project: Project }) {
                           >
                             <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
                               <button type="button" onClick={() => toggleDrawingVisibility("clipart", clipart.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show clipart" : "Hide clipart"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
-                              {renderClipartThumbnail(clipart, "h-11 w-11")}
+                              <button type="button" onClick={() => selectClipartLayer(clipart.id)} className="h-11 w-11">
+                                {renderClipartThumbnail(clipart, "h-full w-full")}
+                              </button>
                               <button type="button" onClick={() => selectClipartLayer(clipart.id)} className="min-w-0 text-left">
                                 <span className="block truncate text-[13px] font-semibold">{clipart.name}</span>
-                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>
-                                  Clipart / {isTransparentFillColor(clipart.fillColor) ? "Outline" : "Filled"} / {hidden ? "Hidden" : "Visible"}
-                                </span>
+                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>{hidden ? "Hidden" : "Visible"}</span>
                               </button>
                               <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
                               <button type="button" onClick={() => toggleDrawingLock("clipart", clipart.id)} className={selected ? "text-white" : "text-[#667085]"} title={clipart.locked ? "Unlock clipart" : "Lock clipart"}>{clipart.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
@@ -4592,12 +4667,12 @@ export function EditorClient({ project }: { project: Project }) {
                           >
                             <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
                               <button type="button" onClick={() => toggleDrawingVisibility("shape", shape.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show generated image" : "Hide generated image"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
-                              {renderShapeThumbnail(shape, "h-11 w-11")}
+                              <button type="button" onClick={() => selectGeneratedShape(shape.id)} className="h-11 w-11">
+                                {renderShapeThumbnail(shape, "h-full w-full")}
+                              </button>
                               <button type="button" onClick={() => selectGeneratedShape(shape.id)} className="min-w-0 text-left">
                                 <span className="block truncate text-[13px] font-semibold">{shape.name}</span>
-                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>
-                                  {GRAPH_SHAPE_KIND_LABELS[shape.kind]} / {shapeFillMode(shape) === "filled" ? "Filled" : "Outline"} / {hidden ? "Hidden" : "Visible"}
-                                </span>
+                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>{hidden ? "Hidden" : "Visible"}</span>
                               </button>
                               <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#667085]"}`}>100%</span>
                               <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className={selected ? "text-white" : "text-[#667085]"} title={shape.locked ? "Unlock generated image" : "Lock generated image"}>{shape.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
@@ -4606,7 +4681,8 @@ export function EditorClient({ project }: { project: Project }) {
                           </div>
                         );
                       })}
-                    </div>
+                      </div>
+                    </>
                   ) : null}
                 </div>
               ) : null}
@@ -4623,7 +4699,9 @@ export function EditorClient({ project }: { project: Project }) {
                   >
                     <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
                       <button type="button" onClick={() => toggleDrawingVisibility("cell", cell.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
-                      {renderCellThumbnail(cell, "h-11 w-11")}
+                      <button type="button" onClick={() => selectCellLayer(cell.id)} className="h-11 w-11">
+                        {renderCellThumbnail(cell, "h-full w-full")}
+                      </button>
                       <button type="button" onClick={() => selectCellLayer(cell.id)} className="min-w-0 text-left">
                         <span className="block truncate text-[13px] font-semibold">{cell.name}</span>
                         <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#667085]"}`}>{hidden ? "Hidden" : "Visible"}</span>
@@ -5197,7 +5275,7 @@ export function EditorClient({ project }: { project: Project }) {
                       className="h-full max-h-28 w-full"
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-2 border-t border-[#e8edf2] p-2">
+                  <div className="grid grid-cols-3 gap-2 border-t border-[#e8edf2] p-2">
                     <button
                       type="button"
                       onClick={() => setPlacingGeneratedShape((value) => !value)}
@@ -5353,6 +5431,16 @@ export function EditorClient({ project }: { project: Project }) {
                       className={`h-9 rounded-md border text-xs font-semibold disabled:opacity-45 ${placingClipartAssetId === selectedClipartAsset?.id ? "border-[#008c8f] bg-[#008c8f] text-white" : "border-[#d7dde5] bg-white text-[#344054]"}`}
                     >
                       Place clipart
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedClipartAsset) void deleteClipartAsset(selectedClipartAsset.id);
+                      }}
+                      disabled={!selectedClipartAsset || deletingClipartAssetId !== null}
+                      className="h-9 rounded-md border border-[#d7dde5] bg-white text-xs font-semibold text-[#b42318] disabled:opacity-45"
+                    >
+                      {selectedClipartAsset && deletingClipartAssetId === selectedClipartAsset.id ? <Loader2 size={14} className="animate-spin" /> : "Delete clipart"}
                     </button>
                     <button type="button" onClick={() => setGeneratedImagesCollapsed(false)} disabled={!settings.clipartImages.length} className="h-9 rounded-md border border-[#d7dde5] bg-white text-xs font-semibold text-[#344054] disabled:opacity-45">
                       Show placed
@@ -5761,11 +5849,27 @@ export function EditorClient({ project }: { project: Project }) {
                   ))}
                 </div>
               ) : null}
-              {selectedShapeBox ? (
+              {selectedShapeBox && selectedShapeLayer ? (
                 <div
-                  className="pointer-events-none absolute border border-teal-700/75 bg-teal-500/5 shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
+                  className="pointer-events-none absolute border border-teal-700/75 bg-transparent shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
                   style={selectedShapeBox}
-                />
+                >
+                  {SOURCE_RESIZE_HANDLES.map((handle) => (
+                    <button
+                      key={handle}
+                      type="button"
+                      aria-label={`Resize ${handle}`}
+                      disabled={selectedShapeLayer.locked}
+                      onPointerDown={(event) => beginShapeResize(event, selectedShapeLayer, handle)}
+                      onPointerMove={dragGraph}
+                      onPointerUp={endGraphDrag}
+                      onPointerCancel={endGraphDrag}
+                      className={sourceResizeHandleClass(handle, selectedShapeLayer.locked)}
+                    >
+                      <span className={sourceResizeHandleIconClass(handle)}>{sourceResizeHandleIcon(handle)}</span>
+                    </button>
+                  ))}
+                </div>
               ) : null}
               {selectedClipartBox ? (
                 <div

@@ -1,14 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type SVGProps } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import {
   ArrowDown,
-  ArrowLeftRight,
   ArrowUp,
-  ArrowUpDown,
   Check,
   ChevronDown,
   ChevronRight,
@@ -27,7 +25,9 @@ import {
   Loader2,
   Maximize2,
   Menu,
-  MousePointer2,
+  MoveDiagonal2,
+  MoveHorizontal,
+  MoveVertical,
   MoreVertical,
   Pipette,
   Plus,
@@ -145,6 +145,8 @@ type FloatingPalette = { regionId: string; x: number; y: number } | null;
 type DrawingTool = "image" | "cell" | "shape";
 type CanvasTool = "pointer" | "hand";
 type DrawingLayerKey = `cell:${string}` | `shape:${string}` | `clipart:${string}`;
+type ResizeHandleTarget = "source" | "shape" | null;
+type FillRegionPointerEvent = ReactPointerEvent<HTMLCanvasElement> | ReactMouseEvent<HTMLCanvasElement>;
 
 type LayerChoice = {
   key: string;
@@ -179,6 +181,11 @@ type PanelResizeState = {
 };
 const SOURCE_RESIZE_HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
 type SourceResizeHandle = (typeof SOURCE_RESIZE_HANDLES)[number];
+const SOURCE_CORNER_RESIZE_HANDLES: SourceResizeHandle[] = ["nw", "ne", "se", "sw"];
+const CANVAS_SELECTION_BOX_CLASS =
+  "pointer-events-none absolute rounded-[2px] border-2 border-cyan-300 bg-cyan-300/10 shadow-[0_0_0_1px_rgba(2,6,23,0.92),0_0_0_4px_rgba(255,255,255,0.92),0_0_18px_rgba(34,211,238,0.58)]";
+const SELECT_POINTER_CURSOR =
+  "url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='24'%20height='24'%20viewBox='0%200%2024%2024'%3E%3Cpath%20d='M5.5%204.8%2018.4%2010.3c.78.34.75%201.46-.04%201.77l-5.32%202.08a1.45%201.45%200%200%200-.81.81l-2.04%205.13c-.32.81-1.47.81-1.78-.01L5.5%204.8Z'%20fill='%23ffffff'%20stroke='%23000000'%20stroke-width='1.4'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E\") 6 5, default";
 type DragState = {
   kind: "viewport" | "pan" | "source" | "shape" | "clipart" | "resize-source" | "resize-shape" | "cell-paint" | "shape-draw";
   pointerId: number;
@@ -257,6 +264,8 @@ const MAX_SETTINGS_HISTORY_ESTIMATED_BYTES = 64 * 1024 * 1024;
 const MIN_SIDE_PANEL_WIDTH = 280;
 const MAX_SIDE_PANEL_WIDTH = 560;
 const PREVIEW_PROCESSING_DEBOUNCE_MS = 250;
+const DRAG_PROCESSING_IDLE_DEBOUNCE_MS = 300;
+const DRAG_PROCESSING_MAX_WAIT_MS = 1000;
 const MAX_LAYER_CANVAS_CACHE_BYTES = 128 * 1024 * 1024;
 const COPY_OFFSET_CELLS = 0.5;
 const MAX_CLIPART_UPLOAD_BYTES = 6 * 1024 * 1024;
@@ -659,8 +668,10 @@ function normalizeClipartImagesForEditor(
     .slice(0, 500);
 }
 
-function sourceResizeHandleClass(handle: SourceResizeHandle, locked: boolean | undefined) {
-  const base = `pointer-events-auto absolute grid place-items-center text-slate-700 transition-colors ${
+function sourceResizeHandleClass(handle: SourceResizeHandle, locked: boolean | undefined, visible: boolean) {
+  const base = `absolute grid place-items-center text-slate-700 transition-[opacity,color] duration-150 ${
+    visible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
+  } ${
     locked ? "opacity-40" : "hover:text-slate-950"
   }`;
   switch (handle) {
@@ -685,16 +696,24 @@ function sourceResizeHandleClass(handle: SourceResizeHandle, locked: boolean | u
 }
 
 function sourceResizeHandleIconClass(handle: SourceResizeHandle) {
-  const base = "grid h-5 w-5 place-items-center rounded border border-slate-400 bg-white/95 shadow-sm";
+  const base = "grid h-5 w-5 place-items-center rounded-md border border-slate-300 bg-white/95 shadow-[0_2px_5px_rgba(15,23,42,0.18)] transition-transform hover:scale-110";
   if (handle === "n" || handle === "s") return `${base} h-5 w-7`;
   if (handle === "e" || handle === "w") return `${base} h-7 w-5`;
   return base;
 }
 
 function sourceResizeHandleIcon(handle: SourceResizeHandle) {
-  if (handle === "n" || handle === "s") return <ArrowUpDown size={13} aria-hidden="true" />;
-  if (handle === "e" || handle === "w") return <ArrowLeftRight size={13} aria-hidden="true" />;
-  return <Maximize2 size={12} aria-hidden="true" />;
+  if (handle === "n" || handle === "s") return <MoveVertical size={14} strokeWidth={2.25} aria-hidden="true" />;
+  if (handle === "e" || handle === "w") return <MoveHorizontal size={14} strokeWidth={2.25} aria-hidden="true" />;
+  return <MoveDiagonal2 size={13} strokeWidth={2.25} className={handle === "ne" || handle === "sw" ? "rotate-90" : undefined} aria-hidden="true" />;
+}
+
+function SelectPointerIcon({ size = 18, ...props }: SVGProps<SVGSVGElement> & { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" {...props}>
+      <path d="M5.5 4.8 18.4 10.3c.78.34.75 1.46-.04 1.77l-5.32 2.08a1.45 1.45 0 0 0-.81.81l-2.04 5.13c-.32.81-1.47.81-1.78-.01L5.5 4.8Z" />
+    </svg>
+  );
 }
 
 function cellNumberLabels(cellCount: number) {
@@ -1045,6 +1064,7 @@ export function EditorClient({ project }: { project: Project }) {
   const [zoom, setZoom] = useState(1);
   const [showOriginal, setShowOriginal] = useState(false);
   const [isDraggingGraph, setIsDraggingGraph] = useState(false);
+  const [resizeHandleTarget, setResizeHandleTarget] = useState<ResizeHandleTarget>(null);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [selectedDrawingLayerId, setSelectedDrawingLayerId] = useState<DrawingLayerKey | null>(null);
   const [previewCanvasSize, setPreviewCanvasSize] = useState({ width: 1, height: 1 });
@@ -1131,7 +1151,16 @@ export function EditorClient({ project }: { project: Project }) {
   const fillRegionMapRef = useRef<Uint16Array | null>(null);
   const settingsHistoryRef = useRef<SettingsHistory>({ undo: [], redo: [] });
   const lastProcessedSignatureRef = useRef<string | null>(null);
+  const lastDragProcessingAtRef = useRef(0);
+  const forceNextProcessingRef = useRef(false);
   const spacePressedRef = useRef(false);
+
+  const beginGraphInteraction = useCallback(() => {
+    const now = performance.now();
+    lastDragProcessingAtRef.current = now;
+    forceNextProcessingRef.current = false;
+    setIsDraggingGraph(true);
+  }, []);
 
   useEffect(() => {
     const baseSettings = initialEditorSettings(project);
@@ -1280,7 +1309,6 @@ export function EditorClient({ project }: { project: Project }) {
     [fillRegions, selectedFillRegionId],
   );
   const fillRegionsById = useMemo(() => new Map(fillRegions.map((region) => [region.id, region] as const)), [fillRegions]);
-  const isPaletteSectionExpanded = !collapsedSections.outline || !collapsedSections.fill || !collapsedSections.graphLines || (!!selectedFillRegion && !collapsedSections.selectedFill);
   const pushUndoSettings = useCallback((snapshot: GraphSettings) => {
     const history = settingsHistoryRef.current;
     const previous = history.undo.at(-1);
@@ -2359,7 +2387,7 @@ export function EditorClient({ project }: { project: Project }) {
     });
   }
 
-  function fillRegionIdAtPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
+  function fillRegionIdAtPointer(event: FillRegionPointerEvent) {
     const canvas = event.currentTarget;
     const regionMap = fillRegionMapRef.current;
     if (!regionMap || !canvas.width || !canvas.height) return null;
@@ -2375,7 +2403,7 @@ export function EditorClient({ project }: { project: Project }) {
     return regionNumber ? String(regionNumber) : null;
   }
 
-  function floatingPalettePosition(event: ReactPointerEvent<HTMLCanvasElement>) {
+  function floatingPalettePosition(event: FillRegionPointerEvent) {
     const width = 244;
     const height = 216;
     const margin = 12;
@@ -2385,7 +2413,7 @@ export function EditorClient({ project }: { project: Project }) {
     };
   }
 
-  function selectFillRegionFromPointer(event: ReactPointerEvent<HTMLCanvasElement>, showPalette = false) {
+  function selectFillRegionFromPointer(event: FillRegionPointerEvent, showPalette = false) {
     const regionId = fillRegionIdAtPointer(event);
     if (!regionId) {
       if (showPalette) setFloatingPalette(null);
@@ -2404,6 +2432,12 @@ export function EditorClient({ project }: { project: Project }) {
       setFloatingPalette({ regionId, ...position });
     }
     return true;
+  }
+
+  function openFillPaletteFromDoubleClick(event: ReactMouseEvent<HTMLCanvasElement>) {
+    if (showOriginal) return;
+    event.preventDefault();
+    selectFillRegionFromPointer(event, true);
   }
 
   function beginGraphDrag(event: ReactPointerEvent<HTMLCanvasElement>) {
@@ -2434,7 +2468,7 @@ export function EditorClient({ project }: { project: Project }) {
         moved: false,
         historyRecorded: false,
       };
-      setIsDraggingGraph(true);
+      beginGraphInteraction();
       return;
     }
 
@@ -2474,7 +2508,7 @@ export function EditorClient({ project }: { project: Project }) {
       dragStateRef.current = dragState;
       if (drawingTool === "cell") paintCellAtPointer(event, dragState);
       else startShapeAtPointer(event, dragState);
-      setIsDraggingGraph(true);
+      beginGraphInteraction();
       return;
     }
 
@@ -2518,7 +2552,7 @@ export function EditorClient({ project }: { project: Project }) {
       setSelectedSourceId(null);
       setSelectedDrawingLayerId(null);
       setLayerChooser(null);
-      selectFillRegionFromPointer(event, true);
+      selectFillRegionFromPointer(event);
       if (canvasTool === "pointer") return;
     }
 
@@ -2551,7 +2585,7 @@ export function EditorClient({ project }: { project: Project }) {
       moved: false,
       historyRecorded: false,
     };
-    setIsDraggingGraph(true);
+    beginGraphInteraction();
   }
 
   function beginSourceResize(event: ReactPointerEvent<HTMLElement>, layout: SourceLayout, resizeCorner: SourceResizeHandle) {
@@ -2563,6 +2597,7 @@ export function EditorClient({ project }: { project: Project }) {
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
+    setResizeHandleTarget("source");
     setSelectedSourceId(layout.source.id);
     setSelectedDrawingLayerId(null);
     dragStateRef.current = {
@@ -2587,7 +2622,7 @@ export function EditorClient({ project }: { project: Project }) {
       moved: false,
       historyRecorded: false,
     };
-    setIsDraggingGraph(true);
+    beginGraphInteraction();
   }
 
   function beginShapeResize(event: ReactPointerEvent<HTMLElement>, shape: GraphShapeDrawing, resizeCorner: SourceResizeHandle) {
@@ -2599,6 +2634,7 @@ export function EditorClient({ project }: { project: Project }) {
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
+    setResizeHandleTarget("shape");
     setSelectedSourceId(null);
     setSelectedDrawingLayerId(drawingLayerKey("shape", shape.id));
     dragStateRef.current = {
@@ -2623,7 +2659,7 @@ export function EditorClient({ project }: { project: Project }) {
       moved: false,
       historyRecorded: false,
     };
-    setIsDraggingGraph(true);
+    beginGraphInteraction();
   }
 
   function dragGraph(event: ReactPointerEvent<HTMLElement>) {
@@ -2854,16 +2890,14 @@ export function EditorClient({ project }: { project: Project }) {
   function endGraphDrag(event: ReactPointerEvent<HTMLElement>) {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== event.pointerId) return;
-    const shouldSelectFill = dragState.kind === "source" && !dragState.moved && !showOriginal;
-
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+    if (dragState.moved) {
+      forceNextProcessingRef.current = true;
+    }
     dragStateRef.current = null;
     setIsDraggingGraph(false);
-    if (shouldSelectFill && event.currentTarget === previewCanvasRef.current) {
-      selectFillRegionFromPointer(event as ReactPointerEvent<HTMLCanvasElement>, true);
-    }
   }
 
   useEffect(() => {
@@ -3068,8 +3102,10 @@ export function EditorClient({ project }: { project: Project }) {
     let cancelled = false;
     const controller = new AbortController();
     const processingSignature = buildProcessingSignature(settings);
+    const dragActive = isDraggingGraph && dragStateRef.current !== null;
 
     if (lastProcessedSignatureRef.current === processingSignature && processedCanvasRef.current) {
+      if (!dragActive) forceNextProcessingRef.current = false;
       setProcessing(false);
       return () => {
         cancelled = true;
@@ -3077,15 +3113,28 @@ export function EditorClient({ project }: { project: Project }) {
       };
     }
 
-    lastProcessedSignatureRef.current = processingSignature;
-    setProcessing(true);
+    const forceImmediateProcessing = !dragActive && forceNextProcessingRef.current;
+    if (!dragActive) {
+      forceNextProcessingRef.current = false;
+    }
 
-    const startAt = performance.now();
+    const elapsedSinceLastDragProcessing = dragActive ? Math.max(0, performance.now() - lastDragProcessingAtRef.current) : 0;
+    const processingDelayMs = forceImmediateProcessing
+      ? 0
+      : dragActive
+        ? Math.max(0, Math.min(DRAG_PROCESSING_IDLE_DEBOUNCE_MS, DRAG_PROCESSING_MAX_WAIT_MS - elapsedSinceLastDragProcessing))
+        : PREVIEW_PROCESSING_DEBOUNCE_MS;
+
     if (!processingDebounceRef.current) {
       processingDebounceRef.current = createDebouncedAction(() => undefined, PREVIEW_PROCESSING_DEBOUNCE_MS);
     }
     processingDebounceRef.current.cancel();
     processingDebounceRef.current = createDebouncedAction(() => {
+      if (dragActive) {
+        lastDragProcessingAtRef.current = performance.now();
+      }
+      setProcessing(true);
+      const startAt = performance.now();
       const layouts = sourceRenderOrder(settings.sourceImages);
       const sourceLayers = layouts
         .filter((layout) => layout.source.visible !== false && sourceCanvasesRef.current.has(layout.source.id))
@@ -3142,6 +3191,7 @@ export function EditorClient({ project }: { project: Project }) {
       void pixelateLayeredImagesWithWorker(layers, renderSettings, { signal: controller.signal })
         .then((result) => {
           if (cancelled) return;
+          lastProcessedSignatureRef.current = processingSignature;
           processedCanvasRef.current = result.canvas;
           fillRegionMapRef.current = result.fillRegionMap;
           drawPreview(result.canvas);
@@ -3159,7 +3209,7 @@ export function EditorClient({ project }: { project: Project }) {
             setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to process image." });
           }
         });
-    }, PREVIEW_PROCESSING_DEBOUNCE_MS);
+    }, processingDelayMs);
     processingDebounceRef.current.run();
 
     return () => {
@@ -3167,7 +3217,7 @@ export function EditorClient({ project }: { project: Project }) {
       controller.abort();
       processingDebounceRef.current?.cancel();
     };
-  }, [clipartReady, draftChecked, drawPreview, settings, sourceReady, renderKey]);
+  }, [clipartReady, draftChecked, drawPreview, isDraggingGraph, settings, sourceReady, renderKey]);
 
   function copySelectedLayer() {
     const current = settingsRef.current;
@@ -4587,7 +4637,7 @@ export function EditorClient({ project }: { project: Project }) {
           }`}
           aria-hidden="true"
         >
-          <ArrowLeftRight size={13} />
+          <MoveHorizontal size={14} strokeWidth={2.25} />
         </span>
       </button>
     </aside>
@@ -4783,6 +4833,42 @@ export function EditorClient({ project }: { project: Project }) {
           height: Math.max(1, Math.round(Math.abs(selectedClipartLayer.height) * GRAPH_MAJOR_CELL_PIXELS * zoom)),
         }
       : null;
+  const showSourceSideResizeHandles = resizeHandleTarget === "source" || dragStateRef.current?.kind === "resize-source";
+  const showShapeSideResizeHandles = resizeHandleTarget === "shape" || dragStateRef.current?.kind === "resize-shape";
+  const sourceResizeHandleVisible = (handle: SourceResizeHandle, showSideHandles: boolean) => SOURCE_CORNER_RESIZE_HANDLES.includes(handle) || showSideHandles;
+  const previewCanvasCursor = isDraggingGraph ? "grabbing" : canvasTool === "hand" ? "grab" : SELECT_POINTER_CURSOR;
+
+  function updateResizeHandleHover(event: ReactPointerEvent<HTMLElement>) {
+    const stage = graphStageRef.current;
+    if (!stage || showOriginal) {
+      setResizeHandleTarget((current) => (current ? null : current));
+      return;
+    }
+
+    const stageRect = stage.getBoundingClientRect();
+    const pointerX = event.clientX - stageRect.left;
+    const pointerY = event.clientY - stageRect.top;
+    const boundarySize = 12;
+    const isAtBoundary = (box: typeof selectedSourceBox | typeof selectedShapeBox) => {
+      if (!box) return false;
+      const right = box.left + box.width;
+      const bottom = box.top + box.height;
+      const withinExpandedBox =
+        pointerX >= box.left - boundarySize &&
+        pointerX <= right + boundarySize &&
+        pointerY >= box.top - boundarySize &&
+        pointerY <= bottom + boundarySize;
+      if (!withinExpandedBox) return false;
+      return Math.min(Math.abs(pointerX - box.left), Math.abs(pointerX - right), Math.abs(pointerY - box.top), Math.abs(pointerY - bottom)) <= boundarySize;
+    };
+
+    const nextTarget: ResizeHandleTarget = isAtBoundary(selectedSourceBox)
+      ? "source"
+      : isAtBoundary(selectedShapeBox)
+        ? "shape"
+        : null;
+    setResizeHandleTarget((current) => (current === nextTarget ? current : nextTarget));
+  }
 
   const canvasPanel = (
     <section className="editor-canvas-panel grid min-h-0 grid-rows-[40px_minmax(0,1fr)_36px]">
@@ -4893,6 +4979,10 @@ export function EditorClient({ project }: { project: Project }) {
               className="relative mx-auto"
               onDragOver={handleGeneratedShapeDragOver}
               onDrop={handleGeneratedShapeDrop}
+              onPointerMove={updateResizeHandleHover}
+              onPointerLeave={() => {
+                setResizeHandleTarget(null);
+              }}
               style={{
                 width: `${graphPreviewWidth + outsideNumberMargin * 2}px`,
                 height: `${graphPreviewHeight + outsideNumberMargin * 2}px`,
@@ -4911,16 +5001,17 @@ export function EditorClient({ project }: { project: Project }) {
                 onPointerMove={dragGraph}
                 onPointerUp={endGraphDrag}
                 onPointerCancel={endGraphDrag}
+                onDoubleClick={openFillPaletteFromDoubleClick}
                 onDragOver={handleGeneratedShapeDragOver}
                 onDrop={handleGeneratedShapeDrop}
-                title="Drag image to move it; arrow keys move selected image by 0.1cm; Space or Ctrl plus drag pans the view"
+                title="Drag image to move it; double-click a fill area to choose its color; arrow keys move selected image by 0.1cm; Space or Ctrl plus drag pans the view"
                 className="absolute left-0 top-0 rounded bg-white shadow-sm"
                 style={{
                   left: `${outsideNumberMargin}px`,
                   top: `${outsideNumberMargin}px`,
                   width: `${graphPreviewWidth}px`,
                   height: `${graphPreviewHeight}px`,
-                  cursor: isDraggingGraph ? "grabbing" : canvasTool === "hand" ? "grab" : placingGeneratedShape || placingClipartAssetId ? "copy" : copiedFillColor ? "copy" : "crosshair",
+                  cursor: previewCanvasCursor,
                   imageRendering: "auto",
                   touchAction: "none",
                 }}
@@ -4997,52 +5088,60 @@ export function EditorClient({ project }: { project: Project }) {
               ) : null}
               {selectedShapeBox && selectedShapeLayer ? (
                 <div
-                  className="pointer-events-none absolute border border-teal-700/75 bg-transparent shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
+                  className={CANVAS_SELECTION_BOX_CLASS}
                   style={selectedShapeBox}
                 >
-                  {SOURCE_RESIZE_HANDLES.map((handle) => (
-                    <button
-                      key={handle}
-                      type="button"
-                      aria-label={`Resize ${handle}`}
-                      disabled={selectedShapeLayer.locked}
-                      onPointerDown={(event) => beginShapeResize(event, selectedShapeLayer, handle)}
-                      onPointerMove={dragGraph}
-                      onPointerUp={endGraphDrag}
-                      onPointerCancel={endGraphDrag}
-                      className={sourceResizeHandleClass(handle, selectedShapeLayer.locked)}
-                    >
-                      <span className={sourceResizeHandleIconClass(handle)}>{sourceResizeHandleIcon(handle)}</span>
-                    </button>
-                  ))}
+                  {SOURCE_RESIZE_HANDLES.map((handle) => {
+                    const handleVisible = sourceResizeHandleVisible(handle, showShapeSideResizeHandles);
+                    return (
+                      <button
+                        key={handle}
+                        type="button"
+                        aria-label={`Resize ${handle}`}
+                        disabled={selectedShapeLayer.locked}
+                        onPointerDown={(event) => beginShapeResize(event, selectedShapeLayer, handle)}
+                        onPointerMove={dragGraph}
+                        onPointerUp={endGraphDrag}
+                        onPointerCancel={endGraphDrag}
+                        tabIndex={handleVisible ? 0 : -1}
+                        className={sourceResizeHandleClass(handle, selectedShapeLayer.locked, handleVisible)}
+                      >
+                        <span className={sourceResizeHandleIconClass(handle)}>{sourceResizeHandleIcon(handle)}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               ) : null}
               {selectedClipartBox ? (
                 <div
-                  className="pointer-events-none absolute border border-teal-700/75 bg-teal-500/5 shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
+                  className={CANVAS_SELECTION_BOX_CLASS}
                   style={selectedClipartBox}
                 />
               ) : null}
               {selectedSourceBox && selectedSourceLayout ? (
                 <div
-                  className="pointer-events-none absolute border border-teal-700/75 bg-transparent shadow-[0_0_0_1px_rgba(255,255,255,0.85)]"
+                  className={CANVAS_SELECTION_BOX_CLASS}
                   style={selectedSourceBox}
                 >
-                  {SOURCE_RESIZE_HANDLES.map((handle) => (
-                    <button
-                      key={handle}
-                      type="button"
-                      aria-label={`Resize ${handle}`}
-                      disabled={selectedSource?.locked}
-                      onPointerDown={(event) => beginSourceResize(event, selectedSourceLayout, handle)}
-                      onPointerMove={dragGraph}
-                      onPointerUp={endGraphDrag}
-                      onPointerCancel={endGraphDrag}
-                      className={sourceResizeHandleClass(handle, selectedSource?.locked)}
-                    >
-                      <span className={sourceResizeHandleIconClass(handle)}>{sourceResizeHandleIcon(handle)}</span>
-                    </button>
-                  ))}
+                  {SOURCE_RESIZE_HANDLES.map((handle) => {
+                    const handleVisible = sourceResizeHandleVisible(handle, showSourceSideResizeHandles);
+                    return (
+                      <button
+                        key={handle}
+                        type="button"
+                        aria-label={`Resize ${handle}`}
+                        disabled={selectedSource?.locked}
+                        onPointerDown={(event) => beginSourceResize(event, selectedSourceLayout, handle)}
+                        onPointerMove={dragGraph}
+                        onPointerUp={endGraphDrag}
+                        onPointerCancel={endGraphDrag}
+                        tabIndex={handleVisible ? 0 : -1}
+                        className={sourceResizeHandleClass(handle, selectedSource?.locked, handleVisible)}
+                      >
+                        <span className={sourceResizeHandleIconClass(handle)}>{sourceResizeHandleIcon(handle)}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               ) : null}
             </div>
@@ -5090,7 +5189,7 @@ export function EditorClient({ project }: { project: Project }) {
             className={`editor-dark-btn ${canvasTool === "pointer" ? "border-[#008c8f] bg-[#10242d] text-[#6fe7ea]" : ""}`}
             title="Select (pointer)"
           >
-            <MousePointer2 size={18} aria-hidden="true" />
+            <SelectPointerIcon size={18} aria-hidden="true" />
           </button>
           <button type="button" onClick={() => setShowOriginal((value) => !value)} className="editor-dark-btn" title={showOriginal ? "Show processed" : "Show original"}>
             {showOriginal ? <EyeOff size={17} aria-hidden="true" /> : <Eye size={17} aria-hidden="true" />}
@@ -5216,7 +5315,6 @@ export function EditorClient({ project }: { project: Project }) {
             setDrawTab={setDrawTab}
             collapsedSections={collapsedSections}
             toggleSection={toggleSection}
-            isPaletteSectionExpanded={isPaletteSectionExpanded}
             selectedSource={selectedSource}
             selectedClipartAsset={selectedClipartAsset}
             selectedShapeLayer={selectedShapeLayer}

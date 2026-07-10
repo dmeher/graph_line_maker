@@ -2,7 +2,6 @@
 
 import { type ReactNode, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
-  ArrowLeftRight,
   Check,
   Eye,
   EyeOff,
@@ -13,6 +12,7 @@ import {
   Loader2,
   Lock,
   MousePointer2,
+  MoveHorizontal,
   Palette,
   PenTool,
   Printer,
@@ -113,7 +113,6 @@ export interface InspectorPanelProps {
   setDrawTab: (tab: DrawTab) => void;
   collapsedSections: Record<CollapsibleKey, boolean>;
   toggleSection: (section: CollapsibleKey) => void;
-  isPaletteSectionExpanded: boolean;
 
   selectedSource: GraphSourceImage | null;
   selectedClipartAsset: GraphClipartAsset | null;
@@ -218,10 +217,10 @@ export interface InspectorPanelProps {
 }
 
 const inspectorTabs: { id: InspectorTab; label: string; icon: ReactNode }[] = [
-  { id: "graph", label: "Graph", icon: <Grid3X3 size={14} aria-hidden="true" /> },
-  { id: "source", label: "Source", icon: <ImageIcon size={14} aria-hidden="true" /> },
-  { id: "draw", label: "Draw", icon: <PenTool size={14} aria-hidden="true" /> },
-  { id: "palette", label: "Palette", icon: <Palette size={14} aria-hidden="true" /> },
+  { id: "graph", label: "Graph", icon: <Grid3X3 size={20} strokeWidth={2.15} aria-hidden="true" /> },
+  { id: "source", label: "Source", icon: <ImageIcon size={20} strokeWidth={2.15} aria-hidden="true" /> },
+  { id: "draw", label: "Draw", icon: <PenTool size={20} strokeWidth={2.15} aria-hidden="true" /> },
+  { id: "palette", label: "Palette", icon: <Palette size={20} strokeWidth={2.15} aria-hidden="true" /> },
 ];
 
 const drawTabs: { id: DrawTab; label: string }[] = [
@@ -246,7 +245,7 @@ function InspectorTabBar({
 }) {
   return (
     <div
-      className="inline-flex w-full rounded-full border border-[#d7dde5] bg-[#f8fafc] p-1"
+      className="grid w-full grid-cols-4 gap-1.5 rounded-xl border border-[#d7dde5] bg-[#f8fafc] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]"
       role="tablist"
       aria-label="Inspector tabs"
     >
@@ -258,15 +257,16 @@ function InspectorTabBar({
             type="button"
             role="tab"
             aria-selected={active}
+            aria-label={tab.label}
+            title={tab.label}
             onClick={() => onChange(tab.id)}
-            className={`flex flex-1 items-center justify-center gap-1.5 rounded-full px-2 py-1.5 text-[11px] font-bold transition-colors ${
+            className={`grid h-11 min-w-0 place-items-center rounded-lg border text-[11px] font-bold transition-colors ${
               active
-                ? "bg-[#008c8f] text-white shadow-sm"
-                : "text-[#475467] hover:bg-white hover:text-[#101828]"
+                ? "border-[#008c8f] bg-white text-[#006f72] shadow-sm"
+                : "border-transparent text-[#475467] hover:border-[#d7dde5] hover:bg-white hover:text-[#101828]"
             }`}
           >
             {tab.icon}
-            <span className="truncate">{tab.label}</span>
           </button>
         );
       })}
@@ -284,7 +284,6 @@ export function InspectorPanel(props: InspectorPanelProps) {
     setDrawTab,
     collapsedSections,
     toggleSection,
-    isPaletteSectionExpanded,
     selectedSource,
     selectedClipartAsset,
     setSelectedClipartAssetId,
@@ -513,13 +512,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
   );
 
   return (
-    <aside
-      className="editor-panel relative space-y-0"
-      style={{
-        overflowY: inspectorTab === "palette" && !isPaletteSectionExpanded ? "hidden" : "auto",
-        overflowX: "hidden",
-      }}
-    >
+    <aside className="editor-panel relative space-y-0">
       <div className="space-y-4 p-3">
         <div className="rounded-xl border border-[#d7dde5] bg-white p-3 shadow-sm">
           <div className="mb-3 flex items-center justify-between">
@@ -1072,7 +1065,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
           }`}
           aria-hidden="true"
         >
-          <ArrowLeftRight size={13} />
+          <MoveHorizontal size={14} strokeWidth={2.25} />
         </span>
       </button>
     </aside>

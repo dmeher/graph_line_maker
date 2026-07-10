@@ -244,7 +244,8 @@ GRAPH_PIXEL_DEV_USER_EMAIL=
 
 - Holds the canonical `GraphSettings` state and an undo/redo history (`MAX_SETTINGS_HISTORY = 80`).
 - Manages source images, cell paints, graph shapes, palette colors, fill-region overrides, zoom, selection, drag/resize interactions, and export menus.
-- Debounces canvas reprocessing (`PREVIEW_PROCESSING_DEBOUNCE_MS = 250`) and renders the output to a canvas.
+- A single click selects canvas layers or fill regions; a double-click on a processed fill region opens its floating color palette. Selected source/generated-shape/clipart boxes use a high-contrast cyan selection outline. Source and generated-shape corner resize controls stay visible while selected; top/right/bottom/left resize controls appear only when the pointer reaches the selection boundary or during that resize. Preview-canvas hover cursors follow the active top tool (custom white-filled, black-bordered selector SVG for select, `grab` for pan) instead of placement/copy/crosshair/hand cursors; resize handles keep their directional resize cursors.
+- Debounces canvas reprocessing (`PREVIEW_PROCESSING_DEBOUNCE_MS = 250`) and renders the output to a canvas. During active drag/resize/draw gestures, processing is coalesced with `DRAG_PROCESSING_IDLE_DEBOUNCE_MS = 300`, forced at least every `DRAG_PROCESSING_MAX_WAIT_MS = 1000`, and rerun immediately on pointer-up for the latest committed state. Render signatures are marked processed only after worker/fallback success.
 - Caps each source/clipart full-frame canvas cache at 128 MB and checks total canvas/estimated processing memory before allocation.
 - Saves via the server action `saveProjectState` (`src/app/(app)/projects/actions.ts`) with Zod validation.
 - Stores an in-flight session draft in `sessionStorage` (`src/lib/editor/session-draft.ts`) for recovery.

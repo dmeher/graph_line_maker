@@ -8,10 +8,21 @@ import { DEFAULT_GRID_LINE_COLOR } from "@/lib/graph-paper";
 export const inspectorControlClass =
   "h-9 w-full min-w-0 rounded-md border border-[#d7dde5] bg-white px-2.5 text-[13px] font-medium text-[#101828] outline-none focus:border-[#008c8f] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-400";
 
-export function InspectorGroup({ title, children }: { title: string; children: ReactNode }) {
+export function InspectorGroup({
+  title,
+  icon,
+  children,
+}: {
+  title: string;
+  icon?: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <section className="border-t border-[#e8edf2] pt-4 first:border-t-0 first:pt-0">
-      <h3 className="mb-3 text-[12px] font-bold uppercase tracking-wide text-[#5b6675]">{title}</h3>
+    <section className="rounded-xl border border-[#d7dde5] bg-white p-4 shadow-sm">
+      <h3 className="mb-3 flex items-center gap-2 text-[13px] font-bold uppercase tracking-wide text-[#101828]">
+        {icon ? <span className="text-[#008c8f]">{icon}</span> : null}
+        <span>{title}</span>
+      </h3>
       <div className="space-y-3">{children}</div>
     </section>
   );

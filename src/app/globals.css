@@ -121,6 +121,10 @@ canvas {
 }
 
 @layer components {
+  .editor-layer-virtual-row {
+    content-visibility: auto;
+    contain-intrinsic-size: 62px;
+  }
 .ui-panel {
   border: 1px solid var(--line);
   border-radius: var(--radius-compact);

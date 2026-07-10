@@ -34,10 +34,10 @@ import {
   clampSourceFillThreshold,
   clampStrokeGapClosePixels,
 } from "@/lib/graph-paper";
+import { MAX_CANVAS_DIMENSION, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import type { GraphClipartAsset, GraphClipartImage, GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSummary } from "@/lib/types";
 
-const MAX_CANVAS_DIMENSION = 24000;
 const MAX_SOURCE_IMAGES = 12;
 const MAX_CLIPART_ASSETS = 120;
 const MAX_CLIPART_IMAGES = 500;
@@ -503,10 +503,11 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const { cellSizeInches: legacyCellSizeInches, ...cleanMerged } = merged;
   const cellWidth = GRAPH_MAJOR_CELL_PIXELS;
   const cellHeight = GRAPH_MAJOR_CELL_PIXELS;
-  const graphWidthLimit = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / cellWidth));
-  const graphHeightLimit = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / cellHeight));
-  const rawGraphWidth = Math.max(1, Math.min(graphWidthLimit, Math.round(merged.graphWidth || Math.round((merged.outputWidth || defaultGraphSettings.outputWidth) / cellWidth))));
-  const rawGraphHeight = Math.max(1, Math.min(graphHeightLimit, Math.round(merged.graphHeight || Math.round((merged.outputHeight || defaultGraphSettings.outputHeight) / cellHeight))));
+  const requestedGraphWidth = Math.round(merged.graphWidth || Math.round((merged.outputWidth || defaultGraphSettings.outputWidth) / cellWidth));
+  const requestedGraphHeight = Math.round(merged.graphHeight || Math.round((merged.outputHeight || defaultGraphSettings.outputHeight) / cellHeight));
+  const safeGraphDimensions = clampGraphCellDimensions(requestedGraphWidth, requestedGraphHeight, GRAPH_MAJOR_CELL_PIXELS);
+  const rawGraphWidth = safeGraphDimensions.width;
+  const rawGraphHeight = safeGraphDimensions.height;
   const hasBrokenLegacyArtworkWidth = Number(cleanMerged.imageWidth) > 0 && Number(cleanMerged.imageWidth) <= 0.05;
   const graphWidth = hasBrokenLegacyArtworkWidth ? defaultGraphSettings.graphWidth : rawGraphWidth;
   const graphHeight = hasBrokenLegacyArtworkWidth ? defaultGraphSettings.graphHeight : rawGraphHeight;
@@ -621,60 +622,29 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   };
 }
 
-async function signedImageUrl(bucket: string, path?: string | null) {
-  if (!path) return null;
+async function signedUrlsForBucket(bucket: string, paths: Array<string | null | undefined>) {
+  const uniquePaths = Array.from(new Set(paths.filter((path): path is string => Boolean(path))));
+  const signedByPath = new Map<string, string | null>();
+  if (!uniquePaths.length) return signedByPath;
   const supabase = tryGetSupabaseAdmin();
-  if (!supabase) return null;
-  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60);
-  if (error) return null;
-  return data.signedUrl;
-}
-
-async function signedSourceImages(
-  sourceImages: GraphSourceImage[],
-  signedImageUrlMode: SignedImageUrlMode,
-  originalImagePath: string | null,
-  originalImageUrl: string | null,
-) {
-  if (signedImageUrlMode === "none") {
-    return sourceImages.map(({ url: _url, ...source }) => ({ ...source, url: null }));
+  if (!supabase) return signedByPath;
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrls(uniquePaths, 60 * 60);
+  if (error) return signedByPath;
+  for (const item of data ?? []) {
+    if (item.path) signedByPath.set(item.path, item.signedUrl ?? null);
   }
-
-  return Promise.all(
-    sourceImages.map(async (source) => ({
-      ...source,
-      url: source.path === originalImagePath ? originalImageUrl : await signedImageUrl(ORIGINAL_IMAGES_BUCKET, source.path),
-    })),
-  );
-}
-
-async function signedClipartAssets(clipartAssets: GraphClipartAsset[], signedImageUrlMode: SignedImageUrlMode) {
-  if (signedImageUrlMode === "none") {
-    return clipartAssets.map(({ url: _url, dataUrl: _dataUrl, ...asset }) => ({ ...asset, url: null, dataUrl: null }));
-  }
-
-  return Promise.all(
-    clipartAssets.map(async ({ url: _url, dataUrl: _dataUrl, ...asset }) => ({
-      ...asset,
-      url: asset.path ? await signedImageUrl(ORIGINAL_IMAGES_BUCKET, asset.path) : null,
-      dataUrl: null,
-    })),
-  );
+  return signedByPath;
 }
 
 async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImageUrlMode: SignedImageUrlMode = "all"): Promise<Project> {
   const baseSettings = normalizeGraphSettings(row.settings);
-  const [originalImageUrl, processedImageUrl] = await Promise.all([
-    signedImageUrlMode === "none" ? Promise.resolve(null) : signedImageUrl(ORIGINAL_IMAGES_BUCKET, row.original_image_path),
-    signedImageUrlMode === "all" ? signedImageUrl(PROCESSED_IMAGES_BUCKET, row.processed_image_path) : Promise.resolve(null),
-  ]);
   const fallbackSourceImages = row.original_image_path
     ? [
         {
           id: "original",
           name: sourceNameFromPath(row.original_image_path),
           path: row.original_image_path,
-          url: originalImageUrl,
+          url: null,
           width: baseSettings.imageWidth,
           height: baseSettings.imageHeight,
           measurementUnit: baseSettings.measurementUnit,
@@ -694,13 +664,31 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
         },
       ]
     : [];
-  const sourceImages = await signedSourceImages(
-    baseSettings.sourceImages.length ? baseSettings.sourceImages : fallbackSourceImages,
-    signedImageUrlMode,
-    row.original_image_path,
-    originalImageUrl,
-  );
-  const clipartAssets = await signedClipartAssets(baseSettings.clipartAssets ?? [], signedImageUrlMode);
+  const unsignedSourceImages = baseSettings.sourceImages.length ? baseSettings.sourceImages : fallbackSourceImages;
+  const unsignedClipartAssets = baseSettings.clipartAssets ?? [];
+  const [originalSignedUrls, processedSignedUrls] = await Promise.all([
+    signedImageUrlMode === "none"
+      ? Promise.resolve(new Map<string, string | null>())
+      : signedUrlsForBucket(ORIGINAL_IMAGES_BUCKET, [
+          row.original_image_path,
+          ...unsignedSourceImages.map((source) => source.path),
+          ...unsignedClipartAssets.map((asset) => asset.path),
+        ]),
+    signedImageUrlMode === "all"
+      ? signedUrlsForBucket(PROCESSED_IMAGES_BUCKET, [row.processed_image_path])
+      : Promise.resolve(new Map<string, string | null>()),
+  ]);
+  const originalImageUrl = row.original_image_path ? originalSignedUrls.get(row.original_image_path) ?? null : null;
+  const processedImageUrl = row.processed_image_path ? processedSignedUrls.get(row.processed_image_path) ?? null : null;
+  const sourceImages = unsignedSourceImages.map(({ url: _url, ...source }) => ({
+    ...source,
+    url: source.path ? originalSignedUrls.get(source.path) ?? null : null,
+  }));
+  const clipartAssets = unsignedClipartAssets.map(({ url: _url, dataUrl: _dataUrl, ...asset }) => ({
+    ...asset,
+    url: asset.path ? originalSignedUrls.get(asset.path) ?? null : null,
+    dataUrl: null,
+  }));
   const settings = {
     ...baseSettings,
     sourceImages,
@@ -728,10 +716,38 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
   };
 }
 
-export async function getProjectSummaries(query?: string): Promise<ProjectSummary[]> {
+type ProjectSummaryPageOptions = {
+  query?: string;
+  cursor?: string;
+  pageSize?: number;
+};
+
+type ProjectSummaryCursor = {
+  updatedAt: string;
+  id: string;
+};
+
+function decodeProjectCursor(cursor?: string): ProjectSummaryCursor | null {
+  if (!cursor) return null;
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Partial<ProjectSummaryCursor>;
+    if (typeof value.updatedAt !== "string" || Number.isNaN(Date.parse(value.updatedAt))) return null;
+    if (typeof value.id !== "string" || !/^[0-9a-f-]{36}$/i.test(value.id)) return null;
+    return { updatedAt: value.updatedAt, id: value.id };
+  } catch {
+    return null;
+  }
+}
+
+function encodeProjectCursor(cursor: ProjectSummaryCursor) {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+export async function getProjectSummaries(options: ProjectSummaryPageOptions = {}) {
   const session = await requireSession();
   const supabase = tryGetSupabaseAdmin();
-  if (!supabase) return [];
+  if (!supabase) return { projects: [] as ProjectSummary[], nextCursor: null };
+  const pageSize = Math.max(1, Math.min(100, options.pageSize ?? 25));
 
   let request = supabase
     .from("projects")
@@ -739,17 +755,27 @@ export async function getProjectSummaries(query?: string): Promise<ProjectSummar
       "id, user_id, title, description, original_image_path, processed_image_path, width, height, pixel_size, grid_cell_size, color_count, created_at, updated_at",
     )
     .eq("user_id", session.userId)
-    .order("updated_at", { ascending: false });
+    .order("updated_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(pageSize + 1);
 
-  const normalizedQuery = query?.trim();
+  const normalizedQuery = options.query?.trim();
   if (normalizedQuery) {
     request = request.ilike("title", `%${normalizedQuery}%`);
+  }
+  const cursor = decodeProjectCursor(options.cursor);
+  if (cursor) {
+    request = request.or(
+      `updated_at.lt.${cursor.updatedAt},and(updated_at.eq.${cursor.updatedAt},id.lt.${cursor.id})`,
+    );
   }
 
   const { data, error } = await request;
   if (error) throw new Error(error.message);
 
-  const rows = (data ?? []) as Array<Omit<DbProject, "settings">>;
+  const allRows = (data ?? []) as Array<Omit<DbProject, "settings">>;
+  const hasMore = allRows.length > pageSize;
+  const rows = allRows.slice(0, pageSize);
   const ids = rows.map((row) => row.id);
   const paletteByProject = new Map<string, DbPalette[]>();
 
@@ -768,7 +794,7 @@ export async function getProjectSummaries(query?: string): Promise<ProjectSummar
     }
   }
 
-  return rows.map((row) => {
+  const projects = rows.map((row) => {
     const palettes = (paletteByProject.get(row.id) ?? []).map(mapPalette).sort((a, b) => a.sortOrder - b.sortOrder);
     return {
       id: row.id,
@@ -789,6 +815,11 @@ export async function getProjectSummaries(query?: string): Promise<ProjectSummar
       palettePreview: palettes.slice(0, 6),
     };
   });
+  const lastRow = rows.at(-1);
+  return {
+    projects,
+    nextCursor: hasMore && lastRow ? encodeProjectCursor({ updatedAt: lastRow.updated_at, id: lastRow.id }) : null,
+  };
 }
 
 export async function getProjectForCurrentUser(projectId: string) {
@@ -825,7 +856,7 @@ export async function assertProjectOwner(projectId: string) {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
     .from("projects")
-    .select("id, user_id, original_image_path, processed_image_path")
+    .select("id, user_id, title, description, original_image_path, processed_image_path, settings, width, height, pixel_size, grid_cell_size, color_count")
     .eq("id", projectId)
     .eq("user_id", session.userId)
     .maybeSingle();
@@ -835,8 +866,16 @@ export async function assertProjectOwner(projectId: string) {
   return data as {
     id: string;
     user_id: string;
+    title: string;
+    description: string | null;
     original_image_path: string | null;
     processed_image_path: string | null;
+    settings: StoredGraphSettings | null;
+    width: number;
+    height: number;
+    pixel_size: number;
+    grid_cell_size: number;
+    color_count: number;
   };
 }
 

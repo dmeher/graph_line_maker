@@ -20,16 +20,15 @@ const placeholderProjects = [
 ] as const;
 
 function PreviewStrip({ colors }: { colors: readonly string[] }) {
+  const colorStops = colors.map((color, index) => `${color} ${(index / colors.length) * 100}% ${((index + 1) / colors.length) * 100}%`).join(", ");
   return (
-    <div className="grid h-10 w-[148px] grid-cols-12 overflow-hidden rounded-sm border border-[#d7dde5] bg-white">
-      {Array.from({ length: 48 }).map((_, index) => (
-        <span
-          key={index}
-          className="border-r border-b border-white/30"
-          style={{ backgroundColor: colors[(index + Math.floor(index / 12)) % colors.length] }}
-        />
-      ))}
-    </div>
+    <div
+      className="h-10 w-[148px] overflow-hidden rounded-sm border border-[#d7dde5] bg-white"
+      style={{
+        backgroundImage: `linear-gradient(rgba(255,255,255,.22) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.22) 1px, transparent 1px), linear-gradient(90deg, ${colorStops})`,
+        backgroundSize: "12px 10px, 12px 10px, 100% 100%",
+      }}
+    />
   );
 }
 
@@ -47,10 +46,13 @@ function projectColors(project: ProjectSummary) {
   return project.palettePreview.length ? project.palettePreview.map((color) => color.hex) : ["#008c8f", "#111827", "#e5e7eb", "#f97316"];
 }
 
-export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ q?: string }> }) {
+export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ q?: string; cursor?: string }> }) {
   const params = await searchParams;
-  const projects = await getProjectSummaries(params.q);
-  const showingPlaceholders = projects.length === 0;
+  const { projects, nextCursor } = await getProjectSummaries({ query: params.q, cursor: params.cursor });
+  const showingPlaceholders = !params.q && !params.cursor && projects.length === 0;
+  const nextParams = new URLSearchParams();
+  if (params.q) nextParams.set("q", params.q);
+  if (nextCursor) nextParams.set("cursor", nextCursor);
 
   return (
     <div className="mock-card min-h-[calc(100dvh-96px)] overflow-hidden">
@@ -152,12 +154,11 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       </div>
 
       <div className="flex items-center justify-between border-t border-[#e8edf2] px-6 py-4 text-xs text-[#667085]">
-        <span>Showing 1 to {showingPlaceholders ? placeholderProjects.length : projects.length} of {showingPlaceholders ? placeholderProjects.length : projects.length} projects</span>
+        <span>Showing up to {showingPlaceholders ? placeholderProjects.length : projects.length} projects on this page</span>
         <div className="flex items-center gap-2">
-          <button className="mock-btn h-8 px-3 text-xs">&lt;</button>
-          <button className="mock-btn h-8 border-[#008c8f] px-3 text-xs text-[#008c8f]">1</button>
-          <button className="mock-btn h-8 px-3 text-xs">&gt;</button>
-          <button className="mock-btn h-8 px-3 text-xs">25 / page</button>
+          {params.cursor ? <Link href={params.q ? `/dashboard?q=${encodeURIComponent(params.q)}` : "/dashboard"} className="mock-btn h-8 px-3 text-xs">First page</Link> : null}
+          {nextCursor ? <Link href={`/dashboard?${nextParams.toString()}`} className="mock-btn h-8 px-3 text-xs">Next</Link> : null}
+          <span className="mock-btn h-8 px-3 text-xs">25 / page</span>
         </div>
       </div>
     </div>

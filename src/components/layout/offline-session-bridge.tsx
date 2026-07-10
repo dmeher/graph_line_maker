@@ -47,13 +47,14 @@ export function OfflineSessionBridge({
       userId: session.userId,
     };
 
-    navigator.serviceWorker.controller?.postMessage(message);
+    if (navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage(message);
+      return;
+    }
     navigator.serviceWorker.ready
-      .then((registration) => {
-        registration.active?.postMessage(message);
-      })
+      .then((registration) => registration.active?.postMessage(message))
       .catch(() => {});
-  });
+  }, [expiresAt, session, signature, token]);
 
   return null;
 }

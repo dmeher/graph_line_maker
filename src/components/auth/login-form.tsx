@@ -75,7 +75,6 @@ export function LoginForm() {
     }
 
     router.replace(payload.redirectTo || "/dashboard");
-    router.refresh();
   }
 
   return (

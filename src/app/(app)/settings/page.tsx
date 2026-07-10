@@ -1,4 +1,5 @@
 import { Edit3, Trash2, UserPlus } from "lucide-react";
+import Link from "next/link";
 import { getAppUsers, getCurrentSession } from "@/lib/auth/session";
 import { formatDateTime } from "@/lib/utils/format";
 import { updateAppUser, upsertAppUser } from "@/app/(app)/settings/actions";
@@ -16,10 +17,12 @@ const sampleUsers = [
   ["Arjun Nair", "arjun.nair@example.com", "Viewer", "Active", "May 3, 2025"],
 ];
 
-export default async function SettingsPage() {
+export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ cursor?: string }> }) {
+  const params = await searchParams;
   const session = await getCurrentSession();
-  const users = session?.role === "admin" ? await getAppUsers() : [];
-  const showingSamples = users.length === 0;
+  const userPage = session?.role === "admin" ? await getAppUsers(params.cursor) : { users: [], nextCursor: null };
+  const { users, nextCursor } = userPage;
+  const showingSamples = !params.cursor && users.length === 0;
 
   return (
     <div className="mock-card min-h-[calc(100dvh-96px)] overflow-hidden p-6">
@@ -146,12 +149,11 @@ export default async function SettingsPage() {
           </div>
 
           <div className="flex items-center justify-between border-t border-[#e8edf2] px-5 py-3 text-xs text-[#667085]">
-            <span>Showing 1 to {showingSamples ? sampleUsers.length : users.length} of {showingSamples ? sampleUsers.length : users.length} users</span>
+            <span>Showing up to {showingSamples ? sampleUsers.length : users.length} users on this page</span>
             <div className="flex gap-2">
-              <button className="mock-btn h-8 px-3 text-xs">&lt;</button>
-              <button className="mock-btn h-8 border-[#008c8f] px-3 text-xs text-[#008c8f]">1</button>
-              <button className="mock-btn h-8 px-3 text-xs">&gt;</button>
-              <button className="mock-btn h-8 px-3 text-xs">25 / page</button>
+              {params.cursor ? <Link href="/settings" className="mock-btn h-8 px-3 text-xs">First page</Link> : null}
+              {nextCursor ? <Link href={`/settings?cursor=${encodeURIComponent(nextCursor)}`} className="mock-btn h-8 px-3 text-xs">Next</Link> : null}
+              <span className="mock-btn h-8 px-3 text-xs">25 / page</span>
             </div>
           </div>
         </section>

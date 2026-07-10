@@ -6,6 +6,7 @@ import { PROCESSED_IMAGES_BUCKET, ORIGINAL_IMAGES_BUCKET } from "@/lib/constants
 import { requireSession } from "@/lib/auth/session";
 import {
   GRAPH_LINE_LAYER_KEYS,
+  GRAPH_MAJOR_CELL_PIXELS,
   MAX_IMAGE_LINE_THICKNESS,
   MAX_IMAGE_PADDING_PIXELS,
   MAX_SOURCE_FILL_MIN_STROKE_PIXELS,
@@ -21,10 +22,11 @@ import {
   PRINT_VERTICAL_ALIGNMENT_KEYS,
   TRANSPARENT_FILL_COLOR,
 } from "@/lib/graph-paper";
-import { assertProjectOwner, defaultGraphSettings, imagePath, normalizeGraphSettings, replaceProjectPalettes } from "@/lib/projects";
+import { MAX_CANVAS_DIMENSION, inspectCanvasBudget } from "@/lib/canvas/performance-limits";
+import { assertProjectOwner, clipartImagePath, imagePath, normalizeGraphSettings, sourceImagePath } from "@/lib/projects";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
+import { mapWithConcurrency } from "@/lib/utils/concurrency";
 
-const MAX_CANVAS_DIMENSION = 24000;
 const hexSchema = z.string().regex(/^#[0-9A-Fa-f]{6}$/);
 const fillColorSchema = z.union([hexSchema, z.literal(TRANSPARENT_FILL_COLOR)]);
 const rotationDegreesSchema = z
@@ -171,6 +173,18 @@ const graphSettingsSchema = z.object({
   blackAndWhite: z.boolean(),
   limitedColorMode: z.boolean(),
   maxColors: z.union([z.literal(2), z.literal(4), z.literal(8), z.literal(16)]),
+}).superRefine((settings, context) => {
+  const visibleLayers =
+    settings.sourceImages.filter((source) => source.visible).length +
+    settings.clipartImages.filter((clipart) => clipart.visible).length;
+  const budget = inspectCanvasBudget(
+    settings.graphWidth * GRAPH_MAJOR_CELL_PIXELS,
+    settings.graphHeight * GRAPH_MAJOR_CELL_PIXELS,
+    Math.max(1, visibleLayers),
+  );
+  if (!budget.allowed) {
+    context.addIssue({ code: "custom", path: ["graphWidth"], message: budget.reason || "Canvas exceeds the safe processing budget." });
+  }
 });
 
 const paletteSchema = z.object({
@@ -195,7 +209,6 @@ const saveProjectSchema = z.object({
 export async function saveProjectState(input: z.infer<typeof saveProjectSchema>) {
   const session = await requireSession();
   const payload = saveProjectSchema.parse(input);
-  await assertProjectOwner(payload.projectId);
   const normalizedSettings = normalizeGraphSettings({
     ...payload.settings,
     lineColor: payload.settings.outlineColor,
@@ -207,24 +220,28 @@ export async function saveProjectState(input: z.infer<typeof saveProjectSchema>)
   });
 
   const supabase = getSupabaseAdmin();
-  const { error } = await supabase
-    .from("projects")
-    .update({
-      title: payload.title,
-      description: payload.description?.trim() || null,
-      settings: normalizedSettings,
-      width: normalizedSettings.outputWidth,
-      height: normalizedSettings.outputHeight,
-      pixel_size: normalizedSettings.cellWidth,
-      grid_cell_size: normalizedSettings.cellWidth,
-      color_count: payload.colorCount,
-    })
-    .eq("id", payload.projectId)
-    .eq("user_id", session.userId);
+  const { data: saved, error } = await supabase.rpc("save_project_state", {
+    p_project_id: payload.projectId,
+    p_user_id: session.userId,
+    p_title: payload.title,
+    p_description: payload.description?.trim() || "",
+    p_settings: normalizedSettings,
+    p_width: normalizedSettings.outputWidth,
+    p_height: normalizedSettings.outputHeight,
+    p_pixel_size: normalizedSettings.cellWidth,
+    p_grid_cell_size: normalizedSettings.cellWidth,
+    p_color_count: payload.colorCount,
+    p_palettes: payload.palettes.map((color, index) => ({
+      name: color.name || `Color ${index + 1}`,
+      hex: color.hex,
+      locked: color.locked,
+      cell_count: color.cellCount,
+      sort_order: index,
+    })),
+  });
 
   if (error) return { ok: false, message: error.message };
-
-  await replaceProjectPalettes(payload.projectId, payload.palettes);
+  if (!saved) return { ok: false, message: "Project not found." };
   revalidatePath(`/projects/${payload.projectId}`);
   revalidatePath("/dashboard");
   return { ok: true, message: "Project saved." };
@@ -237,9 +254,19 @@ export async function deleteProject(formData: FormData) {
 
   const owner = await assertProjectOwner(projectId);
   const supabase = getSupabaseAdmin();
+  const settings = normalizeGraphSettings(owner.settings);
 
   const removals: Promise<unknown>[] = [];
-  if (owner.original_image_path) removals.push(supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove([owner.original_image_path]));
+  const originalPaths = Array.from(
+    new Set(
+      [
+        owner.original_image_path,
+        ...settings.sourceImages.map((source) => source.path),
+        ...settings.clipartAssets.map((asset) => asset.path),
+      ].filter((path): path is string => Boolean(path)),
+    ),
+  );
+  if (originalPaths.length) removals.push(supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove(originalPaths));
   if (owner.processed_image_path) removals.push(supabase.storage.from(PROCESSED_IMAGES_BUCKET).remove([owner.processed_image_path]));
   await Promise.all(removals);
 
@@ -256,48 +283,82 @@ export async function duplicateProject(formData: FormData) {
   const project = await assertProjectOwner(projectId);
   const supabase = getSupabaseAdmin();
 
-  const { data: source, error: sourceError } = await supabase
-    .from("projects")
-    .select("title, description, settings, width, height, pixel_size, grid_cell_size, color_count")
-    .eq("id", projectId)
-    .eq("user_id", session.userId)
-    .single();
-
-  if (sourceError) throw new Error(sourceError.message);
-
   const { data: duplicate, error } = await supabase
     .from("projects")
     .insert({
       user_id: session.userId,
-      title: `${source.title} Copy`,
-      description: source.description,
-      settings: source.settings ?? defaultGraphSettings,
-      width: source.width,
-      height: source.height,
-      pixel_size: source.pixel_size,
-      grid_cell_size: source.grid_cell_size,
-      color_count: source.color_count,
+      title: `${project.title} Copy`,
+      description: project.description,
+      settings: project.settings,
+      width: project.width,
+      height: project.height,
+      pixel_size: project.pixel_size,
+      grid_cell_size: project.grid_cell_size,
+      color_count: project.color_count,
     })
     .select("id")
     .single();
 
   if (error) throw new Error(error.message);
 
+  const settings = normalizeGraphSettings(project.settings);
+  const copyTargets = new Map<string, string>();
   if (project.original_image_path) {
-    const extension = project.original_image_path.split(".").pop() || "png";
-    const newPath = imagePath(session.userId, duplicate.id, "original", extension);
-    const { error: copyError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).copy(project.original_image_path, newPath);
-    if (!copyError) {
-      await supabase.from("projects").update({ original_image_path: newPath }).eq("id", duplicate.id);
-    }
+    copyTargets.set(
+      project.original_image_path,
+      imagePath(session.userId, duplicate.id, "original", project.original_image_path.split(".").pop() || "png"),
+    );
+  }
+  for (const source of settings.sourceImages) {
+    if (!source.path || copyTargets.has(source.path)) continue;
+    copyTargets.set(
+      source.path,
+      sourceImagePath(session.userId, duplicate.id, source.id, source.path.split(".").pop() || "png"),
+    );
+  }
+  for (const asset of settings.clipartAssets) {
+    if (!asset.path || copyTargets.has(asset.path)) continue;
+    copyTargets.set(
+      asset.path,
+      clipartImagePath(session.userId, duplicate.id, asset.id, asset.path.split(".").pop() || "png"),
+    );
   }
 
-  if (project.processed_image_path) {
-    const newPath = imagePath(session.userId, duplicate.id, "processed", "png");
-    const { error: copyError } = await supabase.storage.from(PROCESSED_IMAGES_BUCKET).copy(project.processed_image_path, newPath);
-    if (!copyError) {
-      await supabase.from("projects").update({ processed_image_path: newPath }).eq("id", duplicate.id);
-    }
+  const copiedPaths: string[] = [];
+  try {
+    await mapWithConcurrency(Array.from(copyTargets.entries()), 2, async ([sourcePath, targetPath]) => {
+      const { error: copyError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).copy(sourcePath, targetPath);
+      if (copyError) throw new Error(copyError.message);
+      copiedPaths.push(targetPath);
+    });
+    const duplicateSettings = normalizeGraphSettings({
+      ...settings,
+      sourceImages: settings.sourceImages.map(({ url: _url, ...source }) => ({
+        ...source,
+        path: source.path ? copyTargets.get(source.path) ?? null : null,
+        url: null,
+      })),
+      clipartAssets: settings.clipartAssets.map(({ url: _url, dataUrl: _dataUrl, ...asset }) => ({
+        ...asset,
+        path: asset.path ? copyTargets.get(asset.path) ?? null : null,
+        url: null,
+        dataUrl: null,
+      })),
+    });
+    const { error: updateError } = await supabase
+      .from("projects")
+      .update({
+        original_image_path: project.original_image_path ? copyTargets.get(project.original_image_path) ?? null : null,
+        processed_image_path: null,
+        settings: duplicateSettings,
+      })
+      .eq("id", duplicate.id)
+      .eq("user_id", session.userId);
+    if (updateError) throw new Error(updateError.message);
+  } catch (copyError) {
+    if (copiedPaths.length) await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove(copiedPaths);
+    await supabase.from("projects").delete().eq("id", duplicate.id).eq("user_id", session.userId);
+    throw copyError;
   }
 
   const { data: palettes, error: paletteError } = await supabase

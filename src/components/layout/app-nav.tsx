@@ -28,7 +28,7 @@ export function AppNav({ variant }: { variant: "desktop" | "mobile" }) {
               <Link
                 key={item.href}
                 href={item.href}
-                prefetch={false}
+                prefetch={item.href === "/projects/new" ? false : null}
                 className={`flex h-10 items-center gap-3 rounded-md px-3 text-[13px] font-medium transition ${
                   active ? "bg-[#dff3f2] text-[#007f83]" : "text-[#344054] hover:bg-[#f2f4f7]"
                 }`}
@@ -71,7 +71,7 @@ export function AppNav({ variant }: { variant: "desktop" | "mobile" }) {
         );
 
         return (
-          <Link key={item.href} href={item.href} prefetch={false} className={className}>
+          <Link key={item.href} href={item.href} prefetch={item.href === "/projects/new" ? false : null} className={className}>
             {content}
           </Link>
         );

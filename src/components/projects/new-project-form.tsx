@@ -23,8 +23,18 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { fullCrop, type CropPixels } from "@/lib/canvas/crop";
-import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
+import {
+  ALLOWED_IMAGE_LABEL,
+  IMAGE_ACCEPT,
+  ORIGINAL_IMAGES_BUCKET,
+  MAX_PROJECT_UPLOAD_FILES,
+  MAX_PROJECT_UPLOAD_TOTAL_BYTES,
+  MAX_UPLOAD_BYTES,
+  isAllowedImageFile,
+  isPdfFile,
+} from "@/lib/constants";
 import { cropQueueItemId, cropQueueStatus, shouldCropQueuedFile } from "@/lib/projects/crop-queue";
+import { mapWithConcurrency } from "@/lib/utils/concurrency";
 import { bytesToSize } from "@/lib/utils/format";
 
 const ManualCropper = dynamic(() => import("@/components/projects/manual-cropper").then((module) => module.ManualCropper), {
@@ -98,15 +108,28 @@ function canvasToPngUrl(canvas: HTMLCanvasElement) {
   });
 }
 
-async function pdfPreviewUrl(file: File) {
-  const { renderPdfFirstPageToCanvas } = await import("@/lib/canvas/pdf");
-  const { canvas } = await renderPdfFirstPageToCanvas(file);
-  return canvasToPngUrl(canvas);
-}
+async function prepareFilePreview(file: File) {
+  if (isPdfFile(file)) {
+    const { renderPdfFirstPageToCanvas } = await import("@/lib/canvas/pdf");
+    const { canvas } = await renderPdfFirstPageToCanvas(file);
+    return {
+      previewUrl: await canvasToPngUrl(canvas),
+      size: { width: canvas.width, height: canvas.height },
+    };
+  }
 
-async function previewUrlFor(file: File) {
-  if (isPdfFile(file)) return pdfPreviewUrl(file);
-  return URL.createObjectURL(file);
+  const previewUrl = URL.createObjectURL(file);
+  try {
+    if (file.type === "image/svg+xml") {
+      const svgSize = readSvgSize(await file.text());
+      if (svgSize) return { previewUrl, size: svgSize };
+    }
+    const image = await loadImage(previewUrl);
+    return { previewUrl, size: { width: image.naturalWidth, height: image.naturalHeight } };
+  } catch (error) {
+    URL.revokeObjectURL(previewUrl);
+    throw error;
+  }
 }
 
 async function cropFile(file: File, imageUrl: string, cropPixels: CropPixels | null) {
@@ -332,7 +355,7 @@ export function NewProjectForm() {
 
     try {
       const rotatedFile = await rotateFile(item.file, previewUrlForRotation, rotationDegrees);
-      const [previewUrl, size] = await Promise.all([previewUrlFor(rotatedFile), readImageSize(rotatedFile)]);
+      const { previewUrl, size } = await prepareFilePreview(rotatedFile);
       setCropItems((current) =>
         current.map((currentItem) => {
           if (currentItem.id !== item.id) return currentItem;
@@ -383,16 +406,18 @@ export function NewProjectForm() {
     if (selectedFiles[0]) setTitle(selectedFiles[0].name.replace(/\.[^.]+$/, ""));
     if (!baseItems.length) return;
 
-    void Promise.all(
-      baseItems.map(async (item) => {
+    void mapWithConcurrency(
+      baseItems,
+      2,
+      async (item) => {
         if (item.issue) return { ...item, previewPending: false };
         try {
-          const [previewUrl, size] = await Promise.all([previewUrlFor(item.file), readImageSize(item.file)]);
+          const { previewUrl, size } = await prepareFilePreview(item.file);
           return { ...item, previewUrl, width: size.width, height: size.height, previewPending: false };
         } catch {
           return { ...item, previewPending: false, issue: isPdfFile(item.file) ? "Unable to render the PDF preview." : "Unable to prepare this file for crop review." };
         }
-      }),
+      },
     ).then((hydratedItems) => {
       if (previewTokenRef.current !== previewToken) {
         hydratedItems.forEach(revokeCropItem);
@@ -415,24 +440,69 @@ export function NewProjectForm() {
     }
     setPending(true);
     setMessage(null);
+    let pendingProject: { projectId: string; paths: string[] } | null = null;
 
     try {
-      const uploadFiles = await Promise.all(
-        cropItems.map((item) => (shouldCropQueuedFile(item.crop, item.previewUrl) ? cropFile(item.file, item.previewUrl as string, item.crop) : item.file)),
+      const uploadFiles = await mapWithConcurrency(
+        cropItems,
+        2,
+        (item) => Promise.resolve(shouldCropQueuedFile(item.crop, item.previewUrl) ? cropFile(item.file, item.previewUrl as string, item.crop) : item.file),
       );
-      const size = await readImageSize(uploadFiles[0]);
-      const formData = new FormData();
-      formData.set("title", title);
-      formData.set("description", description);
-      formData.set("width", String(size.width));
-      formData.set("height", String(size.height));
-      for (const uploadFile of uploadFiles) formData.append("files", uploadFile);
+      const uploadBytes = uploadFiles.reduce((total, file) => total + file.size, 0);
+      if (uploadBytes > MAX_PROJECT_UPLOAD_TOTAL_BYTES) {
+        throw new Error(`Combined upload must be ${bytesToSize(MAX_PROJECT_UPLOAD_TOTAL_BYTES)} or smaller.`);
+      }
+      const prepareResponse = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title,
+          description,
+          files: uploadFiles.map((file) => ({ name: file.name, type: file.type, size: file.size })),
+        }),
+      });
+      const prepared = await prepareResponse.json().catch(() => ({}));
+      if (!prepareResponse.ok || !prepared.projectId || !Array.isArray(prepared.uploads)) {
+        throw new Error(prepared.message || "Unable to prepare project upload.");
+      }
+      pendingProject = { projectId: prepared.projectId, paths: prepared.uploads.map((upload: { path: string }) => upload.path) };
+      const { getSupabaseBrowser } = await import("@/lib/supabase/browser");
+      const supabase = getSupabaseBrowser();
+      await mapWithConcurrency(prepared.uploads, 2, async (upload: { path: string; token: string }, index) => {
+        const file = uploadFiles[index];
+        const { error } = await supabase.storage
+          .from(ORIGINAL_IMAGES_BUCKET)
+          .uploadToSignedUrl(upload.path, upload.token, file, {
+            cacheControl: "3600",
+            contentType: file.type || undefined,
+          });
+        if (error) throw new Error(error.message);
+      });
 
-      const response = await fetch("/api/projects", { method: "POST", body: formData });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.message || "Unable to create project.");
-      router.push(payload.redirectTo || `/projects/${payload.projectId}`);
+      const finalizeResponse = await fetch("/api/projects", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: prepared.projectId,
+          uploads: prepared.uploads.map((upload: { id: string; name: string; path: string }) => ({
+            id: upload.id,
+            name: upload.name,
+            path: upload.path,
+          })),
+        }),
+      });
+      const finalized = await finalizeResponse.json().catch(() => ({}));
+      if (!finalizeResponse.ok) throw new Error(finalized.message || "Unable to finalize project.");
+      pendingProject = null;
+      router.push(finalized.redirectTo || `/projects/${prepared.projectId}`);
     } catch (error) {
+      if (pendingProject) {
+        await fetch("/api/projects", {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: pendingProject.projectId, paths: pendingProject.paths }),
+        }).catch(() => {});
+      }
       setMessage(error instanceof Error ? error.message : "Unable to create project.");
       setPending(false);
     }

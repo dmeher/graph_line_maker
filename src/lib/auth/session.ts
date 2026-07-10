@@ -2,10 +2,13 @@ import "server-only";
 
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+import { cache } from "react";
 import { BOOTSTRAP_ADMIN_EMAIL, GRAPH_PIXEL_SESSION_COOKIE } from "@/lib/constants";
+import { getDevelopmentAuthBypassConfig } from "@/lib/auth/dev-bypass";
 import { normalizeEmail, signPayload, verifySignedPayload } from "@/lib/auth/security";
 import { tryGetSupabaseAdmin } from "@/lib/supabase/server";
 import type { AppRole, AppUser, CurrentSession } from "@/lib/types";
+import { displayNameFromEmail } from "@/lib/utils/format";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const OFFLINE_SESSION_KIND = "offline-session";
@@ -104,7 +107,39 @@ export async function getActiveUserByEmail(email: string) {
   return data ? mapUser(data as DbUser) : null;
 }
 
-export async function getCurrentSession(): Promise<CurrentSession | null> {
+async function getDevelopmentBypassSession(): Promise<CurrentSession | null> {
+  const config = getDevelopmentAuthBypassConfig(BOOTSTRAP_ADMIN_EMAIL);
+  if (!config.enabled) return null;
+
+  const supabase = tryGetSupabaseAdmin();
+  if (supabase) {
+    const user = await getActiveUserByEmail(config.email);
+    if (!user) {
+      throw new Error(
+        `Development auth bypass user ${config.email} is not an active app user. Set GRAPH_PIXEL_DEV_USER_EMAIL to an active app_users email.`,
+      );
+    }
+
+    return {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      displayName: user.displayName,
+    };
+  }
+
+  return {
+    userId: "00000000-0000-4000-8000-000000000001",
+    email: config.email,
+    role: isBootstrapAdmin(config.email) ? "admin" : "member",
+    displayName: displayNameFromEmail(config.email),
+  };
+}
+
+const resolveCurrentSession = cache(async (): Promise<CurrentSession | null> => {
+  const developmentSession = await getDevelopmentBypassSession();
+  if (developmentSession) return developmentSession;
+
   const cookieStore = await cookies();
   const payload = parseSessionToken(cookieStore.get(GRAPH_PIXEL_SESSION_COOKIE)?.value);
   if (!payload) return null;
@@ -129,6 +164,10 @@ export async function getCurrentSession(): Promise<CurrentSession | null> {
     role: user.role,
     displayName: user.display_name,
   };
+});
+
+export async function getCurrentSession(): Promise<CurrentSession | null> {
+  return resolveCurrentSession();
 }
 
 export async function requireSession() {
@@ -143,19 +182,28 @@ export async function requireAdmin() {
   return session;
 }
 
-export async function getAppUsers() {
+export async function getAppUsers(cursor?: string, pageSize = 25) {
   await requireAdmin();
   const supabase = tryGetSupabaseAdmin();
-  if (!supabase) return [];
+  if (!supabase) return { users: [], nextCursor: null };
 
-  const { data, error } = await supabase
+  const limit = Math.max(1, Math.min(100, pageSize));
+  let request = supabase
     .from("app_users")
     .select("id, email, display_name, role, status, invited_by_email, last_login_at, created_at, updated_at")
-    .order("role", { ascending: true })
-    .order("email", { ascending: true });
+    .order("email", { ascending: true })
+    .limit(limit + 1);
+  if (cursor) request = request.gt("email", normalizeEmail(cursor));
+  const { data, error } = await request;
 
   if (error) throw new Error(error.message);
-  return ((data ?? []) as DbUser[]).map(mapUser);
+  const rows = (data ?? []) as DbUser[];
+  const hasMore = rows.length > limit;
+  const pageRows = rows.slice(0, limit);
+  return {
+    users: pageRows.map(mapUser),
+    nextCursor: hasMore ? pageRows.at(-1)?.email ?? null : null,
+  };
 }
 
 export function setSessionCookie(response: NextResponse, user: Pick<AppUser, "id" | "email" | "role">) {

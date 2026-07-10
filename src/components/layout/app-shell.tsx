@@ -61,7 +61,7 @@ export function AppShell({
             >
               <Menu size={22} strokeWidth={1.8} />
             </button>
-            <Link href="/dashboard" prefetch={false} aria-label="Graph Pixel Maker dashboard" className="[--brand-text:#101828]">
+            <Link href="/dashboard" aria-label="Graph Pixel Maker dashboard" className="[--brand-text:#101828]">
               <BrandMark />
             </Link>
           </div>

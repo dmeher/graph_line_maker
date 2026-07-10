@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useTransition, memo, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition, type CSSProperties, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import Link from "next/link";
@@ -12,7 +12,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Crop,
   Download,
   Eye,
   EyeOff,
@@ -42,8 +41,6 @@ import {
   Trash2,
   Unlock,
   Undo2,
-  Upload,
-  Search,
   X,
   ZoomIn,
   ZoomOut,
@@ -56,9 +53,10 @@ import { saveProjectState } from "@/app/(app)/projects/actions";
 import { LogoMark } from "@/components/layout/brand-mark";
 import { cropCanvasToFile, fullCrop, type CropPixels } from "@/lib/canvas/crop";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
+import { clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
 import { pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
 import { findContentBounds, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
-import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
+import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_UPLOAD_BYTES, ORIGINAL_IMAGES_BUCKET, isAllowedImageFile, isPdfFile } from "@/lib/constants";
 import {
   createEditorSessionDraft,
   hasEditorSessionDraft,
@@ -94,7 +92,6 @@ import {
   DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
   DEFAULT_SOURCE_FILL_THRESHOLD,
   DEFAULT_STROKE_GAP_CLOSE_PIXELS,
-  GRAPH_LINE_LAYER_KEYS,
   GRAPH_MAJOR_CELL_PIXELS,
   MAX_IMAGE_LINE_THICKNESS,
   MAX_SOURCE_FILL_MIN_STROKE_PIXELS,
@@ -105,11 +102,9 @@ import {
   MIN_SOURCE_FILL_THRESHOLD,
   MIN_STROKE_GAP_CLOSE_PIXELS,
   PRESET_GRAPH_COLORS,
-  PRESET_GRAPH_LINE_COLORS,
   PRINT_HORIZONTAL_ALIGNMENT_KEYS,
   PRINT_ORIENTATION_KEYS,
   PRINT_PAPER_SIZES,
-  PRINT_PAPER_SIZE_KEYS,
   PRINT_VERTICAL_ALIGNMENT_KEYS,
   TRANSPARENT_FILL_COLOR,
   clampImageLineThickness,
@@ -128,7 +123,18 @@ import {
 import type { GraphCellLineSide, GraphCellPaint, GraphClipartAsset, GraphClipartImage, GraphSettings, GraphShapeDrawing, GraphShapeKind, GraphSourceImage, PaletteColor, Project } from "@/lib/types";
 import { createDebouncedAction } from "@/lib/utils/debounce";
 import { bytesToSize } from "@/lib/utils/format";
-import { InspectorCheckbox, InspectorColorControl, InspectorGroup, InspectorRow, InspectorSelect, inspectorControlClass } from "./inspector-controls";
+import { InspectorPanel } from "./inspector-panel";
+import { ColorPresetField, NumberField, ShapePreviewSvg } from "./inspector/inspector-fields";
+import {
+  CELL_LINE_SIDE_KEYS,
+  CELL_LINE_SIDE_LABELS,
+  GENERATED_SHAPE_KIND_KEYS,
+  GRAPH_SHAPE_KIND_KEYS,
+  GRAPH_SHAPE_KIND_LABELS,
+  MAX_CANVAS_DIMENSION,
+  type GeneratedShapeKind,
+  type ShapeFillMode,
+} from "./inspector/inspector-constants";
 
 type MobileTab = "source" | "canvas" | "controls";
 type InspectorTab = "graph" | "source" | "draw" | "palette";
@@ -139,8 +145,7 @@ type FloatingPalette = { regionId: string; x: number; y: number } | null;
 type DrawingTool = "image" | "cell" | "shape";
 type CanvasTool = "pointer" | "hand";
 type DrawingLayerKey = `cell:${string}` | `shape:${string}` | `clipart:${string}`;
-type GeneratedShapeKind = Extract<GraphShapeKind, "square" | "rectangle" | "circle" | "oval" | "half-circle">;
-type ShapeFillMode = "outline" | "filled";
+
 type LayerChoice = {
   key: string;
   type: "source" | "shape" | "clipart";
@@ -174,11 +179,6 @@ type PanelResizeState = {
 };
 const SOURCE_RESIZE_HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
 type SourceResizeHandle = (typeof SOURCE_RESIZE_HANDLES)[number];
-const GENERATED_SHAPE_KIND_KEYS: GeneratedShapeKind[] = ["square", "rectangle", "circle", "oval", "half-circle"];
-const GENERATED_SHAPE_FILL_MODE_LABELS: Record<ShapeFillMode, string> = {
-  outline: "Outline",
-  filled: "Filled",
-};
 type DragState = {
   kind: "viewport" | "pan" | "source" | "shape" | "clipart" | "resize-source" | "resize-shape" | "cell-paint" | "shape-draw";
   pointerId: number;
@@ -219,6 +219,7 @@ type UploadedSourceImage = {
   id: string;
   name: string;
   path: string;
+  url?: string | null;
 };
 type SourceImagesUploadResponse = {
   images?: unknown;
@@ -251,58 +252,14 @@ const ManualCropper = dynamic(() => import("@/components/projects/manual-cropper
   ),
 });
 
-const MAX_CANVAS_DIMENSION = 24000;
 const MAX_SETTINGS_HISTORY = 80;
+const MAX_SETTINGS_HISTORY_ESTIMATED_BYTES = 64 * 1024 * 1024;
 const MIN_SIDE_PANEL_WIDTH = 280;
 const MAX_SIDE_PANEL_WIDTH = 560;
 const PREVIEW_PROCESSING_DEBOUNCE_MS = 250;
+const MAX_LAYER_CANVAS_CACHE_BYTES = 128 * 1024 * 1024;
 const COPY_OFFSET_CELLS = 0.5;
-const CLIPART_ACCEPT = "image/png,image/jpeg,image/webp,image/svg+xml,.svg";
 const MAX_CLIPART_UPLOAD_BYTES = 6 * 1024 * 1024;
-const CELL_LINE_SIDE_KEYS: GraphCellLineSide[] = ["top", "right", "bottom", "left"];
-const GRAPH_SHAPE_KIND_KEYS: GraphShapeKind[] = ["square", "rectangle", "circle", "oval", "half-circle", "line", "arrow"];
-const CELL_LINE_SIDE_LABELS: Record<GraphCellLineSide, string> = {
-  top: "Top",
-  right: "Right",
-  bottom: "Bottom",
-  left: "Left",
-};
-const GRAPH_SHAPE_KIND_LABELS: Record<GraphShapeKind, string> = {
-  square: "Square",
-  rectangle: "Rectangle",
-  circle: "Circle",
-  oval: "Oval",
-  "half-circle": "Half circle",
-  line: "Line",
-  arrow: "Arrow",
-};
-const PRINT_ORIENTATION_LABELS: Record<GraphSettings["printOrientation"], string> = {
-  auto: "Auto",
-  portrait: "Portrait",
-  landscape: "Landscape",
-};
-const PRINT_HORIZONTAL_ALIGNMENT_LABELS: Record<GraphSettings["printHorizontalAlignment"], string> = {
-  left: "Left",
-  center: "Center",
-  right: "Right",
-};
-const PRINT_VERTICAL_ALIGNMENT_LABELS: Record<GraphSettings["printVerticalAlignment"], string> = {
-  top: "Top",
-  center: "Center",
-  bottom: "Bottom",
-};
-const GRAPH_LINE_LAYER_LABELS: Record<GraphSettings["gridLineLayer"], string> = {
-  front: "Front",
-  back: "Back",
-};
-const GRID_NUMBER_PLACEMENT_LABELS: Record<GraphSettings["gridNumberPlacement"], string> = {
-  inside: "Inside",
-  outside: "Outside",
-};
-const MEASUREMENT_UNIT_LABELS: Record<GraphSettings["measurementUnit"], string> = {
-  cm: "CM",
-  in: "IN",
-};
 const CM_PER_INCH = 2.54;
 
 function slug(value: string) {
@@ -338,6 +295,25 @@ function buildProcessingSignature(settings: GraphSettings) {
     settings.imageHeight,
     settings.imageOffsetX ?? 0,
     settings.imageOffsetY ?? 0,
+    settings.backgroundColor,
+    settings.outlineColor,
+    settings.fillColor,
+    settings.imageLineThickness,
+    settings.sourceFillThreshold,
+    settings.sourceFillMinStrokePixels,
+    settings.strokeGapClosePixels,
+    settings.gridLineColor,
+    settings.gridLineLayer,
+    settings.gridLineThickness,
+    settings.showBorder,
+    settings.transparentBackground,
+    settings.showNumbers,
+    settings.gridNumberPlacement,
+    settings.majorGridEvery,
+    Object.entries(settings.fillRegions)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([id, color]) => `${id}:${color}`)
+      .join("|"),
     settings.sourceImages
       .map(
         (source) =>
@@ -390,6 +366,18 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item
   return results;
 }
 
+function trimCanvasCache(cache: Map<string, HTMLCanvasElement>, liveKeys: Set<string>) {
+  for (const key of cache.keys()) {
+    if (!liveKeys.has(key)) cache.delete(key);
+  }
+  let bytes = Array.from(cache.values()).reduce((total, canvas) => total + canvas.width * canvas.height * 4, 0);
+  for (const [key, canvas] of cache) {
+    if (bytes <= MAX_LAYER_CANVAS_CACHE_BYTES) break;
+    cache.delete(key);
+    bytes -= canvas.width * canvas.height * 4;
+  }
+}
+
 function clampImageOffset(value: number) {
   return Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(value)));
 }
@@ -397,6 +385,16 @@ function clampImageOffset(value: number) {
 function clampSidePanelWidth(value: number) {
   const viewportLimit = typeof window === "undefined" ? MAX_SIDE_PANEL_WIDTH : Math.max(MIN_SIDE_PANEL_WIDTH, Math.min(MAX_SIDE_PANEL_WIDTH, window.innerWidth * 0.36));
   return Math.round(Math.max(MIN_SIDE_PANEL_WIDTH, Math.min(viewportLimit, value)));
+}
+
+function safeCanvasSide(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return 1;
+  return Math.max(1, Math.round(numeric));
+}
+
+function isDrawableCanvas(canvas: HTMLCanvasElement | null | undefined): canvas is HTMLCanvasElement {
+  return Boolean(canvas && Number.isFinite(canvas.width) && Number.isFinite(canvas.height) && canvas.width > 0 && canvas.height > 0);
 }
 
 function roundCm(value: number) {
@@ -661,338 +659,6 @@ function normalizeClipartImagesForEditor(
     .slice(0, 500);
 }
 
-const NumberField = memo(function NumberField({
-  label,
-  value,
-  min,
-  max,
-  step = 1,
-  allowDecimalInput = false,
-  wholeStep = false,
-  disabled = false,
-  hideLabel = false,
-  wrapperClassName,
-  inputClassName,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step?: number;
-  allowDecimalInput?: boolean;
-  wholeStep?: boolean;
-  disabled?: boolean;
-  hideLabel?: boolean;
-  wrapperClassName?: string;
-  inputClassName?: string;
-  onChange: (value: number) => void;
-}) {
-  const [draftValue, setDraftValue] = useState(() => String(value));
-  const [isFocused, setIsFocused] = useState(false);
-
-  useEffect(() => {
-    setDraftValue(String(value));
-  }, [value]);
-
-  function parseDraft(nextValue: string) {
-    const trimmed = nextValue.trim();
-    if (!trimmed || trimmed === "-" || trimmed === "." || trimmed === "-.") return null;
-    const parsed = Number(trimmed);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  function commitDraft(nextValue = draftValue) {
-    const parsed = parseDraft(nextValue);
-    if (parsed === null) {
-      setDraftValue(String(value));
-      return;
-    }
-
-    const clamped = Math.max(min, Math.min(max, parsed));
-    onChange(clamped);
-    setDraftValue(String(clamped));
-  }
-
-  function normalizeSteppedValue(parsed: number) {
-    if (!wholeStep || step < 1) return parsed;
-    const delta = parsed - value;
-    if (Math.abs(Math.abs(delta) - step) > 0.000001) return parsed;
-    const stepped =
-      delta > 0
-        ? Number.isInteger(value)
-          ? value + step
-          : Math.ceil(value)
-        : Number.isInteger(value)
-          ? value - step
-          : Math.floor(value);
-    return Math.max(min, Math.min(max, stepped));
-  }
-
-  return (
-    <label className={wrapperClassName ?? "grid min-w-0 gap-1.5"}>
-      <span className={hideLabel ? "sr-only" : "text-xs font-semibold text-slate-500"}>{label}</span>
-      <input
-        type="number"
-        inputMode={allowDecimalInput || step < 1 ? "decimal" : "numeric"}
-        step={step}
-        value={draftValue}
-        disabled={disabled}
-        onFocus={() => setIsFocused(true)}
-        onBlur={() => {
-          setIsFocused(false);
-          commitDraft();
-        }}
-        onChange={(event) => {
-          const nextValue = event.target.value;
-          const parsed = parseDraft(nextValue);
-          setDraftValue(nextValue);
-          if (parsed === null) return;
-          const clamped = Math.max(min, Math.min(max, parsed));
-          const normalized = normalizeSteppedValue(clamped);
-          if (normalized !== parsed) setDraftValue(String(normalized));
-          onChange(normalized);
-        }}
-        className={inputClassName ?? "h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-slate-400"}
-      />
-    </label>
-  );
-});
-
-const ColorPresetField = memo(function ColorPresetField({
-  label,
-  value,
-  onChange,
-  colors = PRESET_GRAPH_COLORS,
-  allowTransparent = false,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  colors?: typeof PRESET_GRAPH_COLORS;
-  allowTransparent?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const colorPickerValue = isHexColor(value) ? value : "#ffffff";
-  const transparentSelected = isTransparentFillColor(value);
-
-  return (
-    <div className="min-w-0 rounded-md border border-[#d7dde5] bg-white">
-      <button
-        type="button"
-        onClick={() => setOpen((current) => !current)}
-        className="flex h-10 w-full min-w-0 items-center justify-between gap-2 px-2.5 text-left"
-        aria-expanded={open}
-      >
-        <span className="min-w-0 truncate text-xs font-semibold text-slate-500">{label}</span>
-        <span className="ml-auto inline-flex min-w-0 items-center gap-2">
-          <ColorSummary value={value} />
-          <span className="max-w-24 truncate font-mono text-[11px] font-semibold text-[#475467]">{transparentSelected ? "Transparent" : value.toUpperCase()}</span>
-          {open ? <ChevronDown size={14} className="shrink-0 text-[#667085]" aria-hidden="true" /> : <ChevronRight size={14} className="shrink-0 text-[#667085]" aria-hidden="true" />}
-        </span>
-      </button>
-      {open ? (
-        <div className="grid min-w-0 gap-2 border-t border-[#e8edf2] p-2">
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(1.75rem,1fr))] gap-1.5">
-            {colors.map((color) => {
-              const selected = color.hex.toLowerCase() === value.toLowerCase();
-              return (
-                <button
-                  key={`${label}-${color.hex}`}
-                  type="button"
-                  onClick={() => onChange(color.hex)}
-                  className={`h-7 rounded-sm border ${selected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
-                  style={{ backgroundColor: color.hex }}
-                  title={color.name}
-                  aria-label={`${label}: ${color.name}`}
-                />
-              );
-            })}
-            {allowTransparent ? (
-              <button
-                type="button"
-                onClick={() => onChange(TRANSPARENT_FILL_COLOR)}
-                className={`h-7 rounded-sm border bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:10px_10px] bg-[position:0_0,0_5px,5px_-5px,-5px_0] ${transparentSelected ? "border-slate-950 ring-2 ring-slate-300" : "border-slate-200"}`}
-                title="Transparent"
-                aria-label={`${label}: Transparent`}
-              />
-            ) : null}
-          </div>
-          <label className="flex h-10 items-center gap-2 rounded-md border border-[var(--line)] bg-white px-2 text-sm font-semibold text-slate-600">
-            <input
-              type="color"
-              value={colorPickerValue}
-              onChange={(event) => onChange(event.target.value)}
-              className="h-7 w-9 cursor-pointer rounded border border-slate-200 bg-white p-0"
-              aria-label={`${label}: custom color`}
-            />
-            <span>Custom</span>
-          </label>
-        </div>
-      ) : null}
-    </div>
-  );
-});
-
-function CollapsibleSection({
-  title,
-  summary,
-  open,
-  onToggle,
-  children,
-  className = "",
-}: {
-  title: string;
-  summary?: ReactNode;
-  open: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <section className={`border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0 ${className}`}>
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center justify-between gap-3 text-left text-sm font-semibold text-slate-950"
-        aria-expanded={open}
-      >
-        <span className="min-w-0 truncate">{title}</span>
-        <span className="ml-auto flex shrink-0 items-center gap-2">
-          {!open ? summary : null}
-          {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
-        </span>
-      </button>
-      {open ? <div className="mt-3 space-y-3">{children}</div> : null}
-    </section>
-  );
-}
-
-function ColorSummary({ value }: { value: string }) {
-  const transparent = isTransparentFillColor(value);
-  return (
-    <span
-      className={`h-5 w-5 rounded-sm border border-slate-200 ${
-        transparent
-          ? "bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:8px_8px] bg-[position:0_0,0_4px,4px_-4px,-4px_0]"
-          : ""
-      }`}
-      style={transparent ? undefined : { backgroundColor: value }}
-      aria-hidden="true"
-    />
-  );
-}
-
-const ShapePreviewSvg = memo(function ShapePreviewSvg({
-  kind,
-  sides,
-  fillColor,
-  strokeColor,
-  strokeWidth,
-  widthCells,
-  heightCells,
-  className = "h-full w-full",
-}: {
-  kind: GraphShapeKind;
-  sides: GraphCellLineSide[];
-  fillColor: string;
-  strokeColor: string;
-  strokeWidth: number;
-  widthCells?: number;
-  heightCells?: number;
-  className?: string;
-}) {
-  const rectLike = kind === "square" || kind === "rectangle";
-  const circleLike = kind === "circle" || kind === "oval";
-  const halfCircleLike = kind === "half-circle";
-  const normalizedSides = isTransparentFillColor(fillColor) ? (sides.length ? sides : CELL_LINE_SIDE_KEYS) : CELL_LINE_SIDE_KEYS;
-  const stroke = isHexColor(strokeColor) ? strokeColor : DEFAULT_OUTLINE_COLOR;
-  const fill = isTransparentFillColor(fillColor) ? "none" : fillColor;
-  const previewStrokeWidth = Math.max(2, Math.min(10, strokeWidth * 1.5));
-  const rawWidth = Math.max(0.01, Number(widthCells) || (kind === "square" || kind === "circle" ? 1 : 1.65));
-  const rawHeight = kind === "square" || kind === "circle" ? rawWidth : Math.max(0.01, Number(heightCells) || 1);
-  const maxPreviewWidth = 92;
-  const maxPreviewHeight = 62;
-  const scale = Math.min(maxPreviewWidth / rawWidth, maxPreviewHeight / rawHeight);
-  const width = Math.max(8, rawWidth * scale);
-  const height = Math.max(8, rawHeight * scale);
-  const left = 60 - width / 2;
-  const top = 45 - height / 2;
-  const right = left + width;
-  const bottom = top + height;
-
-  return (
-    <svg viewBox="0 0 120 90" className={className} role="img" aria-label={GRAPH_SHAPE_KIND_LABELS[kind] ?? "Shape preview"}>
-      <rect x="1" y="1" width="118" height="88" rx="5" fill="#ffffff" stroke="#e8edf2" />
-      {circleLike ? (
-        <ellipse
-          cx={left + width / 2}
-          cy={top + height / 2}
-          rx={width / 2}
-          ry={height / 2}
-          fill={fill}
-          stroke={stroke}
-          strokeWidth={previewStrokeWidth}
-        />
-      ) : halfCircleLike ? (
-        <path
-          d={`M ${left} ${bottom} A ${width / 2} ${height} 0 0 1 ${right} ${bottom} L ${left} ${bottom} Z`}
-          fill={fill}
-          stroke={stroke}
-          strokeWidth={previewStrokeWidth}
-          strokeLinejoin="round"
-          strokeLinecap="round"
-        />
-      ) : rectLike ? (
-        <>
-          <rect x={left} y={top} width={width} height={height} fill={fill} stroke="none" />
-          {normalizedSides.includes("top") ? <line x1={left} y1={top} x2={right} y2={top} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
-          {normalizedSides.includes("right") ? <line x1={right} y1={top} x2={right} y2={bottom} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
-          {normalizedSides.includes("bottom") ? <line x1={right} y1={bottom} x2={left} y2={bottom} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
-          {normalizedSides.includes("left") ? <line x1={left} y1={bottom} x2={left} y2={top} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
-        </>
-      ) : (
-        <line x1="18" y1="68" x2="102" y2="22" stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" />
-      )}
-    </svg>
-  );
-});
-
-function paperSizeOptionLabel(key: GraphSettings["printPaperSize"]) {
-  const paper = PRINT_PAPER_SIZES[key] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
-  return `${paper.label} (${Math.round(paper.widthCm * 10)} x ${Math.round(paper.heightCm * 10)} mm)`;
-}
-
-function InspectorSegmented({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: readonly { value: string; label: string; icon?: ReactNode }[];
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div className="grid rounded-md border border-[#d7dde5] bg-[#f8fafc] p-0.5" style={{ gridTemplateColumns: `repeat(${Math.max(1, options.length)}, minmax(0, 1fr))` }} role="group" aria-label={label}>
-      {options.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          onClick={() => onChange(option.value)}
-          className={`inline-flex h-8 min-w-0 items-center justify-center gap-1 rounded text-[12px] font-semibold ${
-            option.value === value ? "bg-[#008c8f] text-white shadow-sm" : "text-[#475467] hover:bg-white"
-          }`}
-        >
-          {option.icon}
-          <span className="truncate">{option.label}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
 function sourceResizeHandleClass(handle: SourceResizeHandle, locked: boolean | undefined) {
   const base = `pointer-events-auto absolute grid place-items-center text-slate-700 transition-colors ${
     locked ? "opacity-40" : "hover:text-slate-950"
@@ -1037,10 +703,9 @@ function cellNumberLabels(cellCount: number) {
 }
 
 function deriveGraphSettings(settings: GraphSettings): GraphSettings {
-  const graphWidthLimit = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS));
-  const graphHeightLimit = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS));
-  const graphWidth = Math.max(1, Math.min(graphWidthLimit, Math.round(settings.graphWidth || 1)));
-  const graphHeight = Math.max(1, Math.min(graphHeightLimit, Math.round(settings.graphHeight || 1)));
+  const safeGraphDimensions = clampGraphCellDimensions(settings.graphWidth, settings.graphHeight, GRAPH_MAJOR_CELL_PIXELS);
+  const graphWidth = safeGraphDimensions.width;
+  const graphHeight = safeGraphDimensions.height;
   const outlineColor = isHexColor(settings.outlineColor) ? settings.outlineColor : isHexColor(settings.lineColor) ? settings.lineColor : DEFAULT_OUTLINE_COLOR;
   const fillColor = isFillColor(settings.fillColor) ? settings.fillColor : TRANSPARENT_FILL_COLOR;
   const imageLineThickness = clampImageLineThickness(settings.imageLineThickness ?? DEFAULT_IMAGE_LINE_THICKNESS);
@@ -1171,6 +836,28 @@ function areSettingsEqual(a: GraphSettings, b: GraphSettings) {
   return a === b;
 }
 
+function estimateSettingsBytes(settings: GraphSettings) {
+  return (
+    4096 +
+    settings.sourceImages.length * 1024 +
+    settings.cellPaints.length * 512 +
+    settings.graphShapes.length * 512 +
+    settings.clipartAssets.length * 1024 +
+    settings.clipartImages.length * 512 +
+    Object.keys(settings.fillRegions).length * 96
+  );
+}
+
+function boundSettingsHistory(entries: GraphSettings[]) {
+  const bounded = entries.slice(-MAX_SETTINGS_HISTORY);
+  let estimatedBytes = bounded.reduce((total, entry) => total + estimateSettingsBytes(entry), 0);
+  while (bounded.length > 1 && estimatedBytes > MAX_SETTINGS_HISTORY_ESTIMATED_BYTES) {
+    estimatedBytes -= estimateSettingsBytes(bounded[0]);
+    bounded.shift();
+  }
+  return bounded;
+}
+
 function isTextEditingTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
   if (target.isContentEditable || target.tagName === "TEXTAREA" || target.tagName === "SELECT") return true;
@@ -1261,8 +948,8 @@ function composePlacedImageLayerCanvas(
   offset: { x?: number; y?: number } = {},
 ) {
   const output = document.createElement("canvas");
-  output.width = Math.max(1, Math.round(settings.graphWidth * GRAPH_MAJOR_CELL_PIXELS));
-  output.height = Math.max(1, Math.round(settings.graphHeight * GRAPH_MAJOR_CELL_PIXELS));
+  output.width = safeCanvasSide(Number(settings.graphWidth) * GRAPH_MAJOR_CELL_PIXELS);
+  output.height = safeCanvasSide(Number(settings.graphHeight) * GRAPH_MAJOR_CELL_PIXELS);
   const context = output.getContext("2d", { willReadFrequently: true });
   if (!context) throw new Error("Canvas is not available.");
 
@@ -1271,17 +958,21 @@ function composePlacedImageLayerCanvas(
   context.imageSmoothingEnabled = true;
   context.imageSmoothingQuality = "high";
 
-  if (!sourceCanvas) return output;
+  if (!isDrawableCanvas(sourceCanvas)) return output;
 
   const bounds = findContentBounds(sourceCanvas);
   const drawX = Math.round(placement.x * GRAPH_MAJOR_CELL_PIXELS + (offset.x ?? 0));
   const drawY = Math.round(placement.y * GRAPH_MAJOR_CELL_PIXELS + (offset.y ?? 0));
   const drawWidth = Math.round(placement.width * GRAPH_MAJOR_CELL_PIXELS);
   const drawHeight = Math.round(placement.height * GRAPH_MAJOR_CELL_PIXELS);
+  if (!Number.isFinite(drawX) || !Number.isFinite(drawY) || !Number.isFinite(drawWidth) || !Number.isFinite(drawHeight) || drawWidth <= 0 || drawHeight <= 0) {
+    return output;
+  }
   const rotation = normalizeRotationDegrees(placement.rotationDegrees);
   const rotatedSideways = rotation === 90 || rotation === 270;
   const fittedWidth = rotatedSideways ? drawHeight : drawWidth;
   const fittedHeight = rotatedSideways ? drawWidth : drawHeight;
+  if (fittedWidth <= 0 || fittedHeight <= 0) return output;
 
   context.save();
   context.translate(drawX + drawWidth / 2, drawY + drawHeight / 2);
@@ -1573,6 +1264,13 @@ export function EditorClient({ project }: { project: Project }) {
     () => settings.clipartAssets.map((asset) => `${asset.id}:${asset.name}:${asset.url ?? asset.dataUrl ?? asset.path ?? ""}`).join("|"),
     [settings.clipartAssets],
   );
+  const clipartUsageKey = useMemo(
+    () => [
+      ...settings.clipartImages.filter((clipart) => clipart.visible !== false).map((clipart) => clipart.assetId),
+      selectedClipartAssetId ?? settings.clipartAssets[0]?.id ?? "",
+    ].filter(Boolean).sort().join("|"),
+    [selectedClipartAssetId, settings.clipartAssets, settings.clipartImages],
+  );
   const selectedClipartAsset = useMemo(
     () => settings.clipartAssets.find((asset) => asset.id === selectedClipartAssetId) ?? settings.clipartAssets[0] ?? null,
     [selectedClipartAssetId, settings.clipartAssets],
@@ -1588,7 +1286,7 @@ export function EditorClient({ project }: { project: Project }) {
     const previous = history.undo.at(-1);
     if (previous && areSettingsEqual(previous, snapshot)) return;
     settingsHistoryRef.current = {
-      undo: [...history.undo, snapshot].slice(-MAX_SETTINGS_HISTORY),
+      undo: boundSettingsHistory([...history.undo, snapshot]),
       redo: [],
     };
   }, []);
@@ -1616,11 +1314,11 @@ export function EditorClient({ project }: { project: Project }) {
     if (direction === "undo") {
       settingsHistoryRef.current = {
         undo: history.undo.slice(0, -1),
-        redo: [...history.redo, current].slice(-MAX_SETTINGS_HISTORY),
+        redo: boundSettingsHistory([...history.redo, current]),
       };
     } else {
       settingsHistoryRef.current = {
-        undo: [...history.undo, current].slice(-MAX_SETTINGS_HISTORY),
+        undo: boundSettingsHistory([...history.undo, current]),
         redo: history.redo.slice(0, -1),
       };
     }
@@ -3173,6 +2871,7 @@ export function EditorClient({ project }: { project: Project }) {
   }, [settings]);
 
   const drawPreview = useCallback((canvas: HTMLCanvasElement) => {
+    if (!isDrawableCanvas(canvas)) return;
     const preview = previewCanvasRef.current;
     const overview = overviewCanvasRef.current;
     setPreviewCanvasSize({ width: canvas.width, height: canvas.height });
@@ -3295,22 +2994,38 @@ export function EditorClient({ project }: { project: Project }) {
 
   useEffect(() => {
     if (!draftChecked) return;
-    const assets = settingsRef.current.clipartAssets;
+    const currentSettings = settingsRef.current;
+    const requiredAssetIds = new Set(
+      currentSettings.clipartImages.filter((clipart) => clipart.visible !== false).map((clipart) => clipart.assetId),
+    );
+    if (selectedClipartAssetId) requiredAssetIds.add(selectedClipartAssetId);
+    else if (currentSettings.clipartAssets[0]) requiredAssetIds.add(currentSettings.clipartAssets[0].id);
+    const assets = currentSettings.clipartAssets.filter((asset) => requiredAssetIds.has(asset.id));
     let cancelled = false;
-    setClipartReady(!assets.length);
-    clipartCanvasesRef.current = new Map();
+    const liveAssetIds = new Set(currentSettings.clipartAssets.map((asset) => asset.id));
+    for (const assetId of clipartCanvasesRef.current.keys()) {
+      if (!liveAssetIds.has(assetId)) clipartCanvasesRef.current.delete(assetId);
+    }
+    const assetsToLoad = assets.filter((asset) => !clipartCanvasesRef.current.has(asset.id));
+    setClipartReady(
+      currentSettings.clipartImages
+        .filter((clipart) => clipart.visible !== false)
+        .every((clipart) => clipartCanvasesRef.current.has(clipart.assetId)),
+    );
     clipartLayerCacheRef.current = new Map();
 
-    if (!assets.length) {
-      setPlacingClipartAssetId(null);
-      setSelectedClipartAssetId(null);
+    if (!assetsToLoad.length) {
+      if (!currentSettings.clipartAssets.length) {
+        setPlacingClipartAssetId(null);
+        setSelectedClipartAssetId(null);
+      }
       return () => {
         cancelled = true;
       };
     }
 
     void mapWithConcurrency(
-      assets,
+      assetsToLoad,
       2,
       async (asset) => {
         const url = asset.url ?? asset.dataUrl ?? null;
@@ -3324,19 +3039,27 @@ export function EditorClient({ project }: { project: Project }) {
       },
     ).then((loadedAssets) => {
       if (cancelled) return;
-      const canvases = new Map<string, HTMLCanvasElement>();
+      const canvases = new Map(clipartCanvasesRef.current);
       for (const { asset, canvas } of loadedAssets) {
         if (canvas) canvases.set(asset.id, canvas);
       }
       clipartCanvasesRef.current = canvases;
-      setClipartReady(canvases.size >= assets.filter((asset) => asset.url || asset.dataUrl).length);
-      setSelectedClipartAssetId((current) => (current && assets.some((asset) => asset.id === current) ? current : assets[0]?.id ?? null));
+      setClipartReady(
+        currentSettings.clipartImages
+          .filter((clipart) => clipart.visible !== false)
+          .every((clipart) => canvases.has(clipart.assetId)),
+      );
+      setSelectedClipartAssetId((current) =>
+        current && currentSettings.clipartAssets.some((asset) => asset.id === current)
+          ? current
+          : currentSettings.clipartAssets[0]?.id ?? null,
+      );
     });
 
     return () => {
       cancelled = true;
     };
-  }, [clipartLoadKey, draftChecked]);
+  }, [clipartLoadKey, clipartUsageKey, draftChecked, selectedClipartAssetId]);
 
   useEffect(() => {
     if (!draftChecked) return;
@@ -3369,6 +3092,10 @@ export function EditorClient({ project }: { project: Project }) {
         .map((layout) => {
           const cacheKey = `${settings.graphWidth}x${settings.graphHeight}:${settings.imageOffsetX},${settings.imageOffsetY}:${sourceProcessingCacheKey(layout.source, layout)}`;
           let canvas = sourceLayerCacheRef.current.get(cacheKey);
+          if (canvas && !isDrawableCanvas(canvas)) {
+            sourceLayerCacheRef.current.delete(cacheKey);
+            canvas = undefined;
+          }
           if (!canvas) {
             canvas = composeSourceLayerCanvas(layout, sourceCanvasesRef.current, settings);
             sourceLayerCacheRef.current.set(cacheKey, canvas);
@@ -3383,6 +3110,10 @@ export function EditorClient({ project }: { project: Project }) {
         .map((clipart) => {
           const cacheKey = `${settings.graphWidth}x${settings.graphHeight}:${clipart.assetId}:${clipart.x},${clipart.y}:${clipart.width},${clipart.height}:${clipart.rotationDegrees}:${clipart.flipX}:${clipart.flipY}`;
           let canvas = clipartLayerCacheRef.current.get(cacheKey);
+          if (canvas && !isDrawableCanvas(canvas)) {
+            clipartLayerCacheRef.current.delete(cacheKey);
+            canvas = undefined;
+          }
           if (!canvas) {
             canvas = composeClipartLayerCanvas(clipart, clipartCanvasesRef.current, settings);
             clipartLayerCacheRef.current.set(cacheKey, canvas);
@@ -3393,20 +3124,16 @@ export function EditorClient({ project }: { project: Project }) {
           };
         });
       const layers = [...sourceLayers, ...clipartLayers];
-      if (sourceLayerCacheRef.current.size > settings.sourceImages.length * 4) {
-        const liveKeys = new Set(layouts.map((layout) => `${settings.graphWidth}x${settings.graphHeight}:${settings.imageOffsetX},${settings.imageOffsetY}:${sourceProcessingCacheKey(layout.source, layout)}`));
-        for (const key of sourceLayerCacheRef.current.keys()) {
-          if (!liveKeys.has(key)) sourceLayerCacheRef.current.delete(key);
-        }
-      }
-      if (clipartLayerCacheRef.current.size > Math.max(4, settings.clipartImages.length * 4)) {
-        const liveKeys = new Set(
+      trimCanvasCache(
+        sourceLayerCacheRef.current,
+        new Set(layouts.map((layout) => `${settings.graphWidth}x${settings.graphHeight}:${settings.imageOffsetX},${settings.imageOffsetY}:${sourceProcessingCacheKey(layout.source, layout)}`)),
+      );
+      trimCanvasCache(
+        clipartLayerCacheRef.current,
+        new Set(
           settings.clipartImages.map((clipart) => `${settings.graphWidth}x${settings.graphHeight}:${clipart.assetId}:${clipart.x},${clipart.y}:${clipart.width},${clipart.height}:${clipart.rotationDegrees}:${clipart.flipX}:${clipart.flipY}`),
-        );
-        for (const key of clipartLayerCacheRef.current.keys()) {
-          if (!liveKeys.has(key)) clipartLayerCacheRef.current.delete(key);
-        }
-      }
+        ),
+      );
       const renderSettings = deriveGraphSettings({
         ...settings,
         imageWidth: settings.graphWidth,
@@ -3638,6 +3365,11 @@ export function EditorClient({ project }: { project: Project }) {
       setNotice({ tone: "error", text: "Choose one image to replace this source." });
       return false;
     }
+    const remainingSourceCapacity = Math.max(0, MAX_PROJECT_UPLOAD_FILES - settingsRef.current.sourceImages.length);
+    if (!replaceSourceId && files.length > remainingSourceCapacity) {
+      setNotice({ tone: "error", text: `This project can add ${remainingSourceCapacity} more source image${remainingSourceCapacity === 1 ? "" : "s"}.` });
+      return false;
+    }
     for (const file of files) {
       if (!isAllowedImageFile(file)) {
         setNotice({ tone: "error", text: `Use ${ALLOWED_IMAGE_LABEL} files only.` });
@@ -3714,6 +3446,10 @@ export function EditorClient({ project }: { project: Project }) {
     }
 
     function handleUploadFailure(message: string) {
+      for (const item of uploadItems) URL.revokeObjectURL(item.url);
+      uploadedSourceObjectUrlsRef.current = uploadedSourceObjectUrlsRef.current.filter(
+        (url) => !uploadItems.some((item) => item.url === url),
+      );
       if (replaceSourceId) {
         setSettings((current) => {
           const sourceImages = previousSource
@@ -3729,29 +3465,70 @@ export function EditorClient({ project }: { project: Project }) {
         return false;
       }
 
-      setNotice({ tone: "error", text: `${message} The selected image is still available in this editor until refresh.` });
+      setSettings((current) => {
+        const next = deriveGraphSettings({
+          ...current,
+          sourceImages: current.sourceImages.filter((source) => !optimisticIds.has(source.id)),
+        });
+        settingsRef.current = next;
+        return next;
+      });
+      setNotice({ tone: "error", text: message });
       setUploadingSources(false);
       setReplacingSourceId(null);
       return false;
     }
 
-    const formData = new FormData();
-    for (const item of uploadItems) {
-      formData.append("files", item.file);
-      formData.append("ids", item.id);
-    }
+    let pendingPaths: string[] = [];
     let response: Response;
     try {
-      response = await fetch(`/api/projects/${project.id}/source-images`, {
+      const prepareResponse = await fetch(`/api/projects/${project.id}/source-images`, {
         method: "POST",
-        body: formData,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          files: uploadItems.map((item) => ({ id: item.id, name: item.file.name, type: item.file.type, size: item.file.size })),
+        }),
+      });
+      const prepared = await prepareResponse.json().catch(() => ({}));
+      if (!prepareResponse.ok || !Array.isArray(prepared.uploads)) {
+        return handleUploadFailure(prepared.message || "Unable to prepare source uploads.");
+      }
+      pendingPaths = prepared.uploads.map((upload: { path: string }) => upload.path);
+      const { getSupabaseBrowser } = await import("@/lib/supabase/browser");
+      const supabase = getSupabaseBrowser();
+      await mapWithConcurrency(prepared.uploads, 2, async (upload: { path: string; token: string }, index) => {
+        const file = uploadItems[index].file;
+        const { error } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).uploadToSignedUrl(upload.path, upload.token, file, {
+          cacheControl: "3600",
+          contentType: file.type || undefined,
+        });
+        if (error) throw new Error(error.message);
+      });
+      response = await fetch(`/api/projects/${project.id}/source-images`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ uploads: prepared.uploads.map((upload: { id: string; name: string; path: string }) => ({ id: upload.id, name: upload.name, path: upload.path })) }),
       });
     } catch (error) {
+      if (pendingPaths.length) {
+        await fetch(`/api/projects/${project.id}/source-images`, {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ paths: pendingPaths }),
+        }).catch(() => {});
+      }
       return handleUploadFailure(error instanceof Error ? error.message : "Unable to upload source images.");
     }
 
     const payload = (await response.json().catch(() => ({}))) as SourceImagesUploadResponse;
     if (!response.ok) {
+      if (pendingPaths.length) {
+        await fetch(`/api/projects/${project.id}/source-images`, {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ paths: pendingPaths }),
+        }).catch(() => {});
+      }
       return handleUploadFailure(typeof payload.message === "string" ? payload.message : "Unable to upload source images.");
     }
 
@@ -3765,11 +3542,15 @@ export function EditorClient({ project }: { project: Project }) {
       ...settingsRef.current,
       sourceImages: settingsRef.current.sourceImages.map((source) => {
         const uploaded = uploadedById.get(source.id);
-        return uploaded ? { ...source, name: uploaded.name || source.name, path: uploaded.path || source.path } : source;
+        return uploaded ? { ...source, name: uploaded.name || source.name, path: uploaded.path || source.path, url: uploaded.url || source.url } : source;
       }),
     });
     settingsRef.current = nextSettings;
     setSettings(nextSettings);
+    const durableSourceIds = new Set(uploadedImages.filter((image) => Boolean(image.url)).map((image) => image.id));
+    const releasableSourceUrls = uploadItems.filter((item) => durableSourceIds.has(item.id)).map((item) => item.url);
+    for (const url of releasableSourceUrls) URL.revokeObjectURL(url);
+    uploadedSourceObjectUrlsRef.current = uploadedSourceObjectUrlsRef.current.filter((url) => !releasableSourceUrls.includes(url));
 
     const result = await saveProjectState({
       projectId: project.id,
@@ -3822,6 +3603,11 @@ export function EditorClient({ project }: { project: Project }) {
     }
     const files = Array.from(filesInput);
     if (!files.length) return false;
+    const remainingClipartCapacity = Math.max(0, 120 - settingsRef.current.clipartAssets.length);
+    if (files.length > remainingClipartCapacity) {
+      setNotice({ tone: "error", text: `This project can add ${remainingClipartCapacity} more clipart asset${remainingClipartCapacity === 1 ? "" : "s"}.` });
+      return false;
+    }
     for (const file of files) {
       if (!isAllowedImageFile(file) || isPdfFile(file)) {
         setNotice({ tone: "error", text: "Use PNG, JPG, WEBP, or SVG cliparts only." });
@@ -3835,6 +3621,8 @@ export function EditorClient({ project }: { project: Project }) {
 
     setUploadingCliparts(true);
     setNotice({ tone: "info", text: "Uploading cliparts..." });
+    let pendingClipartPaths: string[] = [];
+    let pendingClipartObjectUrls: string[] = [];
     try {
       const namedFiles = files.map((file) => ({
         id: crypto.randomUUID(),
@@ -3852,27 +3640,56 @@ export function EditorClient({ project }: { project: Project }) {
           url: URL.createObjectURL(item.file),
         };
       });
+      pendingClipartObjectUrls = prepared.map((item) => item.url);
       uploadedSourceObjectUrlsRef.current.push(...prepared.map((item) => item.url));
-
-      const formData = new FormData();
-      for (const item of prepared) {
-        formData.append("files", item.file);
-        formData.append("ids", item.id);
-        formData.append("names", item.name);
-      }
 
       let uploadedAssets: UploadedClipartAsset[];
       if (isPersistableProjectId(project.id)) {
-        const response = await fetch(`/api/projects/${project.id}/cliparts`, {
+        const prepareResponse = await fetch(`/api/projects/${project.id}/cliparts`, {
           method: "POST",
-          body: formData,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            files: prepared.map((item) => ({
+              id: item.id,
+              name: item.name,
+              fileName: item.file.name,
+              type: item.file.type,
+              size: item.file.size,
+            })),
+          }),
+        });
+        const signedPayload = await prepareResponse.json().catch(() => ({}));
+        if (!prepareResponse.ok || !Array.isArray(signedPayload.uploads)) {
+          throw new Error(signedPayload.message || "Unable to prepare clipart uploads.");
+        }
+        pendingClipartPaths = signedPayload.uploads.map((upload: { path: string }) => upload.path);
+        const { getSupabaseBrowser } = await import("@/lib/supabase/browser");
+        const supabase = getSupabaseBrowser();
+        await mapWithConcurrency(signedPayload.uploads, 2, async (upload: { path: string; token: string }, index) => {
+          const file = prepared[index].file;
+          const { error } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).uploadToSignedUrl(upload.path, upload.token, file, {
+            cacheControl: "3600",
+            contentType: file.type || undefined,
+          });
+          if (error) throw new Error(error.message);
+        });
+        const response = await fetch(`/api/projects/${project.id}/cliparts`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            uploads: signedPayload.uploads.map((upload: { id: string; name: string; path: string; mimeType: string }) => ({
+              id: upload.id,
+              name: upload.name,
+              path: upload.path,
+              mimeType: upload.mimeType,
+            })),
+          }),
         });
         const payload = (await response.json().catch(() => ({}))) as ClipartUploadResponse;
-        if (!response.ok) {
-          throw new Error(typeof payload.message === "string" ? payload.message : "Unable to upload cliparts.");
-        }
+        if (!response.ok) throw new Error(typeof payload.message === "string" ? payload.message : "Unable to finalize cliparts.");
         uploadedAssets = Array.isArray(payload.assets) ? payload.assets.filter(isUploadedClipartAsset) : [];
         if (uploadedAssets.length !== prepared.length) throw new Error("Unable to read uploaded clipart details.");
+        pendingClipartPaths = [];
       } else {
         uploadedAssets = prepared.map((item) => ({
           id: item.id,
@@ -3905,6 +3722,11 @@ export function EditorClient({ project }: { project: Project }) {
       });
       settingsRef.current = nextSettings;
       setSettings(nextSettings);
+      const durableAssetIds = new Set(uploadedAssets.filter((asset) => Boolean(asset.url)).map((asset) => asset.id));
+      const releasableUrls = prepared.filter((item) => durableAssetIds.has(item.id)).map((item) => item.url);
+      for (const url of releasableUrls) URL.revokeObjectURL(url);
+      uploadedSourceObjectUrlsRef.current = uploadedSourceObjectUrlsRef.current.filter((url) => !releasableUrls.includes(url));
+      pendingClipartObjectUrls = pendingClipartObjectUrls.filter((url) => !releasableUrls.includes(url));
       setSelectedClipartAssetId(addedAssets[0]?.id ?? selectedClipartAssetId);
       setInspectorTab("draw");
       setDrawTab("clipart");
@@ -3935,6 +3757,17 @@ export function EditorClient({ project }: { project: Project }) {
       setUploadingCliparts(false);
       return true;
     } catch (error) {
+      if (pendingClipartPaths.length && isPersistableProjectId(project.id)) {
+        await fetch(`/api/projects/${project.id}/cliparts`, {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ paths: pendingClipartPaths }),
+        }).catch(() => {});
+      }
+      for (const url of pendingClipartObjectUrls) URL.revokeObjectURL(url);
+      uploadedSourceObjectUrlsRef.current = uploadedSourceObjectUrlsRef.current.filter(
+        (url) => !pendingClipartObjectUrls.includes(url),
+      );
       setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to upload cliparts." });
       setUploadingCliparts(false);
       return false;
@@ -4031,21 +3864,6 @@ export function EditorClient({ project }: { project: Project }) {
     }
   }
 
-  async function saveProcessedImage() {
-    const canvas = processedCanvasRef.current;
-    if (!canvas) return;
-    const blob = await canvasToBlob(canvas);
-    const response = await fetch(`/api/projects/${project.id}/processed-image`, {
-      method: "PUT",
-      headers: { "content-type": "image/png" },
-      body: blob,
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.message || "Unable to save processed image.");
-    }
-  }
-
   function saveSessionDraft(message: string, tone: Notice["tone"] = "ok") {
     try {
       const canvas = processedCanvasRef.current;
@@ -4097,7 +3915,6 @@ export function EditorClient({ project }: { project: Project }) {
           return;
         }
 
-        await saveProcessedImage();
         removeEditorSessionDraft(project.id);
         setHasSessionDraft(false);
         setNotice({ tone: "ok", text: "Project saved." });
@@ -4132,9 +3949,7 @@ export function EditorClient({ project }: { project: Project }) {
     const canvas = processedCanvasRef.current;
     if (!canvas) return;
     void import("@/lib/canvas/exports")
-      .then(({ printCanvas }) => {
-        printCanvas(canvas, settings, title || "Graph pixel chart");
-      })
+      .then(({ printCanvas }) => printCanvas(canvas, settings, title || "Graph pixel chart"))
       .catch((error) => {
         setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to open print view." });
       });
@@ -4589,7 +4404,7 @@ export function EditorClient({ project }: { project: Project }) {
                         key={`layer-source-${source.id}`}
                         onDragOver={handleLayerDragOver("source")}
                         onDrop={handleLayerDrop("source", source.id)}
-                        className={selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}
+                        className={`editor-layer-virtual-row ${selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}`}
                       >
                         <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
                           <button type="button" onClick={() => toggleSourceVisibility(source.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
@@ -4636,7 +4451,7 @@ export function EditorClient({ project }: { project: Project }) {
                             key={`layer-clipart-${clipart.id}`}
                             onDragOver={handleLayerDragOver("clipart")}
                             onDrop={handleLayerDrop("clipart", clipart.id)}
-                            className={selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}
+                            className={`editor-layer-virtual-row ${selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}`}
                           >
                             <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
                               <button type="button" onClick={() => toggleDrawingVisibility("clipart", clipart.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show clipart" : "Hide clipart"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
@@ -4663,7 +4478,7 @@ export function EditorClient({ project }: { project: Project }) {
                             key={`layer-shape-${shape.id}`}
                             onDragOver={handleLayerDragOver("shape")}
                             onDrop={handleLayerDrop("shape", shape.id)}
-                            className={selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}
+                            className={`editor-layer-virtual-row ${selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}`}
                           >
                             <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
                               <button type="button" onClick={() => toggleDrawingVisibility("shape", shape.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show generated image" : "Hide generated image"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
@@ -4695,7 +4510,7 @@ export function EditorClient({ project }: { project: Project }) {
                     key={`layer-cell-${cell.id}`}
                     onDragOver={handleLayerDragOver("cell")}
                     onDrop={handleLayerDrop("cell", cell.id)}
-                    className={selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}
+                    className={`editor-layer-virtual-row ${selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-white text-[#101828] opacity-60" : "bg-white text-[#101828]"}`}
                   >
                     <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
                       <button type="button" onClick={() => toggleDrawingVisibility("cell", cell.id)} className={selected ? "text-white/90" : "text-[#667085]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
@@ -4782,6 +4597,90 @@ export function EditorClient({ project }: { project: Project }) {
   const imageHeightCm = roundCm(settings.graphHeight * settings.cellSizeCm);
   const printWidthCm = imageWidthCm;
   const printHeightCm = imageHeightCm;
+  const graphPreviewWidth = Math.max(1, previewCanvasSize.width * zoom);
+  const graphPreviewHeight = Math.max(1, previewCanvasSize.height * zoom);
+  const outsideNumberMargin = settings.showNumbers && settings.gridNumberPlacement === "outside" ? 34 : 0;
+  const outsideHorizontalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? cellNumberLabels(settings.graphWidth) : [];
+  const outsideVerticalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? cellNumberLabels(settings.graphHeight) : [];
+  const { pageBreakGuideX, pageBreakGuideY } = useMemo(() => {
+    if (!settings.showPageBreaks) return { pageBreakGuideX: [], pageBreakGuideY: [] };
+    const paperForPreview = PRINT_PAPER_SIZES[settings.printPaperSize] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
+    const printPreviewPlan = createPdfExportPlan({
+      settings,
+      paper: paperForPreview,
+      canvasWidth: previewCanvasSize.width,
+      canvasHeight: previewCanvasSize.height,
+    });
+    return {
+      pageBreakGuideY: Array.from(new Set(printPreviewPlan.tiles.filter((tile) => tile.tileX === 0 && tile.tileY > 0).map((tile) => tile.sourceY))).sort((a, b) => a - b),
+      pageBreakGuideX: Array.from(new Set(printPreviewPlan.tiles.filter((tile) => tile.tileY === 0 && tile.tileX > 0).map((tile) => tile.sourceX))).sort((a, b) => a - b),
+    };
+  }, [
+    previewCanvasSize.height,
+    previewCanvasSize.width,
+    settings.cellSizeCm,
+    settings.graphHeight,
+    settings.graphWidth,
+    settings.pageMargin,
+    settings.printHorizontalAlignment,
+    settings.printOrientation,
+    settings.printPaperSize,
+    settings.printVerticalAlignment,
+    settings.showPageBreaks,
+  ]);
+
+  useEffect(() => {
+    const scroller = canvasScrollRef.current;
+    const stage = graphStageRef.current;
+    if (!scroller || !stage) return;
+
+    let frame = 0;
+    const updateGuide = () => {
+      frame = 0;
+      const nextGuide = {
+        left: scroller.scrollLeft - stage.offsetLeft,
+        top: scroller.scrollTop - stage.offsetTop,
+        width: Math.max(1, scroller.clientWidth),
+        height: Math.max(1, scroller.clientHeight),
+      };
+      setCanvasViewportGuide((current) =>
+        current.left === nextGuide.left &&
+        current.top === nextGuide.top &&
+        current.width === nextGuide.width &&
+        current.height === nextGuide.height
+          ? current
+          : nextGuide,
+      );
+    };
+    const scheduleGuideUpdate = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(updateGuide);
+    };
+
+    updateGuide();
+    scroller.addEventListener("scroll", scheduleGuideUpdate, { passive: true });
+    window.addEventListener("resize", scheduleGuideUpdate);
+    const resizeObserver = new ResizeObserver(scheduleGuideUpdate);
+    resizeObserver.observe(scroller);
+    resizeObserver.observe(stage);
+
+    return () => {
+      scroller.removeEventListener("scroll", scheduleGuideUpdate);
+      window.removeEventListener("resize", scheduleGuideUpdate);
+      resizeObserver.disconnect();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [
+    graphPreviewHeight,
+    graphPreviewWidth,
+    leftPanelWidth,
+    outsideNumberMargin,
+    rightPanelWidth,
+    settingsPanelCollapsed,
+    sourcePanelCollapsed,
+    zoom,
+  ]);
+
   const desktopGridColumns =
     sourcePanelCollapsed && settingsPanelCollapsed
       ? "minmax(0,1fr)"
@@ -4855,759 +4754,6 @@ export function EditorClient({ project }: { project: Project }) {
       </div>
     ) : null;
 
-  const inspectorTabs: { id: InspectorTab; label: string }[] = [
-    { id: "graph", label: "Graph" },
-    { id: "source", label: "Source" },
-    { id: "draw", label: "Draw" },
-    { id: "palette", label: "Palette" },
-  ];
-  const drawTabs: { id: DrawTab; label: string }[] = [
-    { id: "shape", label: "Shape" },
-    { id: "clipart", label: "Clipart" },
-  ];
-
-  const selectedSourceInspector = (
-    <div className={inspectorTab === "source" ? "space-y-3" : "hidden"}>
-      {selectedSource ? (
-        <>
-          <div className="ui-panel-subtle p-3">
-            <p className="truncate text-sm font-semibold text-slate-950">{selectedSource.name}</p>
-            <p className="mt-1 text-xs text-slate-500">
-              {selectedSource.locked ? "Locked" : "Editable"} / {sourceStatus[selectedSource.id]?.ready ? "Ready" : sourceStatus[selectedSource.id]?.error || "Loading"}
-            </p>
-          </div>
-          <div className="grid min-w-0 grid-cols-2 gap-2">
-            <NumberField
-              label="Width (CM)"
-              value={sourcePhysicalWidthCm(selectedSource)}
-              min={0.01}
-              max={1000}
-              step={0.1}
-              allowDecimalInput
-              disabled={selectedSource.locked}
-              onChange={(value) => updateSourceImagePhysicalWidthCm(selectedSource.id, value)}
-            />
-            <NumberField
-              label={`Height (${MEASUREMENT_UNIT_LABELS[selectedSource.measurementUnit]})`}
-              value={sourcePhysicalHeight(selectedSource)}
-              min={0.01}
-              max={roundMeasure(cmToUnit(1000 * settings.cellSizeCm, selectedSource.measurementUnit))}
-              step={0.1}
-              allowDecimalInput
-              disabled={selectedSource.locked}
-              onChange={(value) => updateSourceImagePhysicalHeight(selectedSource.id, value)}
-            />
-            <label className="grid min-w-0 gap-1.5">
-              <span className="text-xs font-semibold text-slate-500">Size unit</span>
-              <select
-                value={selectedSource.measurementUnit}
-                onChange={(event) => updateSourceImage(selectedSource.id, { measurementUnit: event.target.value as GraphSettings["measurementUnit"] })}
-                className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-white px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-              >
-                <option value="cm">CM</option>
-                <option value="in">IN</option>
-              </select>
-            </label>
-            <NumberField
-              label="Line size"
-              value={selectedSource.imageLineThickness}
-              min={MIN_IMAGE_LINE_THICKNESS}
-              max={MAX_IMAGE_LINE_THICKNESS}
-              step={0.01}
-              allowDecimalInput
-              onChange={(value) => updateSourceImage(selectedSource.id, { imageLineThickness: value })}
-            />
-            <NumberField label="Left padding" value={selectedSource.x} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { x: value })} />
-            <NumberField label="Right padding" value={sourceRightPadding(selectedSource)} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { x: settings.graphWidth - selectedSource.width - value })} />
-            <NumberField label="Top padding" value={selectedSource.y} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { y: value })} />
-            <NumberField label="Bottom padding" value={sourceBottomPadding(selectedSource)} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { y: settings.graphHeight - selectedSource.height - value })} />
-            <NumberField label="Fill detection" value={selectedSource.sourceFillThreshold} min={MIN_SOURCE_FILL_THRESHOLD} max={MAX_SOURCE_FILL_THRESHOLD} step={0.01} allowDecimalInput onChange={(value) => updateSourceImage(selectedSource.id, { sourceFillThreshold: value })} />
-            <NumberField label="Fill width" value={selectedSource.sourceFillMinStrokePixels} min={MIN_SOURCE_FILL_MIN_STROKE_PIXELS} max={MAX_SOURCE_FILL_MIN_STROKE_PIXELS} onChange={(value) => updateSourceImage(selectedSource.id, { sourceFillMinStrokePixels: value })} />
-            <NumberField label="Gap closing" value={selectedSource.strokeGapClosePixels} min={MIN_STROKE_GAP_CLOSE_PIXELS} max={MAX_STROKE_GAP_CLOSE_PIXELS} onChange={(value) => updateSourceImage(selectedSource.id, { strokeGapClosePixels: value })} />
-          </div>
-          <div className="grid grid-cols-4 gap-1">
-            <button type="button" onClick={() => rotateSourceImage(selectedSource.id, -1)} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Rotate left">
-              <RotateCcw size={15} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={() => rotateSourceImage(selectedSource.id, 1)} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Rotate right">
-              <RotateCw size={15} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={() => flipSourceImage(selectedSource.id, "x")} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Flip horizontal">
-              <FlipHorizontal size={15} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={() => flipSourceImage(selectedSource.id, "y")} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Flip vertical">
-              <FlipVertical size={15} aria-hidden="true" />
-            </button>
-          </div>
-        </>
-      ) : (
-        <div className="ui-panel-subtle grid min-h-32 place-items-center p-4 text-center text-sm text-slate-500">
-          Select a source layer to edit its size, padding, transform, and detection settings.
-        </div>
-      )}
-    </div>
-  );
-
-  const settingsPanel = (
-    <aside
-      className="editor-panel relative space-y-0"
-      style={{ overflowY: inspectorTab === "palette" && !isPaletteSectionExpanded ? "hidden" : "auto", overflowX: "hidden" }}
-    >
-      <div className="flex h-11 items-center justify-between border-b border-[#d7dde5] px-3">
-        <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">
-          Inspector
-        </h2>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => {
-              setSettingsWithHistory((current) => editorDefaultGraphSettings(current));
-              setSelectedFillRegionId(null);
-              setFloatingPalette(null);
-              setCopiedFillColor(null);
-            }}
-            className="ui-btn-icon"
-            title="Reset settings"
-          >
-            <RefreshCw size={15} aria-hidden="true" />
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-4 border-b border-[#d7dde5] bg-white text-[12px]">
-        {inspectorTabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => setInspectorTab(tab.id)}
-            className={`h-9 border-r border-[#d7dde5] font-medium ${inspectorTab === tab.id ? "bg-[#008c8f] text-white" : "text-[#344054]"}`}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      <div className="space-y-4 p-3">
-        {selectedSourceInspector}
-        {inspectorTab === "graph" ? (
-          <div className="space-y-4">
-            <InspectorGroup title="Dimensions">
-              <div className="grid min-w-0 grid-cols-2 gap-2">
-                <NumberField
-                  label="Width (cells)"
-                  value={settings.graphWidth}
-                  min={1}
-                  max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)}
-                  inputClassName={inspectorControlClass}
-                  onChange={(value) => updateSetting("graphWidth", value)}
-                />
-                <NumberField
-                  label="Height (cells)"
-                  value={settings.graphHeight}
-                  min={1}
-                  max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)}
-                  inputClassName={inspectorControlClass}
-                  onChange={(value) => updateSetting("graphHeight", value)}
-                />
-              </div>
-              <InspectorCheckbox label="Square cells" checked disabled />
-            </InspectorGroup>
-
-            <InspectorGroup title="Measurements">
-              <InspectorRow label="Units">
-                <InspectorSelect
-                  label="Measurement units"
-                  value={settings.measurementUnit}
-                  options={[
-                    { value: "cm", label: "Centimeters" },
-                    { value: "in", label: "Inches" },
-                  ]}
-                  onChange={(value) => updateMeasurementUnit(value as GraphSettings["measurementUnit"])}
-                />
-              </InspectorRow>
-              <InspectorRow label="Cell size">
-                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
-                  <input value={(settings.cellSizeCm * 10).toFixed(2)} readOnly className={inspectorControlClass} aria-label="Cell size millimeters" />
-                  <span className="grid h-9 place-items-center rounded-md border border-[#d7dde5] bg-[#f8fafc] text-[12px] font-semibold text-[#475467]">mm</span>
-                </div>
-              </InspectorRow>
-              <p className="text-[12px] leading-5 text-[#667085]">
-                {settings.graphWidth.toFixed(0)} x {settings.graphHeight.toFixed(0)} cells = {imageWidthCm} x {imageHeightCm} cm
-              </p>
-              <InspectorRow label={`Graph height`}>
-                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
-                  <NumberField
-                    label={`Graph height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
-                    value={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
-                    min={0.01}
-                    max={roundMeasure(cmToUnit(Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS) * DEFAULT_CELL_SIZE_CM, settings.measurementUnit))}
-                    step={0.1}
-                    allowDecimalInput
-                    hideLabel
-                    inputClassName={inspectorControlClass}
-                    onChange={updateGraphPhysicalHeight}
-                  />
-                  <span className="grid h-9 place-items-center rounded-md border border-[#d7dde5] bg-[#f8fafc] text-[12px] font-semibold text-[#475467]">
-                    {MEASUREMENT_UNIT_LABELS[settings.measurementUnit]}
-                  </span>
-                </div>
-              </InspectorRow>
-              <InspectorRow label="Artwork">
-                <div className="grid min-w-0 grid-cols-2 gap-2">
-                  <NumberField
-                    label="Artwork width (CM)"
-                    value={roundMeasure(settings.imageWidth * settings.cellSizeCm)}
-                    min={0.01}
-                    max={roundMeasure(settings.graphWidth * settings.cellSizeCm)}
-                    step={0.1}
-                    allowDecimalInput
-                    inputClassName={inspectorControlClass}
-                    onChange={updateImageWidthCm}
-                  />
-                  <NumberField
-                    label={`Artwork height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
-                    value={roundMeasure(cmToUnit(settings.imageHeight * settings.cellSizeCm, settings.measurementUnit))}
-                    min={0.01}
-                    max={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
-                    step={0.1}
-                    allowDecimalInput
-                    inputClassName={inspectorControlClass}
-                    onChange={updateImageHeightPhysical}
-                  />
-                </div>
-              </InspectorRow>
-            </InspectorGroup>
-
-            <InspectorGroup title="Grid Lines">
-              <InspectorRow label="Line color">
-                <InspectorColorControl label="Graph line color" value={settings.gridLineColor} onChange={(value) => updateSetting("gridLineColor", value)} />
-              </InspectorRow>
-              <InspectorRow label="Layer">
-                <InspectorSelect
-                  label="Graph lines layer"
-                  value={settings.gridLineLayer}
-                  options={GRAPH_LINE_LAYER_KEYS.map((key) => ({ value: key, label: GRAPH_LINE_LAYER_LABELS[key] }))}
-                  onChange={(value) => updateSetting("gridLineLayer", value as GraphSettings["gridLineLayer"])}
-                />
-              </InspectorRow>
-              <div className="grid grid-cols-2 gap-2">
-                <InspectorCheckbox label="Show numbers" checked={settings.showNumbers} onChange={(checked) => updateSetting("showNumbers", checked)} />
-                <InspectorCheckbox label="Show guides" checked={settings.showPageBreaks} onChange={(checked) => updateSetting("showPageBreaks", checked)} />
-              </div>
-              <InspectorRow label="Numbers">
-                <InspectorSelect
-                  label="Grid number position"
-                  value={settings.gridNumberPlacement}
-                  options={(["inside", "outside"] as const).map((key) => ({ value: key, label: GRID_NUMBER_PLACEMENT_LABELS[key] }))}
-                  onChange={(value) => updateSetting("gridNumberPlacement", value as GraphSettings["gridNumberPlacement"])}
-                />
-              </InspectorRow>
-            </InspectorGroup>
-
-            <InspectorGroup title="Print Settings">
-              <InspectorRow label="Paper size">
-                <InspectorSelect
-                  label="Print paper size"
-                  value={settings.printPaperSize}
-                  options={PRINT_PAPER_SIZE_KEYS.map((key) => ({ value: key, label: paperSizeOptionLabel(key) }))}
-                  onChange={(value) => updateSetting("printPaperSize", value as GraphSettings["printPaperSize"])}
-                />
-              </InspectorRow>
-              <InspectorRow label="Orientation">
-                <InspectorSegmented
-                  label="Print orientation"
-                  value={settings.printOrientation}
-                  options={PRINT_ORIENTATION_KEYS.map((key) => ({ value: key, label: PRINT_ORIENTATION_LABELS[key] }))}
-                  onChange={(value) => updateSetting("printOrientation", value as GraphSettings["printOrientation"])}
-                />
-              </InspectorRow>
-              <InspectorRow label="Margin">
-                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
-                  <NumberField
-                    label="Page margin"
-                    value={settings.pageMargin ?? 24}
-                    min={0}
-                    max={400}
-                    wholeStep
-                    hideLabel
-                    inputClassName={inspectorControlClass}
-                    onChange={(value) => updateSetting("pageMargin", Math.round(value))}
-                  />
-                  <span className="grid h-9 place-items-center rounded-md border border-[#d7dde5] bg-[#f8fafc] text-[12px] font-semibold text-[#475467]">px</span>
-                </div>
-              </InspectorRow>
-              <InspectorRow label="Align">
-                <div className="grid min-w-0 grid-cols-2 gap-2">
-                  <InspectorSelect
-                    label="Horizontal print alignment"
-                    value={settings.printHorizontalAlignment}
-                    options={PRINT_HORIZONTAL_ALIGNMENT_KEYS.map((key) => ({ value: key, label: PRINT_HORIZONTAL_ALIGNMENT_LABELS[key] }))}
-                    onChange={(value) => updateSetting("printHorizontalAlignment", value as GraphSettings["printHorizontalAlignment"])}
-                  />
-                  <InspectorSelect
-                    label="Vertical print alignment"
-                    value={settings.printVerticalAlignment}
-                    options={PRINT_VERTICAL_ALIGNMENT_KEYS.map((key) => ({ value: key, label: PRINT_VERTICAL_ALIGNMENT_LABELS[key] }))}
-                    onChange={(value) => updateSetting("printVerticalAlignment", value as GraphSettings["printVerticalAlignment"])}
-                  />
-                </div>
-              </InspectorRow>
-            </InspectorGroup>
-
-            <div className="min-w-0 overflow-hidden rounded-md border border-[#d7dde5] bg-[#f8fafc] p-3">
-              <p className="break-words font-mono text-[11px] leading-5 text-[#667085]">
-                Graph {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / {GRAPH_LINE_LAYER_LABELS[settings.gridLineLayer].toLowerCase()} grid / {settings.showNumbers ? `${GRID_NUMBER_PLACEMENT_LABELS[settings.gridNumberPlacement].toLowerCase()} numbers` : "numbers off"} / {settings.showPageBreaks ? "page guides on" : "page guides off"} / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
-              </p>
-            </div>
-          </div>
-        ) : null}
-
-        {inspectorTab === "draw" ? (
-          <div className="space-y-4">
-            <div className="grid h-9 grid-cols-2 overflow-hidden rounded-md border border-[#d7dde5] text-[12px]">
-              {drawTabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setDrawTab(tab.id)}
-                  className={`h-full font-medium ${drawTab === tab.id ? "bg-[#008c8f] text-white" : "text-[#344054]"} ${tab.id === "shape" ? "border-r border-[#d7dde5]" : ""}`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-
-            {drawTab === "shape" ? (
-              <InspectorGroup title="Shape Generator">
-                <div className="grid grid-cols-2 gap-2">
-                  {GENERATED_SHAPE_KIND_KEYS.map((kind) => (
-                    <button
-                      key={`draft-shape-${kind}`}
-                      type="button"
-                      onClick={() => {
-                        setDraftShapeKind(kind);
-                        if (shapeUsesSingleSize(kind)) setDraftShapeHeightCm(draftShapeWidthCm);
-                      }}
-                      className={`h-9 rounded-md border text-xs font-semibold ${draftShapeKind === kind ? "border-[#008c8f] bg-teal-50 text-[#007174]" : "border-[#d7dde5] bg-white text-[#344054]"}`}
-                    >
-                      {GRAPH_SHAPE_KIND_LABELS[kind]}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <NumberField
-                    label={shapeUsesSingleSize(draftShapeKind) ? "Size (CM)" : "Width (CM)"}
-                    value={draftShapeWidthCm}
-                    min={0.01}
-                    max={1000}
-                    step={0.1}
-                    allowDecimalInput
-                    inputClassName={inspectorControlClass}
-                    onChange={(value) => {
-                      setDraftShapeWidthCm(value);
-                      if (shapeUsesSingleSize(draftShapeKind)) setDraftShapeHeightCm(value);
-                    }}
-                  />
-                  <NumberField
-                    label={shapeUsesSingleSize(draftShapeKind) ? "Size (CM)" : "Height (CM)"}
-                    value={shapeUsesSingleSize(draftShapeKind) ? draftShapeWidthCm : draftShapeHeightCm}
-                    min={0.01}
-                    max={1000}
-                    step={0.1}
-                    allowDecimalInput
-                    inputClassName={inspectorControlClass}
-                    disabled={shapeUsesSingleSize(draftShapeKind)}
-                    onChange={setDraftShapeHeightCm}
-                  />
-                </div>
-
-                <InspectorSegmented
-                  label="Shape type"
-                  value={draftShapeFillMode}
-                  options={(["outline", "filled"] as ShapeFillMode[]).map((mode) => ({ value: mode, label: GENERATED_SHAPE_FILL_MODE_LABELS[mode] }))}
-                  onChange={(value) => setDraftShapeFillMode(value as ShapeFillMode)}
-                />
-
-                {draftShapeFillMode === "outline" && shapeSupportsSides(draftShapeKind) ? (
-                  <div className="grid grid-cols-4 gap-1">
-                    {CELL_LINE_SIDE_KEYS.map((side) => (
-                      <label key={`draft-side-${side}`} className="flex h-9 items-center gap-1.5 rounded-md border border-[#d7dde5] bg-white px-2 text-[11px] font-semibold text-[#344054]">
-                        <input
-                          type="checkbox"
-                          checked={draftShapeSides.includes(side)}
-                          onChange={(event) => setDraftShapeSide(side, event.target.checked)}
-                          className="h-4 w-4 accent-[#008c8f]"
-                        />
-                        {CELL_LINE_SIDE_LABELS[side]}
-                      </label>
-                    ))}
-                  </div>
-                ) : null}
-
-                <NumberField
-                  label="Stroke width"
-                  value={draftShapeStrokeWidth}
-                  min={1}
-                  max={24}
-                  inputClassName={inspectorControlClass}
-                  onChange={(value) => setDraftShapeStrokeWidth(Math.round(value))}
-                />
-                <ColorPresetField label="Stroke color" value={draftShapeStrokeColor} onChange={setDraftShapeStrokeColor} />
-                {draftShapeFillMode === "filled" ? <ColorPresetField label="Fill color" value={draftShapeFillColor} onChange={setDraftShapeFillColor} allowTransparent /> : null}
-
-                <div className="overflow-hidden rounded-md border border-[#d7dde5] bg-[#f8fafc]">
-                  <div
-                    draggable
-                    onDragStart={handleGeneratedShapeDragStart}
-                    onDragEnd={() => setPlacingGeneratedShape(false)}
-                    className="grid h-36 cursor-grab place-items-center bg-white p-3 active:cursor-grabbing"
-                    title="Drag to canvas"
-                  >
-                    <ShapePreviewSvg
-                      kind={draftShapeKind}
-                      sides={shapeSupportsSides(draftShapeKind) ? draftShapeSides : CELL_LINE_SIDE_KEYS}
-                      fillColor={draftShapeFillMode === "filled" ? draftShapeFillColor : TRANSPARENT_FILL_COLOR}
-                      strokeColor={draftShapeStrokeColor}
-                      strokeWidth={draftShapeStrokeWidth}
-                      widthCells={draftShapePreviewDimensions.width}
-                      heightCells={draftShapePreviewDimensions.height}
-                      className="h-full max-h-28 w-full"
-                    />
-                  </div>
-                  <div className="grid grid-cols-3 gap-2 border-t border-[#e8edf2] p-2">
-                    <button
-                      type="button"
-                      onClick={() => setPlacingGeneratedShape((value) => !value)}
-                      className={`h-9 rounded-md border text-xs font-semibold ${placingGeneratedShape ? "border-[#008c8f] bg-[#008c8f] text-white" : "border-[#d7dde5] bg-white text-[#344054]"}`}
-                    >
-                      Place on canvas
-                    </button>
-                    <button type="button" onClick={clearGraphShapes} disabled={!settings.graphShapes.length} className="h-9 rounded-md border border-[#d7dde5] bg-white text-xs font-semibold text-[#344054] disabled:opacity-45">
-                      Clear generated
-                    </button>
-                  </div>
-                </div>
-              </InspectorGroup>
-            ) : null}
-
-            {drawTab === "clipart" ? (
-              <InspectorGroup title="Clipart Library">
-                <label className={`flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md border border-[#d7dde5] bg-white text-sm font-semibold text-[#344054] hover:bg-[#f8fafc] ${uploadingCliparts ? "opacity-60" : ""}`}>
-                  {uploadingCliparts ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Upload size={16} aria-hidden="true" />}
-                  Upload cliparts
-                  <input
-                    type="file"
-                    accept={CLIPART_ACCEPT}
-                    multiple
-                    disabled={uploadingCliparts}
-                    className="sr-only"
-                    onChange={(event) => {
-                      const files = Array.from(event.target.files ?? []);
-                      event.target.value = "";
-                      if (files.length) void uploadClipartAssets(files);
-                    }}
-                  />
-                </label>
-                <label className="grid gap-1.5">
-                  <span className="text-xs font-semibold text-slate-500">Search clipart by name</span>
-                  <div className="relative">
-                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#98a2b3]" aria-hidden="true" />
-                    <input
-                      type="text"
-                      value={clipartSearch}
-                      onChange={(event) => setClipartSearch(event.target.value)}
-                      placeholder="Search clipart"
-                      className="h-10 w-full rounded-md border border-[var(--line)] bg-white py-2 pr-3 pl-9 text-sm outline-none focus:border-[#008c8f] focus:ring-2 focus:ring-teal-100"
-                    />
-                  </div>
-                </label>
-
-                {settings.clipartAssets.length ? (
-                  filteredClipartAssets.length ? (
-                    <div className="grid max-h-44 gap-1 overflow-y-auto rounded-md border border-[#d7dde5] bg-white p-1">
-                      {filteredClipartAssets.map((asset) => {
-                        const selected = selectedClipartAsset?.id === asset.id;
-                        const previewUrl = asset.url ?? asset.dataUrl ?? null;
-                        return (
-                          <button
-                            key={`clipart-asset-${asset.id}`}
-                            type="button"
-                            onClick={() => {
-                              setSelectedClipartAssetId(asset.id);
-                              const aspect = clipartAssetAspect(asset);
-                              if (draftClipartHeightCm === draftClipartWidthCm) setDraftClipartHeightCm(roundMeasure(draftClipartWidthCm / aspect));
-                            }}
-                            className={`grid min-h-14 grid-cols-[44px_minmax(0,1fr)_24px] items-center gap-2 rounded px-2 py-1.5 text-left ${selected ? "bg-[#ecfeff] text-[#0f766e]" : "hover:bg-[#f8fafc]"}`}
-                          >
-                            {previewUrl ? (
-                              <img src={previewUrl} alt="" className="h-11 w-11 rounded border border-[#d7dde5] bg-white object-contain p-1" />
-                            ) : (
-                              <span className="grid h-11 w-11 place-items-center rounded border border-[#d7dde5] bg-[#f8fafc] text-[#98a2b3]">
-                                <ImageIcon size={15} aria-hidden="true" />
-                              </span>
-                            )}
-                            <span className="min-w-0">
-                              <span className="block truncate text-[12px] font-semibold text-[#101828]">{asset.name}</span>
-                              <span className="block truncate text-[11px] text-[#667085]">{asset.width} x {asset.height}</span>
-                            </span>
-                            {selected ? <Check size={16} aria-hidden="true" /> : null}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="rounded-md border border-dashed border-[#cfd7df] bg-[#f8fafc] px-3 py-5 text-center text-xs font-medium text-[#667085]">
-                      No cliparts match "{clipartSearch}"
-                    </div>
-                  )
-                ) : (
-                  <div className="rounded-md border border-dashed border-[#cfd7df] bg-[#f8fafc] px-3 py-5 text-center text-xs font-medium text-[#667085]">
-                    Upload cliparts to reuse in this project.
-                  </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-2">
-                  <NumberField
-                    label="Width (CM)"
-                    value={draftClipartWidthCm}
-                    min={0.01}
-                    max={1000}
-                    step={0.1}
-                    allowDecimalInput
-                    inputClassName={inspectorControlClass}
-                    onChange={(value) => {
-                      const aspect = clipartAssetAspect();
-                      setDraftClipartWidthCm(value);
-                      setDraftClipartHeightCm(roundMeasure(value / aspect));
-                    }}
-                  />
-                  <NumberField
-                    label="Height (CM)"
-                    value={draftClipartHeightCm}
-                    min={0.01}
-                    max={1000}
-                    step={0.1}
-                    allowDecimalInput
-                    inputClassName={inspectorControlClass}
-                    onChange={setDraftClipartHeightCm}
-                  />
-                </div>
-                <NumberField label="Line size" value={draftClipartStrokeWidth} min={1} max={24} inputClassName={inspectorControlClass} onChange={(value) => setDraftClipartStrokeWidth(Math.round(value))} />
-                <ColorPresetField label="Stroke color" value={draftClipartStrokeColor} onChange={setDraftClipartStrokeColor} />
-                <ColorPresetField label="Fill color" value={draftClipartFillColor} onChange={setDraftClipartFillColor} allowTransparent />
-
-                <div className="overflow-hidden rounded-md border border-[#d7dde5] bg-[#f8fafc]">
-                  <div
-                    draggable={Boolean(selectedClipartAsset)}
-                    onDragStart={selectedClipartAsset ? handleClipartDragStart(selectedClipartAsset.id) : undefined}
-                    onDragEnd={() => setPlacingClipartAssetId(null)}
-                    className={`grid h-36 place-items-center bg-white p-3 ${selectedClipartAsset ? "cursor-grab active:cursor-grabbing" : "text-[#98a2b3]"}`}
-                    title={selectedClipartAsset ? "Drag to canvas" : "Upload or select a clipart"}
-                  >
-                    {selectedClipartAsset?.url || selectedClipartAsset?.dataUrl ? (
-                      <div
-                        className="grid h-full max-h-28 w-full overflow-hidden place-items-center rounded border bg-[#f8fafc] p-2"
-                        style={{ borderColor: draftClipartStrokeColor }}
-                      >
-                        <img
-                          src={selectedClipartAsset.url ?? selectedClipartAsset.dataUrl ?? ""}
-                          alt=""
-                          className="h-full w-full max-h-24 max-w-full object-contain"
-                          style={{
-                            aspectRatio: `${Math.max(0.01, draftClipartPreviewDimensions.width)} / ${Math.max(0.01, draftClipartPreviewDimensions.height)}`,
-                          }}
-                        />
-                      </div>
-                    ) : (
-                      <ImageIcon size={28} aria-hidden="true" />
-                    )}
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 border-t border-[#e8edf2] p-2">
-                    <button
-                      type="button"
-                      onClick={() => selectedClipartAsset && setPlacingClipartAssetId((value) => (value === selectedClipartAsset.id ? null : selectedClipartAsset.id))}
-                      disabled={!selectedClipartAsset}
-                      className={`h-9 rounded-md border text-xs font-semibold disabled:opacity-45 ${placingClipartAssetId === selectedClipartAsset?.id ? "border-[#008c8f] bg-[#008c8f] text-white" : "border-[#d7dde5] bg-white text-[#344054]"}`}
-                    >
-                      Place clipart
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (selectedClipartAsset) void deleteClipartAsset(selectedClipartAsset.id);
-                      }}
-                      disabled={!selectedClipartAsset || deletingClipartAssetId !== null}
-                      className="h-9 rounded-md border border-[#d7dde5] bg-white text-xs font-semibold text-[#b42318] disabled:opacity-45"
-                    >
-                      {selectedClipartAsset && deletingClipartAssetId === selectedClipartAsset.id ? <Loader2 size={14} className="animate-spin" /> : "Delete clipart"}
-                    </button>
-                    <button type="button" onClick={() => setGeneratedImagesCollapsed(false)} disabled={!settings.clipartImages.length} className="h-9 rounded-md border border-[#d7dde5] bg-white text-xs font-semibold text-[#344054] disabled:opacity-45">
-                      Show placed
-                    </button>
-                  </div>
-                </div>
-              </InspectorGroup>
-            ) : null}
-
-            {drawTab === "shape" && selectedShapeLayer ? (
-              <InspectorGroup title="Selected Generated Image">
-                <div className="rounded-md border border-[#d7dde5] bg-white">
-                  {renderShapeAdvanced(selectedShapeLayer)}
-                </div>
-              </InspectorGroup>
-            ) : null}
-            {drawTab === "clipart" && selectedClipartLayer ? (
-              <InspectorGroup title="Selected Clipart Image">
-                <div className="rounded-md border border-[#d7dde5] bg-white">
-                  {renderClipartAdvanced(selectedClipartLayer)}
-                </div>
-              </InspectorGroup>
-            ) : null}
-            {selectedCellLayer ? (
-              <InspectorGroup title="Selected Cell Paint">
-                <div className="rounded-md border border-[#d7dde5] bg-white">
-                  {renderCellAdvanced(selectedCellLayer)}
-                </div>
-              </InspectorGroup>
-            ) : null}
-          </div>
-        ) : null}
-
-        <CollapsibleSection title="Outline" summary={<ColorSummary value={settings.outlineColor} />} open={!collapsedSections.outline} onToggle={() => toggleSection("outline")} className={inspectorTab === "palette" ? "" : "hidden"}>
-          <ColorPresetField label="Outline" value={settings.outlineColor} onChange={updateOutlineColor} />
-        </CollapsibleSection>
-
-        <CollapsibleSection title="Default fill" summary={<ColorSummary value={settings.fillColor} />} open={!collapsedSections.fill} onToggle={() => toggleSection("fill")} className={inspectorTab === "palette" ? "" : "hidden"}>
-          <ColorPresetField label="Default fill" value={settings.fillColor} onChange={(value) => updateSetting("fillColor", value)} allowTransparent />
-        </CollapsibleSection>
-
-        {selectedFillRegion ? (
-          <CollapsibleSection title={`Selected fill ${selectedFillRegion.id}`} summary={<ColorSummary value={selectedFillRegionColor} />} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")} className={inspectorTab === "palette" ? "" : "hidden"}>
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-xs font-semibold text-slate-500">{selectedFillRegion.kind === "source" ? "Source fill" : "Manual fill"}</span>
-              <button
-                type="button"
-                onClick={() => resetFillRegionColor(selectedFillRegion.id)}
-                className="grid h-8 w-8 place-items-center rounded-md border border-[var(--line)] bg-white text-slate-600 hover:bg-slate-50"
-                title="Use default fill"
-              >
-                <RefreshCw size={14} aria-hidden="true" />
-              </button>
-            </div>
-            <ColorPresetField
-              label="Section fill"
-              value={selectedFillRegionColor}
-              onChange={(value) => updateFillRegionColor(selectedFillRegion.id, value)}
-              allowTransparent
-            />
-          </CollapsibleSection>
-        ) : null}
-
-        <CollapsibleSection title="Graph lines" summary={<ColorSummary value={settings.gridLineColor} />} open={!collapsedSections.graphLines} onToggle={() => toggleSection("graphLines")} className={inspectorTab === "palette" ? "" : "hidden"}>
-          <ColorPresetField
-            label="Graph lines"
-            value={settings.gridLineColor}
-            colors={PRESET_GRAPH_LINE_COLORS}
-            onChange={(value) => updateSetting("gridLineColor", value)}
-          />
-        </CollapsibleSection>
-      </div>
-      <button
-        type="button"
-        aria-label="Resize controls panel"
-        title="Resize controls panel"
-        onPointerDown={(event) => beginPanelResize(event, "right")}
-        onPointerMove={resizePanel}
-        onPointerUp={endPanelResize}
-        onPointerCancel={endPanelResize}
-        className="group absolute inset-y-0 left-0 hidden w-3 cursor-col-resize touch-none place-items-center lg:grid"
-      >
-        <span
-          className="absolute top-1/2 left-1.5 h-[50vh] w-px -translate-y-1/2 bg-slate-200 opacity-0 transition-colors transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-hover:bg-[var(--teal)]"
-          aria-hidden="true"
-        />
-        <span
-          className={`grid h-6 w-6 place-items-center rounded-full border border-[var(--line)] bg-white text-slate-500 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${
-            resizingPanelSide === "right" ? "opacity-100" : "opacity-0"
-          }`}
-          aria-hidden="true"
-        >
-          <ArrowLeftRight size={13} />
-        </span>
-      </button>
-    </aside>
-  );
-
-  const graphPreviewWidth = Math.max(1, previewCanvasSize.width * zoom);
-  const graphPreviewHeight = Math.max(1, previewCanvasSize.height * zoom);
-  const outsideNumberMargin = settings.showNumbers && settings.gridNumberPlacement === "outside" ? 34 : 0;
-  const outsideHorizontalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? cellNumberLabels(settings.graphWidth) : [];
-  const outsideVerticalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? cellNumberLabels(settings.graphHeight) : [];
-  const paperForPreview = PRINT_PAPER_SIZES[settings.printPaperSize] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
-  const printPreviewPlan = createPdfExportPlan({
-    settings,
-    paper: paperForPreview,
-    canvasWidth: previewCanvasSize.width,
-    canvasHeight: previewCanvasSize.height,
-  });
-  const pageBreakGuideY = settings.showPageBreaks
-    ? Array.from(new Set(printPreviewPlan.tiles.filter((tile) => tile.tileX === 0 && tile.tileY > 0).map((tile) => tile.sourceY))).sort((a, b) => a - b)
-    : [];
-  const pageBreakGuideX = settings.showPageBreaks
-    ? Array.from(new Set(printPreviewPlan.tiles.filter((tile) => tile.tileY === 0 && tile.tileX > 0).map((tile) => tile.sourceX))).sort((a, b) => a - b)
-    : [];
-  useEffect(() => {
-    const scroller = canvasScrollRef.current;
-    const stage = graphStageRef.current;
-    if (!scroller || !stage) return;
-
-    let frame = 0;
-    const updateGuide = () => {
-      frame = 0;
-      const nextGuide = {
-        left: scroller.scrollLeft - stage.offsetLeft,
-        top: scroller.scrollTop - stage.offsetTop,
-        width: Math.max(1, scroller.clientWidth),
-        height: Math.max(1, scroller.clientHeight),
-      };
-      setCanvasViewportGuide((current) =>
-        current.left === nextGuide.left &&
-        current.top === nextGuide.top &&
-        current.width === nextGuide.width &&
-        current.height === nextGuide.height
-          ? current
-          : nextGuide,
-      );
-    };
-    const scheduleGuideUpdate = () => {
-      if (frame) return;
-      frame = window.requestAnimationFrame(updateGuide);
-    };
-
-    updateGuide();
-    scroller.addEventListener("scroll", scheduleGuideUpdate, { passive: true });
-    window.addEventListener("resize", scheduleGuideUpdate);
-    const resizeObserver = new ResizeObserver(scheduleGuideUpdate);
-    resizeObserver.observe(scroller);
-    resizeObserver.observe(stage);
-
-    return () => {
-      scroller.removeEventListener("scroll", scheduleGuideUpdate);
-      window.removeEventListener("resize", scheduleGuideUpdate);
-      resizeObserver.disconnect();
-      if (frame) window.cancelAnimationFrame(frame);
-    };
-  }, [
-    graphPreviewHeight,
-    graphPreviewWidth,
-    leftPanelWidth,
-    outsideNumberMargin,
-    rightPanelWidth,
-    settingsPanelCollapsed,
-    sourcePanelCollapsed,
-    zoom,
-  ]);
   const pageBreakGuideWidth = Math.max(1, canvasViewportGuide.width);
   const pageBreakGuideHeight = Math.max(1, canvasViewportGuide.height);
   const selectedSourceBox =
@@ -6061,7 +5207,106 @@ export function EditorClient({ project }: { project: Project }) {
       <div className="editor-workspace" style={editorGridStyle}>
         <div className={`editor-side-column ${mobileTab === "source" ? "block" : "hidden"} ${sourcePanelCollapsed ? "lg:hidden" : "lg:block"}`}>{sourcePanel}</div>
         <div className={mobileTab === "canvas" ? "block" : "hidden lg:block"}>{canvasPanel}</div>
-        <div className={`editor-side-column ${mobileTab === "controls" ? "block" : "hidden"} ${settingsPanelCollapsed ? "lg:hidden" : "lg:block"}`}>{settingsPanel}</div>
+        <div className={`editor-side-column ${mobileTab === "controls" ? "block" : "hidden"} ${settingsPanelCollapsed ? "lg:hidden" : "lg:block"}`}><InspectorPanel
+            settings={settings}
+            sourceStatus={sourceStatus}
+            inspectorTab={inspectorTab}
+            setInspectorTab={setInspectorTab}
+            drawTab={drawTab}
+            setDrawTab={setDrawTab}
+            collapsedSections={collapsedSections}
+            toggleSection={toggleSection}
+            isPaletteSectionExpanded={isPaletteSectionExpanded}
+            selectedSource={selectedSource}
+            selectedClipartAsset={selectedClipartAsset}
+            selectedShapeLayer={selectedShapeLayer}
+            selectedClipartLayer={selectedClipartLayer}
+            selectedCellLayer={selectedCellLayer}
+            selectedFillRegion={selectedFillRegion}
+            selectedFillRegionColor={selectedFillRegionColor}
+            filteredClipartAssets={filteredClipartAssets}
+            uploadingCliparts={uploadingCliparts}
+            deletingClipartAssetId={deletingClipartAssetId}
+            clipartSearch={clipartSearch}
+            setClipartSearch={setClipartSearch}
+            setSelectedClipartAssetId={setSelectedClipartAssetId}
+            placingClipartAssetId={placingClipartAssetId}
+            placingGeneratedShape={placingGeneratedShape}
+            draftShapeKind={draftShapeKind}
+            draftShapeWidthCm={draftShapeWidthCm}
+            draftShapeHeightCm={draftShapeHeightCm}
+            draftShapeFillMode={draftShapeFillMode}
+            draftShapeSides={draftShapeSides}
+            draftShapeStrokeWidth={draftShapeStrokeWidth}
+            draftShapeStrokeColor={draftShapeStrokeColor}
+            draftShapeFillColor={draftShapeFillColor}
+            draftShapePreviewDimensions={draftShapePreviewDimensions}
+            setDraftShapeKind={setDraftShapeKind}
+            setDraftShapeWidthCm={setDraftShapeWidthCm}
+            setDraftShapeHeightCm={setDraftShapeHeightCm}
+            setDraftShapeFillMode={setDraftShapeFillMode}
+            setDraftShapeSide={setDraftShapeSide}
+            setDraftShapeStrokeWidth={setDraftShapeStrokeWidth}
+            setDraftShapeStrokeColor={setDraftShapeStrokeColor}
+            setDraftShapeFillColor={setDraftShapeFillColor}
+            setPlacingGeneratedShape={setPlacingGeneratedShape}
+            setPlacingClipartAssetId={setPlacingClipartAssetId}
+            draftClipartWidthCm={draftClipartWidthCm}
+            draftClipartHeightCm={draftClipartHeightCm}
+            draftClipartStrokeWidth={draftClipartStrokeWidth}
+            draftClipartStrokeColor={draftClipartStrokeColor}
+            draftClipartFillColor={draftClipartFillColor}
+            draftClipartPreviewDimensions={draftClipartPreviewDimensions}
+            setDraftClipartWidthCm={setDraftClipartWidthCm}
+            setDraftClipartHeightCm={setDraftClipartHeightCm}
+            setDraftClipartStrokeWidth={setDraftClipartStrokeWidth}
+            setDraftClipartStrokeColor={setDraftClipartStrokeColor}
+            setDraftClipartFillColor={setDraftClipartFillColor}
+            handleGeneratedShapeDragStart={handleGeneratedShapeDragStart}
+            handleClipartDragStart={handleClipartDragStart}
+            clearGraphShapes={clearGraphShapes}
+            uploadClipartAssets={uploadClipartAssets}
+            deleteClipartAsset={deleteClipartAsset}
+            setGeneratedImagesCollapsed={setGeneratedImagesCollapsed}
+            renderShapeAdvanced={renderShapeAdvanced}
+            renderClipartAdvanced={renderClipartAdvanced}
+            renderCellAdvanced={renderCellAdvanced}
+            updateSourceImage={updateSourceImage}
+            updateSourceImagePhysicalWidthCm={updateSourceImagePhysicalWidthCm}
+            updateSourceImagePhysicalHeight={updateSourceImagePhysicalHeight}
+            rotateSourceImage={rotateSourceImage}
+            flipSourceImage={flipSourceImage}
+            sourcePhysicalWidthCm={sourcePhysicalWidthCm}
+            sourcePhysicalHeight={sourcePhysicalHeight}
+            sourceRightPadding={sourceRightPadding}
+            sourceBottomPadding={sourceBottomPadding}
+            toggleSourceLock={toggleSourceLock}
+            toggleSourceVisibility={toggleSourceVisibility}
+            updateSetting={updateSetting}
+            updateMeasurementUnit={updateMeasurementUnit}
+            updateImageWidthCm={updateImageWidthCm}
+            updateImageHeightPhysical={updateImageHeightPhysical}
+            updateGraphPhysicalHeight={updateGraphPhysicalHeight}
+            updateOutlineColor={updateOutlineColor}
+            updateFillRegionColor={updateFillRegionColor}
+            resetFillRegionColor={resetFillRegionColor}
+            setSettingsWithHistory={setSettingsWithHistory}
+            editorDefaultGraphSettings={editorDefaultGraphSettings}
+            setSelectedFillRegionId={setSelectedFillRegionId}
+            setFloatingPalette={setFloatingPalette}
+            setCopiedFillColor={setCopiedFillColor}
+            imageWidthCm={imageWidthCm}
+            imageHeightCm={imageHeightCm}
+            printWidthCm={printWidthCm}
+            printHeightCm={printHeightCm}
+            roundMeasure={roundMeasure}
+            cmToUnit={cmToUnit}
+            clipartAssetAspect={clipartAssetAspect}
+            beginPanelResize={beginPanelResize}
+            resizePanel={resizePanel}
+            endPanelResize={endPanelResize}
+            resizingPanelSide={resizingPanelSide}
+          /></div>
       </div>
 
       <div className="grid h-16 grid-cols-3 border-t border-[#d7dde5] bg-white lg:hidden">

@@ -6,6 +6,7 @@ export const BOOTSTRAP_ADMIN_EMAIL = "dmeher1996@gmail.com";
 
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 export const MAX_PROJECT_UPLOAD_FILES = 12;
+export const MAX_PROJECT_UPLOAD_TOTAL_BYTES = 150 * 1024 * 1024;
 export const ALLOWED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/svg+xml", "application/pdf", "application/x-pdf"] as const;
 export const ALLOWED_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "svg", "pdf"]);
 export const ALLOWED_IMAGE_LABEL = "PNG, JPG, JPEG, WEBP, SVG, or PDF";

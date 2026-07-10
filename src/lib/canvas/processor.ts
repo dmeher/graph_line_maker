@@ -13,6 +13,7 @@ import {
   isFillColor,
   isTransparentFillColor,
 } from "@/lib/graph-paper";
+import { assertCanvasBudget } from "@/lib/canvas/performance-limits";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 
 type CanvasLike = HTMLCanvasElement | OffscreenCanvas;
@@ -68,9 +69,24 @@ type FillMaskLayer = {
 
 const contentBoundsCache = new WeakMap<CanvasLike, ContentBounds>();
 
+function positiveInteger(value: unknown, fallback = 1) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+  return Math.max(1, Math.round(numeric));
+}
+
+function positiveNumber(value: unknown, fallback: number) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
+}
+
+function hasDrawableCanvas(canvas: CanvasLike | null | undefined) {
+  return Boolean(canvas && positiveInteger(canvas.width, 0) > 0 && positiveInteger(canvas.height, 0) > 0);
+}
+
 function createProcessingCanvas(width: number, height: number) {
-  const safeWidth = Math.max(1, Math.round(width));
-  const safeHeight = Math.max(1, Math.round(height));
+  const safeWidth = positiveInteger(width);
+  const safeHeight = positiveInteger(height);
   if (typeof document !== "undefined") {
     const canvas = document.createElement("canvas");
     canvas.width = safeWidth;
@@ -85,14 +101,16 @@ function getProcessingContext(canvas: CanvasLike, options?: CanvasRenderingConte
 }
 
 function graphDimensions(settings: GraphSettings) {
-  const graphWidth = Math.max(1, Math.round(settings.graphWidth || 1));
-  const graphHeight = Math.max(1, Math.round(settings.graphHeight || 1));
+  const graphWidth = positiveInteger(settings.graphWidth);
+  const graphHeight = positiveInteger(settings.graphHeight);
   const cellWidth = GRAPH_MAJOR_CELL_PIXELS;
   const cellHeight = GRAPH_MAJOR_CELL_PIXELS;
   const imageAreaWidth = graphWidth * cellWidth;
   const imageAreaHeight = graphHeight * cellHeight;
-  const imageWidth = Math.max(1, Math.min(imageAreaWidth, Math.round(Number(settings.imageWidth || graphWidth) * cellWidth)));
-  const imageHeight = Math.max(1, Math.min(imageAreaHeight, Math.round(Number(settings.imageHeight || graphHeight) * cellHeight)));
+  const imageWidthCells = positiveNumber(settings.imageWidth, graphWidth);
+  const imageHeightCells = positiveNumber(settings.imageHeight, graphHeight);
+  const imageWidth = Math.max(1, Math.min(imageAreaWidth, Math.round(imageWidthCells * cellWidth)));
+  const imageHeight = Math.max(1, Math.min(imageAreaHeight, Math.round(imageHeightCells * cellHeight)));
   const outputWidth = imageAreaWidth;
   const outputHeight = imageAreaHeight;
 
@@ -128,8 +146,11 @@ export async function loadImageToCanvas(fileOrUrl: File | Blob | string, fileNam
     });
 
     const canvas = document.createElement("canvas");
-    canvas.width = image.naturalWidth || image.width;
-    canvas.height = image.naturalHeight || image.height;
+    const width = positiveInteger(image.naturalWidth || image.width, 0);
+    const height = positiveInteger(image.naturalHeight || image.height, 0);
+    if (!width || !height) throw new Error("The selected image has no drawable pixels.");
+    canvas.width = width;
+    canvas.height = height;
     const context = canvas.getContext("2d", { willReadFrequently: true });
     if (!context) throw new Error("Canvas is not available.");
     context.drawImage(image, 0, 0);
@@ -140,7 +161,10 @@ export async function loadImageToCanvas(fileOrUrl: File | Blob | string, fileNam
 }
 
 export function resizeImage(canvas: HTMLCanvasElement, maxWidth: number, maxHeight: number) {
-  const ratio = Math.min(1, maxWidth / canvas.width, maxHeight / canvas.height);
+  if (!hasDrawableCanvas(canvas)) throw new Error("The selected image has no drawable pixels.");
+  const safeMaxWidth = positiveInteger(maxWidth);
+  const safeMaxHeight = positiveInteger(maxHeight);
+  const ratio = Math.min(1, safeMaxWidth / canvas.width, safeMaxHeight / canvas.height);
   if (ratio >= 1) return canvas;
 
   const output = document.createElement("canvas");
@@ -155,6 +179,7 @@ export function resizeImage(canvas: HTMLCanvasElement, maxWidth: number, maxHeig
 }
 
 function fitCanvas(canvas: CanvasLike, settings: GraphSettings) {
+  if (!hasDrawableCanvas(canvas)) throw new Error("The selected image has no drawable pixels.");
   const dimensions = graphDimensions(settings);
   const width = dimensions.outputWidth;
   const height = dimensions.outputHeight;
@@ -187,6 +212,7 @@ function fitCanvas(canvas: CanvasLike, settings: GraphSettings) {
 export function findContentBounds(canvas: CanvasLike): ContentBounds {
   const cached = contentBoundsCache.get(canvas);
   if (cached) return cached;
+  if (!hasDrawableCanvas(canvas)) throw new Error("The selected image has no drawable pixels.");
 
   const context = getProcessingContext(canvas, { willReadFrequently: true });
   if (!context) throw new Error("Canvas is not available.");
@@ -683,6 +709,7 @@ function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
 
 function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, options: { sourceIsFitted?: boolean } = {}) {
   const fitted = options.sourceIsFitted ? sourceCanvas : fitCanvas(sourceCanvas, settings);
+  assertCanvasBudget(fitted.width, fitted.height, 1);
   const fittedContext = getProcessingContext(fitted, { willReadFrequently: true });
   if (!fittedContext) throw new Error("Canvas is not available.");
 
@@ -746,6 +773,7 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
   const dimensions = graphDimensions(settings);
   const width = dimensions.outputWidth;
   const height = dimensions.outputHeight;
+  assertCanvasBudget(width, height, Math.max(1, layers.length));
   const output = createProcessingCanvas(width, height);
   const outputContext = getProcessingContext(output, { willReadFrequently: true });
   if (!outputContext) throw new Error("Canvas is not available.");
@@ -770,6 +798,7 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
   }
 
   for (const layer of layers) {
+    if (!hasDrawableCanvas(layer.canvas)) continue;
     const fitted =
       layer.canvas.width === width && layer.canvas.height === height
         ? layer.canvas

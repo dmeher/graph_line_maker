@@ -1,7 +1,5 @@
 import Link from "next/link";
-import { redirect } from "next/navigation";
 import { ArrowRight, Grid3X3, ImageUp, Palette, ShieldCheck } from "lucide-react";
-import { getCurrentSession } from "@/lib/auth/session";
 import { BrandMark } from "@/components/layout/brand-mark";
 
 const features = [
@@ -11,12 +9,7 @@ const features = [
   { label: "Private access", icon: ShieldCheck, text: "Brevo OTP allowlist" },
 ];
 
-export const dynamic = "force-dynamic";
-
-export default async function Home() {
-  const session = await getCurrentSession();
-  if (session) redirect("/dashboard");
-
+export default function Home() {
   return (
     <main className="min-h-dvh bg-white">
       <header className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6">

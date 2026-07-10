@@ -1,4 +1,8 @@
-const CACHE_VERSION = "graph-pixel-maker-v39";
+const CACHE_PREFIX = "graph-pixel-maker-";
+const CACHE_VERSION = `${CACHE_PREFIX}v40`;
+const MAX_CACHED_EDITOR_NAVIGATIONS = 20;
+const LOCAL_HOSTNAMES = ["localhost", "127.0.0.1", "::1"];
+const IS_LOCAL_DEVELOPMENT = LOCAL_HOSTNAMES.includes(self.location.hostname);
 const OFFLINE_SESSION_MARKER = "/__graph-pixel-offline-session";
 const OFFLINE_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const OFFLINE_SESSION_READY_MESSAGE = "GRAPH_PIXEL_OFFLINE_SESSION_READY";
@@ -72,20 +76,19 @@ async function hasFreshOfflineSession(cache) {
   return true;
 }
 
-async function findCachedNavigation(cache, url, request) {
-  const exact = await cache.match(request);
-  if (exact) return exact;
+function canonicalNavigationRequest(url) {
+  return new Request(`${url.origin}${url.pathname}`, { method: "GET" });
+}
 
-  const requests = await cache.keys();
-  for (const cachedRequest of requests) {
-    const cachedUrl = new URL(cachedRequest.url);
-    if (cachedUrl.origin === url.origin && cachedUrl.pathname === url.pathname) {
-      const cached = await cache.match(cachedRequest);
-      if (cached) return cached;
-    }
-  }
+async function findCachedNavigation(cache, url) {
+  return cache.match(canonicalNavigationRequest(url));
+}
 
-  return null;
+async function trimEditorNavigations(cache) {
+  const editorRequests = (await cache.keys()).filter((request) => isEditableProjectPath(new URL(request.url).pathname));
+  const excess = editorRequests.length - MAX_CACHED_EDITOR_NAVIGATIONS;
+  if (excess <= 0) return;
+  await Promise.all(editorRequests.slice(0, excess).map((request) => cache.delete(request)));
 }
 
 async function deleteProtectedNavigations(cache) {
@@ -107,19 +110,42 @@ async function deleteBlockedOfflineNavigations(cache) {
 }
 
 self.addEventListener("install", (event) => {
+  if (IS_LOCAL_DEVELOPMENT) {
+    event.waitUntil(self.skipWaiting());
+    return;
+  }
+
   event.waitUntil(
     caches
       .open(CACHE_VERSION)
-      .then((cache) => cache.addAll(APP_SHELL))
+      .then((cache) =>
+        Promise.all(
+          APP_SHELL.map(async (path) => {
+            const response = await fetch(path, { credentials: "omit", redirect: "error" });
+            if (!response.ok || response.redirected) throw new Error(`Unable to precache ${path}.`);
+            await cache.put(path, response);
+          }),
+        ),
+      )
       .then(() => self.skipWaiting()),
   );
 });
 
 self.addEventListener("activate", (event) => {
+  if (IS_LOCAL_DEVELOPMENT) {
+    event.waitUntil(
+      caches
+        .keys()
+        .then((keys) => Promise.all(keys.filter((key) => key.startsWith(CACHE_PREFIX)).map((key) => caches.delete(key))))
+        .then(() => self.clients.claim()),
+    );
+    return;
+  }
+
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((key) => key !== CACHE_VERSION).map((key) => caches.delete(key))))
+      .then((keys) => Promise.all(keys.filter((key) => key.startsWith(CACHE_PREFIX) && key !== CACHE_VERSION).map((key) => caches.delete(key))))
       .then(() => caches.open(CACHE_VERSION))
       .then((cache) => deleteBlockedOfflineNavigations(cache))
       .then(() => self.clients.claim()),
@@ -136,15 +162,21 @@ self.addEventListener("message", (event) => {
     const cachedAt = typeof event.data.cachedAt === "string" ? event.data.cachedAt : new Date().toISOString();
     const expiresAt = typeof event.data.expiresAt === "string" ? event.data.expiresAt : "";
     event.waitUntil(
-      caches.open(CACHE_VERSION).then((cache) =>
-        cache.put(
+      caches.open(CACHE_VERSION).then(async (cache) => {
+        const previousMarker = await cache.match(OFFLINE_SESSION_MARKER);
+        const previousSnapshot = await previousMarker?.json().catch(() => null);
+        const nextUserId = typeof event.data.userId === "string" ? event.data.userId : null;
+        if (previousSnapshot?.userId && previousSnapshot.userId !== nextUserId) {
+          await deleteProtectedNavigations(cache);
+        }
+        return cache.put(
           OFFLINE_SESSION_MARKER,
           new Response(
             JSON.stringify({
               version: 1,
               cachedAt,
               expiresAt,
-              userId: typeof event.data.userId === "string" ? event.data.userId : null,
+              userId: nextUserId,
             }),
             {
               headers: {
@@ -155,8 +187,8 @@ self.addEventListener("message", (event) => {
               },
             },
           ),
-        ).catch(() => {}),
-      ),
+        ).catch(() => {});
+      }),
     );
     return;
   }
@@ -177,17 +209,22 @@ async function handleNavigation(event, request, url) {
   try {
     const response = await fetch(request);
     if (shouldUseCachedEditorNavigation(url, response) && (await hasFreshOfflineSession(cache))) {
-      const cached = await findCachedNavigation(cache, url, request);
+      const cached = await findCachedNavigation(cache, url);
       if (cached) return cached;
     }
 
     if (isCacheableEditorNavigation(url, response)) {
-      event.waitUntil(cache.put(request, response.clone()).catch(() => {}));
+      event.waitUntil(
+        cache
+          .put(canonicalNavigationRequest(url), response.clone())
+          .then(() => trimEditorNavigations(cache))
+          .catch(() => {}),
+      );
     }
     return response;
   } catch {
     if (isEditableProjectPath(url.pathname) && (await hasFreshOfflineSession(cache))) {
-      const cached = await findCachedNavigation(cache, url, request);
+      const cached = await findCachedNavigation(cache, url);
       if (cached) return cached;
     }
 
@@ -196,12 +233,31 @@ async function handleNavigation(event, request, url) {
 }
 
 self.addEventListener("fetch", (event) => {
+  if (IS_LOCAL_DEVELOPMENT) return;
+
   const request = event.request;
   if (request.method !== "GET") return;
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/_next/")) return;
+  if (url.pathname.startsWith("/api/")) return;
+
+  if (url.pathname.startsWith("/_next/static/")) {
+    event.respondWith(
+      caches.open(CACHE_VERSION).then(async (cache) => {
+        const cached = await cache.match(request);
+        if (cached) return cached;
+        const response = await fetch(request);
+        if (response.ok && response.type === "basic") {
+          event.waitUntil(cache.put(request, response.clone()).catch(() => {}));
+        }
+        return response;
+      }),
+    );
+    return;
+  }
+
+  if (url.pathname.startsWith("/_next/")) return;
 
   if (request.mode === "navigate") {
     event.respondWith(handleNavigation(event, request, url));

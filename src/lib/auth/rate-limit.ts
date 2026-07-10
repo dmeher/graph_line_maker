@@ -1,9 +1,30 @@
 const buckets = new Map<string, number[]>();
+const MAX_RATE_LIMIT_KEYS = 5_000;
+const MAX_RATE_LIMIT_RETENTION_MS = 60 * 60 * 1000;
+let operationsSincePrune = 0;
+
+function pruneBuckets(now: number) {
+  operationsSincePrune += 1;
+  if (operationsSincePrune < 100 && buckets.size <= MAX_RATE_LIMIT_KEYS) return;
+  operationsSincePrune = 0;
+  for (const [key, timestamps] of buckets) {
+    const recent = timestamps.filter((timestamp) => now - timestamp < MAX_RATE_LIMIT_RETENTION_MS);
+    if (recent.length) buckets.set(key, recent);
+    else buckets.delete(key);
+  }
+  while (buckets.size > MAX_RATE_LIMIT_KEYS) {
+    const oldestKey = buckets.keys().next().value;
+    if (typeof oldestKey !== "string") break;
+    buckets.delete(oldestKey);
+  }
+}
 
 function recentHits(key: string, windowMs: number) {
   const now = Date.now();
+  pruneBuckets(now);
   const recent = (buckets.get(key) ?? []).filter((timestamp) => now - timestamp < windowMs);
-  buckets.set(key, recent);
+  if (recent.length) buckets.set(key, recent);
+  else buckets.delete(key);
   return recent;
 }
 

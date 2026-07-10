@@ -7,6 +7,16 @@ This file is the source of truth for AI coding agents working on **Graph Pixel M
 
 ---
 
+## Efficient context and documentation contract
+
+- Treat this handbook and [`docs/performance-audit.md`](docs/performance-audit.md) as the current baseline. For a localized prompt, **do not re-scan or re-analyze the whole repository**: inspect the requested subsystem, its direct callers/imports, the current diff, and the relevant baseline entries only.
+- Run a full audit only when the user explicitly asks, the baseline is contradicted, or a cross-cutting change invalidates it. Use `git log -1 -- docs/performance-audit.md` plus the changes since that commit to scope a targeted re-audit.
+- Re-audit the affected entries when changing route/layout or client/server boundaries; auth/session/authorization/rate limiting; schema/index/query/RPC or ownership; bucket policy/path/upload/delete/duplicate behavior; editor state/history/worker/cache/processing/export; service-worker/offline caching; dependencies, environment variables, scripts, build, or deployment behavior.
+- **Same-patch rule:** every architecture or behavior change in those areas must update the relevant concise section here and the matching stable issue/status/evidence in `docs/performance-audit.md`. Add a new issue ID for a new performance concern. Styling/copy-only changes do not require an audit edit.
+- Before handoff, compare the diff with the trigger list and state either which documentation changed or why no documentation update was needed. Keep detailed evidence out of this always-loaded file.
+
+---
+
 ## 1. Project overview
 
 Graph Pixel Maker lets signed-in users upload images (PNG, JPG, WEBP, SVG, PDF), position and crop them on a graph-paper canvas, adjust line thickness / fill / grid / palette settings, and export the result as PNG, tiled PDF, JSON, or a browser print view. Projects, palettes, and source/processed images are persisted in Supabase.
@@ -18,6 +28,7 @@ Key product traits:
 - **Service-role-only** Supabase access from the Next.js server; RLS is enabled but anon/authenticated roles are revoked.
 - **PWA/offline support**: a service worker (`public/sw.js`) caches the app shell and editable project pages so users can keep working offline.
 - Heavy client-side **canvas image processing** for graph-pixel conversion, palette generation, and PDF tiling.
+- Shared canvas safety limits reject work above 16 million pixels or the estimated 512 MB processing budget before allocation, and normalize malformed saved dimensions before canvas creation.
 
 ---
 
@@ -74,6 +85,8 @@ This project uses **Next.js 16.2.10** with React 19. APIs, conventions, and file
 │   ├── components/
 │   │   ├── auth/login-form.tsx
 │   │   ├── editor/editor-client.tsx   # Main editor UI + state
+│   │   ├── editor/inspector-panel.tsx # Right-hand inspector panel
+│   │   ├── editor/inspector/          # Inspector controls, fields, constants, feature suggestions
 │   │   ├── layout/app-shell.tsx       # Chrome + off-canvas sidebar
 │   │   ├── layout/app-nav.tsx         # Desktop/mobile nav
 │   │   ├── layout/offline-session-bridge.tsx
@@ -139,9 +152,11 @@ This project uses **Next.js 16.2.10** with React 19. APIs, conventions, and file
 - `/api/auth/send-otp` — generates 6-digit OTP, stores hash in `email_otp_attempts`, sends via Brevo (or logs in dev).
 - `/api/auth/verify-otp` — verifies hash, marks attempt consumed, sets `graph_pixel_session` httpOnly cookie.
 - `/api/auth/logout` — clears session cookie.
-- `/api/projects` — POST creates a project and uploads original source images.
+- `/api/projects` — coordinates signed project uploads and finalization.
+- `/api/projects` uses a three-step direct-upload contract: JSON `POST` creates the row and exact-path signed upload tokens, the browser uploads directly to Storage, and JSON `PATCH` verifies/finalizes metadata. `DELETE` cleans up a failed pending upload. Multipart project creation is intentionally rejected.
 - `/api/projects/[id]/original-image` — PUT replaces the primary source image.
-- `/api/projects/[id]/source-images` — POST uploads additional source images.
+- `/api/projects/[id]/source-images` — prepares, finalizes, or cleans up direct source-image uploads.
+- Source-image and clipart upload routes use the same JSON prepare / direct Storage upload / JSON finalize pattern; do not reintroduce multipart bodies into Next.js.
 - `/api/projects/[id]/processed-image` — PUT stores the processed PNG output.
 
 ---
@@ -159,6 +174,10 @@ This app does **not** use Supabase Auth. It uses a custom OTP flow:
 
 Session verification (`getCurrentSession`) reads the cookie, verifies the HMAC signature, validates the user is still active in `app_users`, and returns `{ userId, email, role, displayName }`.
 
+Production session resolution is request-memoized with React `cache()`; never replace it with cross-request caching. OTP verification is atomic through the service-role-only, `SECURITY INVOKER` `image_to_graph.verify_login_otp` RPC.
+
+Local development has an explicit opt-in bypass: set `GRAPH_PIXEL_DEV_AUTH_BYPASS=true` while `NODE_ENV=development`, with optional `GRAPH_PIXEL_DEV_USER_EMAIL` (defaults to the bootstrap admin). The bypass is ignored outside development and therefore cannot disable production auth. When Supabase is configured, the email must resolve to an active `app_users` row; that real user ID/role is used so project ownership and admin checks still apply. With no Supabase configuration, a synthetic local identity supports non-persistent fixtures, but database/storage APIs still require Supabase.
+
 **Critical rule:** `src/lib/auth/session.ts` is `server-only` and uses `next/headers`. Never import it into client components. Compute server-only values (session, offline ticket) in server components or API routes and pass them as props.
 
 ---
@@ -174,11 +193,13 @@ All tables live in the `image_to_graph` schema (migrations in `supabase/migratio
 - `projects` — owner, title, description, original/processed image paths, JSON `settings`, width/height/pixel_size/grid_cell_size/color_count.
 - `project_palettes` — per-project colors with name, hex, locked, cell_count, sort_order.
 
+Migration `20260710091750_optimize_project_persistence.sql` adds cursor/search indexes plus transactional `save_project_state` and `verify_login_otp` RPCs. Apply this migration before deploying code that calls those RPCs.
+
 `updated_at` columns are maintained by triggers. The migration seeds the bootstrap admin `dmeher1996@gmail.com`.
 
 ### Storage buckets
 
-- `graph-pixel-original-images` — source uploads; private; allowed mime types PNG/JPEG/WEBP/SVG.
+- `graph-pixel-original-images` — source uploads; private; 50 MB per object; PNG/JPEG/WEBP/SVG/PDF.
 - `graph-pixel-processed-images` — processed PNGs/PDFs; private.
 
 Signed URLs (1-hour TTL) are generated server-side for display in the editor/dashboard.
@@ -197,6 +218,10 @@ BREVO_SENDER_EMAIL=
 BREVO_SENDER_NAME=Graph Pixel Maker
 EMAIL_OTP_SECRET=
 GRAPH_PIXEL_SESSION_SECRET=
+# Development only; ignored unless NODE_ENV=development.
+GRAPH_PIXEL_DEV_AUTH_BYPASS=false
+# Optional; defaults to the bootstrap admin and must be active when Supabase is configured.
+GRAPH_PIXEL_DEV_USER_EMAIL=
 ```
 
 `SUPABASE_DB_SCHEMA` must be `image_to_graph`. The Supabase Data API also needs that schema exposed in the project API settings.
@@ -208,7 +233,7 @@ GRAPH_PIXEL_SESSION_SECRET=
 ### Canvas pipeline
 
 - `src/lib/canvas/processor.ts` is the core conversion engine: fit source canvases, build ink/fill/outline masks, label connected fill regions, draw grid lines/numbers, render manual shapes, and produce a palette.
-- `src/lib/canvas/processor-worker-client.ts` offloads `pixelateLayeredImages` to a Web Worker when `OffscreenCanvas` and `createImageBitmap` are available; otherwise falls back to the main thread.
+- `src/lib/canvas/processor-worker-client.ts` reuses a persistent Web Worker when `OffscreenCanvas` and `createImageBitmap` are available; aborted/failed workers are terminated and recreated, otherwise processing falls back to the main thread.
 - `src/lib/canvas/processor.worker.ts` runs the same `pixelateLayeredCanvases` logic in the worker.
 - `src/lib/canvas/pdf-layout.ts` plans multi-page PDF/print tiles, respecting paper size, orientation, alignment, margins, and `MAX_PAGES_PER_PDF_FILE = 80`.
 - `src/lib/canvas/exports.ts` implements PNG download, PDF download, browser print, and JSON settings export.
@@ -219,19 +244,20 @@ GRAPH_PIXEL_SESSION_SECRET=
 
 - Holds the canonical `GraphSettings` state and an undo/redo history (`MAX_SETTINGS_HISTORY = 80`).
 - Manages source images, cell paints, graph shapes, palette colors, fill-region overrides, zoom, selection, drag/resize interactions, and export menus.
-- Debounces canvas reprocessing (`PREVIEW_PROCESSING_DEBOUNCE_MS = 120`) and renders the output to a canvas.
+- Debounces canvas reprocessing (`PREVIEW_PROCESSING_DEBOUNCE_MS = 250`) and renders the output to a canvas.
+- Caps each source/clipart full-frame canvas cache at 128 MB and checks total canvas/estimated processing memory before allocation.
 - Saves via the server action `saveProjectState` (`src/app/(app)/projects/actions.ts`) with Zod validation.
 - Stores an in-flight session draft in `sessionStorage` (`src/lib/editor/session-draft.ts`) for recovery.
 
 ### New-project crop flow
 
-`NewProjectForm` (`src/components/projects/new-project-form.tsx`) lets users upload up to 12 files, preview/crop/rotate each in `ManualCropper`, then POSTs to `/api/projects`. The first file becomes the primary `original_image_path`; additional files become source images.
+`NewProjectForm` (`src/components/projects/new-project-form.tsx`) lets users upload up to 12 files, preview/crop/rotate each in `ManualCropper`, then uses signed direct-to-Storage uploads with concurrency two and a 150 MB aggregate limit. The first file becomes the primary `original_image_path`; additional files become source images.
 
 ---
 
 ## 10. PWA / offline support
 
-- `public/sw.js` caches the app shell (`/`, `/offline`, manifest, icons) and caches editable `/projects/{id}` navigations when an offline session marker is fresh.
+- `public/sw.js` caches only public non-redirecting shell resources plus immutable `/_next/static` assets, and keeps at most 20 canonical editable-project documents when an offline session marker is fresh. On localhost, it bypasses runtime caching and clears this app's caches to avoid stale development hydrations.
 - `OfflineSessionBridge` writes the offline session ticket into `sessionStorage` and notifies the service worker when the user is logged in.
 - `/offline` is shown when the network fails and no cached project page is available.
 - `BLOCKED_OFFLINE_NAVIGATION_PATHS` includes `/projects/new`, which is not available offline because source uploads require a connection.
@@ -274,13 +300,17 @@ npm run test:pdf-export
 
 Files listed in `package.json` under `test:unit`:
 
+- `src/lib/auth/dev-bypass.test.ts`
 - `src/lib/canvas/grid-numbering.test.ts`
 - `src/lib/canvas/ink-mask.test.ts`
 - `src/lib/canvas/pdf-layout.test.ts`
+- `src/lib/canvas/performance-limits.test.ts`
+- `src/lib/canvas/processor.test.ts`
 - `src/lib/canvas/thinning.test.ts`
 - `src/lib/editor/session-draft.test.ts`
 - `src/lib/editor/source-layout.test.ts`
 - `src/lib/projects/crop-queue.test.ts`
+- `src/lib/utils/concurrency.test.ts`
 
 Run with `npm run test:unit`. They use Node's built-in `node:test` and `node:assert`; TypeScript is stripped via `--experimental-strip-types`.
 
@@ -359,4 +389,4 @@ These rules were hard-won; changing them tends to break the mobile menu, editor 
   - `src/components/editor/editor-client.tsx`
 - Prefer minimal CSS diffs for behavior fixes (menu, scroll, overflow, viewport constraints).
 - Verify behavior by reading rendered DOM structure and class names first; avoid broad refactors.
-- Update this `AGENTS.md` if you change build commands, auth flow, database schema, storage buckets, offline behavior, or the layout/CSS contracts above.
+- Follow the same-patch documentation contract near the top of this file for architecture, logic, performance, auth, data/storage, editor pipeline, offline, and build/deployment changes.

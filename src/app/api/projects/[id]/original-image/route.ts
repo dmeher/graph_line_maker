@@ -37,10 +37,6 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     if (file.size > MAX_UPLOAD_BYTES) return NextResponse.json({ message: "File is too large." }, { status: 400 });
 
     const supabase = getSupabaseAdmin();
-    if (owner.original_image_path) {
-      await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove([owner.original_image_path]);
-    }
-
     const path = imagePath(session.userId, id, "original", getExtension(file));
     const { error: uploadError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).upload(path, file, {
       cacheControl: "3600",
@@ -57,6 +53,9 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
       .eq("user_id", session.userId);
 
     if (error) throw new Error(error.message);
+    if (owner.original_image_path && owner.original_image_path !== path) {
+      await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove([owner.original_image_path]);
+    }
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(

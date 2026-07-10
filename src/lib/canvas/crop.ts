@@ -9,6 +9,25 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function positiveInteger(value: unknown, fallback = 1) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+  return Math.max(1, Math.round(numeric));
+}
+
+function decodedImageSize(image: HTMLImageElement) {
+  const width = positiveInteger(image.naturalWidth || image.width, 0);
+  const height = positiveInteger(image.naturalHeight || image.height, 0);
+  if (!width || !height) throw new Error("The selected image has no drawable pixels.");
+  return { width, height };
+}
+
+function assertDrawableCanvas(canvas: HTMLCanvasElement) {
+  if (positiveInteger(canvas.width, 0) <= 0 || positiveInteger(canvas.height, 0) <= 0) {
+    throw new Error("The selected image has no drawable pixels.");
+  }
+}
+
 function outputFileName(fileName: string, type: string) {
   const extension = type === "image/png" ? "png" : fileName.split(".").pop() || "png";
   return `${fileName.replace(/\.[^.]+$/, "")}.${extension}`;
@@ -24,10 +43,12 @@ export function fullCrop(width: number, height: number): CropPixels {
 }
 
 export function normalizeCrop(crop: CropPixels, width: number, height: number): CropPixels {
-  const x = clamp(Math.round(crop.x), 0, Math.max(0, width - 1));
-  const y = clamp(Math.round(crop.y), 0, Math.max(0, height - 1));
-  const cropWidth = clamp(Math.round(crop.width), 1, width - x);
-  const cropHeight = clamp(Math.round(crop.height), 1, height - y);
+  const safeWidth = positiveInteger(width);
+  const safeHeight = positiveInteger(height);
+  const x = clamp(Math.round(Number(crop.x) || 0), 0, Math.max(0, safeWidth - 1));
+  const y = clamp(Math.round(Number(crop.y) || 0), 0, Math.max(0, safeHeight - 1));
+  const cropWidth = clamp(Math.round(Number(crop.width) || 1), 1, safeWidth - x);
+  const cropHeight = clamp(Math.round(Number(crop.height) || 1), 1, safeHeight - y);
   return { x, y, width: cropWidth, height: cropHeight };
 }
 
@@ -55,8 +76,7 @@ function loadImage(src: string) {
 
 export async function cropImageUrlToFile(imageUrl: string, crop: CropPixels, fileName: string, type = "image/png") {
   const image = await loadImage(imageUrl);
-  const naturalWidth = image.naturalWidth || image.width;
-  const naturalHeight = image.naturalHeight || image.height;
+  const { width: naturalWidth, height: naturalHeight } = decodedImageSize(image);
   const cropPixels = normalizeCrop(crop, naturalWidth, naturalHeight);
   const canvas = document.createElement("canvas");
   canvas.width = cropPixels.width;
@@ -97,8 +117,7 @@ export async function transformImageUrlToFile({
   type?: string;
 }) {
   const image = await loadImage(imageUrl);
-  const naturalWidth = image.naturalWidth || image.width;
-  const naturalHeight = image.naturalHeight || image.height;
+  const { width: naturalWidth, height: naturalHeight } = decodedImageSize(image);
   const cropPixels = crop ? normalizeCrop(crop, naturalWidth, naturalHeight) : fullCrop(naturalWidth, naturalHeight);
   const rotation = normalizeRightAngleRotation(rotationDegrees);
   const rotatedSideways = rotation === 90 || rotation === 270;
@@ -137,6 +156,7 @@ export async function transformImageUrlToFile({
 }
 
 export async function cropCanvasToFile(canvas: HTMLCanvasElement, crop: CropPixels, fileName: string, type = "image/png") {
+  assertDrawableCanvas(canvas);
   const cropPixels = normalizeCrop(crop, canvas.width, canvas.height);
   const output = document.createElement("canvas");
   output.width = cropPixels.width;

@@ -235,7 +235,7 @@ const graphSettingsSchema = z.object({
   majorGridEvery: z.union([z.literal(1), z.literal(2), z.literal(5), z.literal(10)]),
   imageWidth: z.number().min(0.01).max(1000),
   imageHeight: z.number().min(0.01).max(1000),
-  sourceImages: z.array(sourceImageSchema).max(12),
+  sourceImages: z.array(sourceImageSchema).max(100),
   cellPaints: z.array(cellPaintSchema).max(2000),
   graphShapes: z.array(graphShapeSchema).max(500),
   clipartAssets: z.array(clipartAssetSchema).max(120),

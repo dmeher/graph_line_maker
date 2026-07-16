@@ -55,7 +55,7 @@ import { disposeCanvasProcessingWorker, pixelateLayeredImagesWithWorker } from "
 import { clearCanvasProcessingCaches, findContentBounds, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
 import { removeBackgroundImageData } from "@/lib/canvas/background-removal";
 import { graphPixelToSourcePixel, type ContentBounds, type PlacementTransform } from "@/lib/editor/erase-geometry";
-import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_UPLOAD_BYTES, ORIGINAL_IMAGES_BUCKET, isAllowedImageFile, isPdfFile } from "@/lib/constants";
+import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_SOURCE_IMAGES, MAX_UPLOAD_BYTES, ORIGINAL_IMAGES_BUCKET, isAllowedImageFile, isPdfFile } from "@/lib/constants";
 import {
   createEditorSessionDraft,
   hasEditorSessionDraft,
@@ -623,7 +623,7 @@ function normalizeSourceImagesForEditor(
         },
       ];
     })
-    .slice(0, 12);
+    .slice(0, MAX_SOURCE_IMAGES);
 }
 
 function normalizeFillRegions(value: GraphSettings["fillRegions"] | undefined) {
@@ -4059,7 +4059,7 @@ export function EditorClient({ project }: { project: Project }) {
       setNotice({ tone: "error", text: "Choose one image to replace this source." });
       return false;
     }
-    const remainingSourceCapacity = Math.max(0, MAX_PROJECT_UPLOAD_FILES - settingsRef.current.sourceImages.length);
+    const remainingSourceCapacity = Math.max(0, MAX_SOURCE_IMAGES - settingsRef.current.sourceImages.length);
     if (!replaceSourceId && files.length > remainingSourceCapacity) {
       setNotice({ tone: "error", text: `This project can add ${remainingSourceCapacity} more source image${remainingSourceCapacity === 1 ? "" : "s"}.` });
       return false;

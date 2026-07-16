@@ -13,7 +13,7 @@ import { assertProjectOwner, sourceImagePath } from "@/lib/projects";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
 
-const MAX_SOURCE_UPLOADS = 12;
+const MAX_SOURCE_UPLOADS = 100;
 
 type UploadMetadata = { name: string; type: string; size: number; id: string };
 

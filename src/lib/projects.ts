@@ -59,6 +59,7 @@ import {
   normalizeGraphImageTraceEngine,
 } from "@/lib/graph-paper";
 import { MAX_CANVAS_DIMENSION, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
+import { MAX_SOURCE_IMAGES } from "@/lib/constants";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import {
   normalizeBackgroundRemoval,
@@ -68,7 +69,6 @@ import {
 } from "@/lib/editor/layer-extras";
 import type { GraphClipartAsset, GraphClipartImage, GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSummary } from "@/lib/types";
 
-const MAX_SOURCE_IMAGES = 12;
 const MAX_CLIPART_ASSETS = 120;
 const MAX_CLIPART_IMAGES = 500;
 const CELL_LINE_SIDE_KEYS = ["top", "right", "bottom", "left"] as const;

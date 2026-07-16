@@ -58,7 +58,7 @@ import { cropCanvasToFile, fullCrop, type CropPixels } from "@/lib/canvas/crop";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
 import { pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
 import { findContentBounds, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
-import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
+import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_SOURCE_IMAGES, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
 import {
   createEditorSessionDraft,
   hasEditorSessionDraft,
@@ -523,7 +523,7 @@ function normalizeSourceImagesForEditor(
         },
       ];
     })
-    .slice(0, 12);
+    .slice(0, MAX_SOURCE_IMAGES);
 }
 
 function normalizeFillRegions(value: GraphSettings["fillRegions"] | undefined) {

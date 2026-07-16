@@ -1,7 +1,7 @@
 import "server-only";
 
 import { getSupabaseAdmin, tryGetSupabaseAdmin } from "@/lib/supabase/server";
-import { ORIGINAL_IMAGES_BUCKET, PROCESSED_IMAGES_BUCKET } from "@/lib/constants";
+import { MAX_SOURCE_IMAGES, ORIGINAL_IMAGES_BUCKET, PROCESSED_IMAGES_BUCKET } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
 import {
   DEFAULT_CELL_SIZE_CM,
@@ -38,7 +38,6 @@ import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import type { GraphClipartAsset, GraphClipartImage, GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSummary } from "@/lib/types";
 
 const MAX_CANVAS_DIMENSION = 24000;
-const MAX_SOURCE_IMAGES = 12;
 const MAX_CLIPART_ASSETS = 120;
 const MAX_CLIPART_IMAGES = 500;
 const CELL_LINE_SIDE_KEYS = ["top", "right", "bottom", "left"] as const;

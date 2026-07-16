@@ -12,7 +12,7 @@ import { requireSession } from "@/lib/auth/session";
 import { assertProjectOwner, sourceImagePath } from "@/lib/projects";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 
-const MAX_SOURCE_UPLOADS = 12;
+const MAX_SOURCE_UPLOADS = 100;
 
 function getExtension(file: File) {
   const nameExtension = getImageExtension(file.name);

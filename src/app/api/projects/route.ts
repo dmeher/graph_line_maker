@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   ALLOWED_IMAGE_EXTENSIONS,
   ALLOWED_IMAGE_LABEL,
+  MAX_PROJECT_UPLOAD_FILES,
   MAX_UPLOAD_BYTES,
   ORIGINAL_IMAGES_BUCKET,
   getAllowedImageContentType,
@@ -63,7 +64,7 @@ export async function POST(request: NextRequest) {
 
     if (!title) return NextResponse.json({ message: "Project title is required." }, { status: 400 });
     if (!files.length) return NextResponse.json({ message: "At least one source file is required." }, { status: 400 });
-    if (files.length > 12) return NextResponse.json({ message: "Upload up to 12 source files." }, { status: 400 });
+    if (files.length > MAX_PROJECT_UPLOAD_FILES) return NextResponse.json({ message: `Upload up to ${MAX_PROJECT_UPLOAD_FILES} source files.` }, { status: 400 });
     for (const file of files) {
       if (!isAllowedImageFile(file)) {
         return NextResponse.json({ message: `Upload ${ALLOWED_IMAGE_LABEL} only.` }, { status: 400 });

@@ -1,0 +1,34 @@
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - complementary [ref=e4]:
+      - generic [ref=e6]:
+        - generic [ref=e7]: AMLAN COACHING
+        - generic [ref=e8]: Step to bright future
+      - generic [ref=e9]:
+        - heading "A clear path through every school day." [level=1] [ref=e10]
+        - paragraph [ref=e11]: Learning, progress, attendance, fees, and institute communication in one secure portal.
+      - paragraph [ref=e12]: Amlan Coaching Student Portal
+    - main [ref=e13]:
+      - generic [ref=e14]:
+        - generic [ref=e15]:
+          - paragraph [ref=e16]: Secure portal access
+          - heading "Welcome back" [level=2] [ref=e17]
+          - paragraph [ref=e18]: Choose your portal and sign in to continue.
+        - group "Portal type" [ref=e19]:
+          - button "Student" [pressed] [ref=e20] [cursor=pointer]
+          - button "Institution" [ref=e21] [cursor=pointer]
+        - generic [ref=e22]:
+          - generic [ref=e27]:
+            - heading "Student login" [level=3] [ref=e28]
+            - paragraph [ref=e29]: Use the registered mobile number and 4-digit PIN.
+          - generic [ref=e30]:
+            - generic [ref=e31]:
+              - generic [ref=e32]: Mobile number*
+              - textbox "Mobile number*" [ref=e33]:
+                - /placeholder: 10-digit mobile number
+            - generic [ref=e34]:
+              - generic [ref=e35]: PIN*
+              - textbox "PIN*" [ref=e36]:
+                - /placeholder: 4-digit PIN
+              - paragraph [ref=e37]: The default PIN is the last 4 digits of the registered mobile number.
+            - button "Open student portal" [disabled]

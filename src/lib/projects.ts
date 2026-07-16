@@ -5,13 +5,21 @@ import { ORIGINAL_IMAGES_BUCKET, PROCESSED_IMAGES_BUCKET } from "@/lib/constants
 import { requireSession } from "@/lib/auth/session";
 import {
   DEFAULT_CELL_SIZE_CM,
+  DEFAULT_GRID_LINE_STYLE,
   DEFAULT_GRAPH_LINE_LAYER,
   DEFAULT_GRAPH_HEIGHT_CELLS,
   DEFAULT_GRAPH_WIDTH_CELLS,
+  DEFAULT_GRID_PATTERN,
+  DEFAULT_IMAGE_AUTO_ENHANCE,
+  DEFAULT_IMAGE_COLOR_QUANTIZATION,
+  DEFAULT_IMAGE_DENOISE_LEVEL,
+  DEFAULT_IMAGE_EDGE_DETECTION,
+  DEFAULT_IMAGE_TRACE_ENGINE,
   DEFAULT_IMAGE_HEIGHT_CELLS,
   DEFAULT_IMAGE_LINE_THICKNESS,
   DEFAULT_IMAGE_WIDTH_CELLS,
   DEFAULT_GRID_LINE_COLOR,
+  DEFAULT_MAJOR_GRID_EVERY,
   DEFAULT_OUTLINE_COLOR,
   DEFAULT_PRINT_HORIZONTAL_ALIGNMENT,
   DEFAULT_PRINT_ORIENTATION,
@@ -20,10 +28,22 @@ import {
   DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
   DEFAULT_SOURCE_FILL_THRESHOLD,
   DEFAULT_STROKE_GAP_CLOSE_PIXELS,
+  DEFAULT_VECTORIZER_STROKE_COLOR,
+  DEFAULT_VECTORIZER_STROKE_WIDTH,
+  DEFAULT_VECTORIZER_LINE_ADJUST,
+  DEFAULT_VECTORIZER_INK_THRESHOLD,
+  DEFAULT_VECTORIZER_FIDELITY,
   GRAPH_MAJOR_CELL_PIXELS,
   TRANSPARENT_FILL_COLOR,
+  isGraphGridLineStyle,
+  isGraphGridPattern,
+  isGraphImageColorQuantization,
+  isGraphImageDenoiseLevel,
+  isGraphImageEdgeDetection,
+  isGraphVectorizerFidelity,
   isGraphLineLayer,
   isFillColor,
+  isMajorGridEvery,
   isPrintHorizontalAlignment,
   isPrintOrientation,
   isPrintPaperSize,
@@ -33,9 +53,19 @@ import {
   clampSourceFillMinStrokePixels,
   clampSourceFillThreshold,
   clampStrokeGapClosePixels,
+  clampVectorizerInkThreshold,
+  clampVectorizerLineAdjust,
+  clampVectorizerStrokeWidth,
+  normalizeGraphImageTraceEngine,
 } from "@/lib/graph-paper";
 import { MAX_CANVAS_DIMENSION, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
+import {
+  normalizeBackgroundRemoval,
+  normalizeEraseStrokes,
+  normalizeGroupId,
+  normalizeLayerGroups,
+} from "@/lib/editor/layer-extras";
 import type { GraphClipartAsset, GraphClipartImage, GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSummary } from "@/lib/types";
 
 const MAX_SOURCE_IMAGES = 12;
@@ -72,15 +102,27 @@ export const defaultGraphSettings: GraphSettings = {
   sourceFillThreshold: DEFAULT_SOURCE_FILL_THRESHOLD,
   sourceFillMinStrokePixels: DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
   strokeGapClosePixels: DEFAULT_STROKE_GAP_CLOSE_PIXELS,
+  imageAutoEnhance: DEFAULT_IMAGE_AUTO_ENHANCE,
+  imageDenoiseLevel: DEFAULT_IMAGE_DENOISE_LEVEL,
+  imageEdgeDetection: DEFAULT_IMAGE_EDGE_DETECTION,
+  imageColorQuantization: DEFAULT_IMAGE_COLOR_QUANTIZATION,
+  imageTraceEngine: DEFAULT_IMAGE_TRACE_ENGINE,
+  vectorizerStrokeWidth: DEFAULT_VECTORIZER_STROKE_WIDTH,
+  vectorizerStrokeColor: DEFAULT_VECTORIZER_STROKE_COLOR,
+  vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
+  vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+  vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
   gridLineColor: DEFAULT_GRID_LINE_COLOR,
   gridLineLayer: DEFAULT_GRAPH_LINE_LAYER,
+  gridLineStyle: DEFAULT_GRID_LINE_STYLE,
+  gridPattern: DEFAULT_GRID_PATTERN,
   gridLineThickness: 1,
   showBorder: true,
   transparentBackground: false,
   showNumbers: true,
   gridNumberPlacement: "outside",
   showPageBreaks: true,
-  majorGridEvery: 5,
+  majorGridEvery: DEFAULT_MAJOR_GRID_EVERY,
   imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
   imageHeight: DEFAULT_IMAGE_HEIGHT_CELLS,
   sourceImages: [],
@@ -125,6 +167,13 @@ export function getMockEditorProject(): Project {
         sourceFillThreshold: 0.58,
         sourceFillMinStrokePixels: 7,
         strokeGapClosePixels: 0,
+        imageAutoEnhance: DEFAULT_IMAGE_AUTO_ENHANCE,
+        imageDenoiseLevel: DEFAULT_IMAGE_DENOISE_LEVEL,
+        imageEdgeDetection: DEFAULT_IMAGE_EDGE_DETECTION,
+        imageColorQuantization: DEFAULT_IMAGE_COLOR_QUANTIZATION,
+        vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
+        vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+        vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
         x: 16,
         y: 8,
         topPadding: 0,
@@ -272,6 +321,28 @@ function normalizeFillRegions(value: unknown) {
   return Object.fromEntries(entries);
 }
 
+function normalizeImageAutoEnhance(value: unknown) {
+  return typeof value === "boolean" ? value : DEFAULT_IMAGE_AUTO_ENHANCE;
+}
+
+function normalizeImageDenoiseLevel(value: unknown) {
+  return isGraphImageDenoiseLevel(value) ? value : DEFAULT_IMAGE_DENOISE_LEVEL;
+}
+
+function normalizeImageEdgeDetection(value: unknown) {
+  return isGraphImageEdgeDetection(value) ? value : DEFAULT_IMAGE_EDGE_DETECTION;
+}
+
+function normalizeImageColorQuantization(value: unknown) {
+  if (isGraphImageColorQuantization(value)) return value;
+  const numeric = typeof value === "string" ? Number(value) : value;
+  return isGraphImageColorQuantization(numeric) ? numeric : DEFAULT_IMAGE_COLOR_QUANTIZATION;
+}
+
+function normalizeVectorizerFidelity(value: unknown) {
+  return isGraphVectorizerFidelity(value) ? value : DEFAULT_VECTORIZER_FIDELITY;
+}
+
 const GRAPH_CELL_LINE_SIDES = ["top", "right", "bottom", "left"] as const;
 const GRAPH_SHAPE_KINDS = ["square", "rectangle", "circle", "oval", "half-circle", "line", "arrow"] as const;
 
@@ -310,6 +381,7 @@ function normalizeCellPaints(value: unknown) {
           rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
           flipX: Boolean(record.flipX),
           flipY: Boolean(record.flipY),
+          groupId: normalizeGroupId(record.groupId),
         },
       ];
     })
@@ -358,6 +430,7 @@ function normalizeGraphShapes(value: unknown) {
           rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
           flipX: Boolean(record.flipX),
           flipY: Boolean(record.flipY),
+          groupId: normalizeGroupId(record.groupId),
         },
       ];
     })
@@ -390,7 +463,16 @@ function normalizeClipartAssets(value: unknown): GraphClipartAsset[] {
 
 function normalizeClipartImages(
   value: unknown,
-  defaults: Pick<GraphSettings, "imageLineThickness" | "sourceFillThreshold" | "sourceFillMinStrokePixels" | "strokeGapClosePixels">,
+  defaults: Pick<
+    GraphSettings,
+    | "imageLineThickness"
+    | "sourceFillThreshold"
+    | "sourceFillMinStrokePixels"
+    | "strokeGapClosePixels"
+    | "vectorizerLineAdjust"
+    | "vectorizerInkThreshold"
+    | "vectorizerFidelity"
+  >,
 ): GraphClipartImage[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -416,11 +498,21 @@ function normalizeClipartImages(
           sourceFillThreshold: clampSourceFillThreshold(record.sourceFillThreshold ?? defaults.sourceFillThreshold),
           sourceFillMinStrokePixels: clampSourceFillMinStrokePixels(record.sourceFillMinStrokePixels ?? defaults.sourceFillMinStrokePixels),
           strokeGapClosePixels: clampStrokeGapClosePixels(record.strokeGapClosePixels ?? defaults.strokeGapClosePixels),
+          imageAutoEnhance: normalizeImageAutoEnhance(record.imageAutoEnhance),
+          imageDenoiseLevel: normalizeImageDenoiseLevel(record.imageDenoiseLevel),
+          imageEdgeDetection: normalizeImageEdgeDetection(record.imageEdgeDetection),
+          imageColorQuantization: normalizeImageColorQuantization(record.imageColorQuantization),
+          vectorizerLineAdjust: clampVectorizerLineAdjust(record.vectorizerLineAdjust ?? defaults.vectorizerLineAdjust),
+          vectorizerInkThreshold: clampVectorizerInkThreshold(record.vectorizerInkThreshold ?? defaults.vectorizerInkThreshold),
+          vectorizerFidelity: normalizeVectorizerFidelity(record.vectorizerFidelity ?? defaults.vectorizerFidelity),
           locked: Boolean(record.locked),
           visible: typeof record.visible === "boolean" ? record.visible : true,
           rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
           flipX: Boolean(record.flipX),
           flipY: Boolean(record.flipY),
+          groupId: normalizeGroupId(record.groupId),
+          eraseStrokes: normalizeEraseStrokes(record.eraseStrokes),
+          backgroundRemoval: normalizeBackgroundRemoval(record.backgroundRemoval),
         },
       ];
     })
@@ -433,7 +525,14 @@ function normalizeSourceImages(
   graphHeight: number,
   defaults: Pick<
     GraphSettings,
-    "measurementUnit" | "imageLineThickness" | "sourceFillThreshold" | "sourceFillMinStrokePixels" | "strokeGapClosePixels"
+    | "measurementUnit"
+    | "imageLineThickness"
+    | "sourceFillThreshold"
+    | "sourceFillMinStrokePixels"
+    | "strokeGapClosePixels"
+    | "vectorizerLineAdjust"
+    | "vectorizerInkThreshold"
+    | "vectorizerFidelity"
   >,
 ): GraphSourceImage[] {
   if (!Array.isArray(value)) return [];
@@ -453,6 +552,13 @@ function normalizeSourceImages(
       const sourceFillThreshold = clampSourceFillThreshold(record.sourceFillThreshold ?? defaults.sourceFillThreshold);
       const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(record.sourceFillMinStrokePixels ?? defaults.sourceFillMinStrokePixels);
       const strokeGapClosePixels = clampStrokeGapClosePixels(record.strokeGapClosePixels ?? defaults.strokeGapClosePixels);
+      const imageAutoEnhance = normalizeImageAutoEnhance(record.imageAutoEnhance);
+      const imageDenoiseLevel = normalizeImageDenoiseLevel(record.imageDenoiseLevel);
+      const imageEdgeDetection = normalizeImageEdgeDetection(record.imageEdgeDetection);
+      const imageColorQuantization = normalizeImageColorQuantization(record.imageColorQuantization);
+      const vectorizerLineAdjust = clampVectorizerLineAdjust(record.vectorizerLineAdjust ?? defaults.vectorizerLineAdjust);
+      const vectorizerInkThreshold = clampVectorizerInkThreshold(record.vectorizerInkThreshold ?? defaults.vectorizerInkThreshold);
+      const vectorizerFidelity = normalizeVectorizerFidelity(record.vectorizerFidelity ?? defaults.vectorizerFidelity);
       const x = clampSourceX(record.x, graphWidth, width);
       const topPadding = clampPaddingCells(record.topPadding, graphHeight, 0);
       const bottomPadding = clampPaddingCells(record.bottomPadding, graphHeight, 0);
@@ -476,6 +582,13 @@ function normalizeSourceImages(
           sourceFillThreshold,
           sourceFillMinStrokePixels,
           strokeGapClosePixels,
+          imageAutoEnhance,
+          imageDenoiseLevel,
+          imageEdgeDetection,
+          imageColorQuantization,
+          vectorizerLineAdjust,
+          vectorizerInkThreshold,
+          vectorizerFidelity,
           x,
           y,
           topPadding,
@@ -485,6 +598,9 @@ function normalizeSourceImages(
           rotationDegrees,
           flipX,
           flipY,
+          groupId: normalizeGroupId(record.groupId),
+          eraseStrokes: normalizeEraseStrokes(record.eraseStrokes),
+          backgroundRemoval: normalizeBackgroundRemoval(record.backgroundRemoval),
         },
       ];
     })
@@ -543,12 +659,25 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const sourceFillThreshold = clampSourceFillThreshold(cleanMerged.sourceFillThreshold);
   const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(cleanMerged.sourceFillMinStrokePixels);
   const strokeGapClosePixels = clampStrokeGapClosePixels(cleanMerged.strokeGapClosePixels);
+  const imageAutoEnhance = normalizeImageAutoEnhance(cleanMerged.imageAutoEnhance);
+  const imageDenoiseLevel = normalizeImageDenoiseLevel(cleanMerged.imageDenoiseLevel);
+  const imageEdgeDetection = normalizeImageEdgeDetection(cleanMerged.imageEdgeDetection);
+  const imageColorQuantization = normalizeImageColorQuantization(cleanMerged.imageColorQuantization);
+  const imageTraceEngine = normalizeGraphImageTraceEngine(cleanMerged.imageTraceEngine);
+  const vectorizerStrokeWidth = clampVectorizerStrokeWidth(cleanMerged.vectorizerStrokeWidth);
+  const vectorizerStrokeColor = isHexColor(cleanMerged.vectorizerStrokeColor) ? cleanMerged.vectorizerStrokeColor : outlineColor;
+  const vectorizerLineAdjust = clampVectorizerLineAdjust(cleanMerged.vectorizerLineAdjust);
+  const vectorizerInkThreshold = clampVectorizerInkThreshold(cleanMerged.vectorizerInkThreshold);
+  const vectorizerFidelity = normalizeVectorizerFidelity(cleanMerged.vectorizerFidelity);
   const clipartAssets = normalizeClipartAssets(cleanMerged.clipartAssets);
   const clipartImages = normalizeClipartImages(cleanMerged.clipartImages, {
     imageLineThickness,
     sourceFillThreshold,
     sourceFillMinStrokePixels,
     strokeGapClosePixels,
+    vectorizerLineAdjust,
+    vectorizerInkThreshold,
+    vectorizerFidelity,
   }).filter((image) => clipartAssets.some((asset) => asset.id === image.assetId));
   const gridLineColor = isHexColor(cleanMerged.gridLineColor) && cleanMerged.gridLineColor.toLowerCase() !== "#cbd5e1" ? cleanMerged.gridLineColor : DEFAULT_GRID_LINE_COLOR;
   const gridLineLayer = hasBrokenLegacyArtworkWidth
@@ -556,10 +685,13 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     : isGraphLineLayer(cleanMerged.gridLineLayer)
       ? cleanMerged.gridLineLayer
       : DEFAULT_GRAPH_LINE_LAYER;
+  const gridLineStyle = isGraphGridLineStyle(cleanMerged.gridLineStyle) ? cleanMerged.gridLineStyle : DEFAULT_GRID_LINE_STYLE;
+  const gridPattern = isGraphGridPattern(cleanMerged.gridPattern) ? cleanMerged.gridPattern : DEFAULT_GRID_PATTERN;
   const showNumbers = typeof cleanMerged.showNumbers === "boolean" ? cleanMerged.showNumbers : true;
   const gridNumberPlacement =
     cleanMerged.gridNumberPlacement === "outside" ? "outside" : defaultGraphSettings.gridNumberPlacement;
   const showPageBreaks = typeof cleanMerged.showPageBreaks === "boolean" ? cleanMerged.showPageBreaks : true;
+  const majorGridEvery = isMajorGridEvery(cleanMerged.majorGridEvery) ? cleanMerged.majorGridEvery : DEFAULT_MAJOR_GRID_EVERY;
   void legacyCellSizeInches;
   const cellSizeCm = DEFAULT_CELL_SIZE_CM;
   const measurementUnit = isMeasurementUnit(cleanMerged.measurementUnit) ? cleanMerged.measurementUnit : defaultGraphSettings.measurementUnit;
@@ -569,6 +701,9 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     sourceFillThreshold,
     sourceFillMinStrokePixels,
     strokeGapClosePixels,
+    vectorizerLineAdjust,
+    vectorizerInkThreshold,
+    vectorizerFidelity,
   });
   const printPaperSize = isPrintPaperSize(cleanMerged.printPaperSize) ? cleanMerged.printPaperSize : DEFAULT_PRINT_PAPER_SIZE;
   const printOrientation = isPrintOrientation(cleanMerged.printOrientation) ? cleanMerged.printOrientation : DEFAULT_PRINT_ORIENTATION;
@@ -603,15 +738,29 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     graphShapes,
     clipartAssets,
     clipartImages,
+    layerGroups: normalizeLayerGroups((cleanMerged as { layerGroups?: unknown }).layerGroups),
     imageLineThickness,
     sourceFillThreshold,
     sourceFillMinStrokePixels,
     strokeGapClosePixels,
+    imageAutoEnhance,
+    imageDenoiseLevel,
+    imageEdgeDetection,
+    imageColorQuantization,
+    imageTraceEngine,
+    vectorizerStrokeWidth,
+    vectorizerStrokeColor,
+    vectorizerLineAdjust,
+    vectorizerInkThreshold,
+    vectorizerFidelity,
     gridLineColor,
     gridLineLayer,
+    gridLineStyle,
+    gridPattern,
     showNumbers,
     gridNumberPlacement,
     showPageBreaks,
+    majorGridEvery,
     imageWidth,
     imageHeight,
     sourceImages,
@@ -652,6 +801,13 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
           sourceFillThreshold: baseSettings.sourceFillThreshold,
           sourceFillMinStrokePixels: baseSettings.sourceFillMinStrokePixels,
           strokeGapClosePixels: baseSettings.strokeGapClosePixels,
+          imageAutoEnhance: DEFAULT_IMAGE_AUTO_ENHANCE,
+          imageDenoiseLevel: DEFAULT_IMAGE_DENOISE_LEVEL,
+          imageEdgeDetection: DEFAULT_IMAGE_EDGE_DETECTION,
+          imageColorQuantization: DEFAULT_IMAGE_COLOR_QUANTIZATION,
+          vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
+          vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+          vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
           x: defaultSourceX(baseSettings.graphWidth, baseSettings.imageWidth),
           y: 0,
           topPadding: 0,
@@ -749,53 +905,31 @@ export async function getProjectSummaries(options: ProjectSummaryPageOptions = {
   if (!supabase) return { projects: [] as ProjectSummary[], nextCursor: null };
   const pageSize = Math.max(1, Math.min(100, options.pageSize ?? 25));
 
-  let request = supabase
-    .from("projects")
-    .select(
-      "id, user_id, title, description, original_image_path, processed_image_path, width, height, pixel_size, grid_cell_size, color_count, created_at, updated_at",
-    )
-    .eq("user_id", session.userId)
-    .order("updated_at", { ascending: false })
-    .order("id", { ascending: false })
-    .limit(pageSize + 1);
-
   const normalizedQuery = options.query?.trim();
-  if (normalizedQuery) {
-    request = request.ilike("title", `%${normalizedQuery}%`);
-  }
   const cursor = decodeProjectCursor(options.cursor);
-  if (cursor) {
-    request = request.or(
-      `updated_at.lt.${cursor.updatedAt},and(updated_at.eq.${cursor.updatedAt},id.lt.${cursor.id})`,
-    );
-  }
-
-  const { data, error } = await request;
+  const { data, error } = await supabase.rpc("get_project_summaries", {
+    p_user_id: session.userId,
+    p_query: normalizedQuery || null,
+    p_cursor_updated_at: cursor?.updatedAt ?? null,
+    p_cursor_id: cursor?.id ?? null,
+    p_limit: pageSize + 1,
+  });
   if (error) throw new Error(error.message);
 
-  const allRows = (data ?? []) as Array<Omit<DbProject, "settings">>;
+  const allRows = (data ?? []) as Array<Omit<DbProject, "settings"> & { palette_preview: unknown }>;
   const hasMore = allRows.length > pageSize;
   const rows = allRows.slice(0, pageSize);
-  const ids = rows.map((row) => row.id);
-  const paletteByProject = new Map<string, DbPalette[]>();
 
-  if (ids.length) {
-    const { data: palettes, error: paletteError } = await supabase
-      .from("project_palettes")
-      .select("id, project_id, color_name, hex_code, locked, cell_count, sort_order")
-      .in("project_id", ids)
-      .order("sort_order", { ascending: true });
-
-    if (paletteError) throw new Error(paletteError.message);
-    for (const palette of (palettes ?? []) as (DbPalette & { project_id: string })[]) {
-      const list = paletteByProject.get(palette.project_id) ?? [];
-      list.push(palette);
-      paletteByProject.set(palette.project_id, list);
-    }
-  }
+  const [processedSignedUrls, originalSignedUrls] = await Promise.all([
+    signedUrlsForBucket(PROCESSED_IMAGES_BUCKET, rows.map((row) => row.processed_image_path)),
+    signedUrlsForBucket(ORIGINAL_IMAGES_BUCKET, rows.map((row) => row.original_image_path)),
+  ]);
 
   const projects = rows.map((row) => {
-    const palettes = (paletteByProject.get(row.id) ?? []).map(mapPalette).sort((a, b) => a.sortOrder - b.sortOrder);
+    const paletteRows = Array.isArray(row.palette_preview)
+      ? row.palette_preview.filter((palette): palette is DbPalette => Boolean(palette && typeof palette === "object"))
+      : [];
+    const palettes = paletteRows.map(mapPalette).sort((a, b) => a.sortOrder - b.sortOrder);
     return {
       id: row.id,
       userId: row.user_id,
@@ -810,8 +944,8 @@ export async function getProjectSummaries(options: ProjectSummaryPageOptions = {
       colorCount: Number(row.color_count ?? palettes.length),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      originalImageUrl: null,
-      processedImageUrl: null,
+      originalImageUrl: row.original_image_path ? originalSignedUrls.get(row.original_image_path) ?? null : null,
+      processedImageUrl: row.processed_image_path ? processedSignedUrls.get(row.processed_image_path) ?? null : null,
       palettePreview: palettes.slice(0, 6),
     };
   });

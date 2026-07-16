@@ -1,4 +1,5 @@
 export type ThinArtworkOptions = {
+  preserveSourceInk?: boolean;
   sourceFillThreshold?: number;
   sourceFillMinStrokePixels?: number;
   strokeGapClosePixels?: number;
@@ -574,6 +575,18 @@ function enclosedRegionMask(barrierMask: Uint8Array, width: number, height: numb
 }
 
 export function createThinArtworkMasks(inkMask: Uint8Array, width: number, height: number, options: ThinArtworkOptions = {}): ThinArtworkMasks {
+  if (options.preserveSourceInk) {
+    const sourceMask = copyMask(inkMask);
+    const enclosedFillMask = enclosedRegionMask(sourceMask, width, height);
+    return {
+      enclosedFillMask,
+      fillMask: copyMask(enclosedFillMask),
+      outlineMask: copyMask(sourceMask),
+      sourceFillMask: new Uint8Array(sourceMask.length),
+      strokeMask: copyMask(sourceMask),
+    };
+  }
+
   const sourceFillThreshold = normalizeFillThreshold(options.sourceFillThreshold);
   const sourceFillMinStrokePixels = normalizeFillMinStrokePixels(options.sourceFillMinStrokePixels);
   const strokeGapClosePixels = normalizeGapClosePixels(options.strokeGapClosePixels);

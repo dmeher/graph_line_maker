@@ -27,6 +27,42 @@ export const TRANSPARENT_FILL_COLOR = "transparent";
 export const GRAPH_LINE_LAYER_KEYS = ["front", "back"] as const;
 export type GraphLineLayer = (typeof GRAPH_LINE_LAYER_KEYS)[number];
 export const DEFAULT_GRAPH_LINE_LAYER: GraphLineLayer = "back";
+export const GRAPH_GRID_LINE_STYLE_KEYS = ["solid", "dashed", "dotted"] as const;
+export type GraphGridLineStyle = (typeof GRAPH_GRID_LINE_STYLE_KEYS)[number];
+export const DEFAULT_GRID_LINE_STYLE: GraphGridLineStyle = "solid";
+export const GRAPH_GRID_PATTERN_KEYS = ["square", "dot"] as const;
+export type GraphGridPattern = (typeof GRAPH_GRID_PATTERN_KEYS)[number];
+export const DEFAULT_GRID_PATTERN: GraphGridPattern = "square";
+export const MAJOR_GRID_EVERY_KEYS = [1, 2, 5, 10] as const;
+export type MajorGridEvery = (typeof MAJOR_GRID_EVERY_KEYS)[number];
+export const DEFAULT_MAJOR_GRID_EVERY: MajorGridEvery = 5;
+export const GRAPH_IMAGE_DENOISE_LEVEL_KEYS = ["off", "light", "strong"] as const;
+export type GraphImageDenoiseLevel = (typeof GRAPH_IMAGE_DENOISE_LEVEL_KEYS)[number];
+export const DEFAULT_IMAGE_DENOISE_LEVEL: GraphImageDenoiseLevel = "off";
+export const GRAPH_IMAGE_EDGE_DETECTION_KEYS = ["standard", "enhanced"] as const;
+export type GraphImageEdgeDetection = (typeof GRAPH_IMAGE_EDGE_DETECTION_KEYS)[number];
+export const DEFAULT_IMAGE_EDGE_DETECTION: GraphImageEdgeDetection = "standard";
+export const GRAPH_IMAGE_COLOR_QUANTIZATION_KEYS = ["off", 2, 4, 8, 16] as const;
+export type GraphImageColorQuantization = (typeof GRAPH_IMAGE_COLOR_QUANTIZATION_KEYS)[number];
+export const DEFAULT_IMAGE_COLOR_QUANTIZATION: GraphImageColorQuantization = "off";
+export const DEFAULT_IMAGE_AUTO_ENHANCE = false;
+export const GRAPH_IMAGE_TRACE_ENGINE_KEYS = ["default", "image-tracer", "vectorizer"] as const;
+export type GraphImageTraceEngine = (typeof GRAPH_IMAGE_TRACE_ENGINE_KEYS)[number];
+export const DEFAULT_IMAGE_TRACE_ENGINE: GraphImageTraceEngine = "vectorizer";
+export const MIN_VECTORIZER_STROKE_WIDTH = 1;
+export const MAX_VECTORIZER_STROKE_WIDTH = 24;
+export const DEFAULT_VECTORIZER_STROKE_WIDTH = 3;
+export const DEFAULT_VECTORIZER_STROKE_COLOR = DEFAULT_OUTLINE_COLOR;
+export const MIN_VECTORIZER_LINE_ADJUST = -8;
+export const MAX_VECTORIZER_LINE_ADJUST = 16;
+export const VECTORIZER_LINE_ADJUST_STEP = 0.5;
+export const DEFAULT_VECTORIZER_LINE_ADJUST = 0;
+export const MIN_VECTORIZER_INK_THRESHOLD = 1;
+export const MAX_VECTORIZER_INK_THRESHOLD = 254;
+export const DEFAULT_VECTORIZER_INK_THRESHOLD = 210;
+export const GRAPH_VECTORIZER_FIDELITY_KEYS = ["exact", "smooth"] as const;
+export type GraphVectorizerFidelity = (typeof GRAPH_VECTORIZER_FIDELITY_KEYS)[number];
+export const DEFAULT_VECTORIZER_FIDELITY: GraphVectorizerFidelity = "exact";
 export const PRINT_PAPER_SIZE_KEYS = ["a4", "a3", "letter", "legal", "tabloid"] as const;
 export type PrintPaperSize = (typeof PRINT_PAPER_SIZE_KEYS)[number];
 export const DEFAULT_PRINT_PAPER_SIZE: PrintPaperSize = "a4";
@@ -54,6 +90,63 @@ export function isPrintPaperSize(value: unknown): value is PrintPaperSize {
 
 export function isGraphLineLayer(value: unknown): value is GraphLineLayer {
   return typeof value === "string" && GRAPH_LINE_LAYER_KEYS.includes(value as GraphLineLayer);
+}
+
+export function isGraphGridLineStyle(value: unknown): value is GraphGridLineStyle {
+  return typeof value === "string" && GRAPH_GRID_LINE_STYLE_KEYS.includes(value as GraphGridLineStyle);
+}
+
+export function isGraphGridPattern(value: unknown): value is GraphGridPattern {
+  return typeof value === "string" && GRAPH_GRID_PATTERN_KEYS.includes(value as GraphGridPattern);
+}
+
+export function isMajorGridEvery(value: unknown): value is MajorGridEvery {
+  return typeof value === "number" && MAJOR_GRID_EVERY_KEYS.includes(value as MajorGridEvery);
+}
+
+export function isGraphImageDenoiseLevel(value: unknown): value is GraphImageDenoiseLevel {
+  return typeof value === "string" && GRAPH_IMAGE_DENOISE_LEVEL_KEYS.includes(value as GraphImageDenoiseLevel);
+}
+
+export function isGraphImageEdgeDetection(value: unknown): value is GraphImageEdgeDetection {
+  return typeof value === "string" && GRAPH_IMAGE_EDGE_DETECTION_KEYS.includes(value as GraphImageEdgeDetection);
+}
+
+export function isGraphImageColorQuantization(value: unknown): value is GraphImageColorQuantization {
+  return value === "off" || (typeof value === "number" && GRAPH_IMAGE_COLOR_QUANTIZATION_KEYS.includes(value as GraphImageColorQuantization));
+}
+
+export function isGraphImageTraceEngine(value: unknown): value is GraphImageTraceEngine {
+  return typeof value === "string" && GRAPH_IMAGE_TRACE_ENGINE_KEYS.includes(value as GraphImageTraceEngine);
+}
+
+export function normalizeGraphImageTraceEngine(value: unknown): GraphImageTraceEngine {
+  void value;
+  return DEFAULT_IMAGE_TRACE_ENGINE;
+}
+
+export function clampVectorizerStrokeWidth(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_VECTORIZER_STROKE_WIDTH;
+  return Math.max(MIN_VECTORIZER_STROKE_WIDTH, Math.min(MAX_VECTORIZER_STROKE_WIDTH, Math.round(numeric)));
+}
+
+export function clampVectorizerLineAdjust(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_VECTORIZER_LINE_ADJUST;
+  const rounded = Math.round(numeric / VECTORIZER_LINE_ADJUST_STEP) * VECTORIZER_LINE_ADJUST_STEP;
+  const clamped = Math.max(MIN_VECTORIZER_LINE_ADJUST, Math.min(MAX_VECTORIZER_LINE_ADJUST, rounded));
+  return Object.is(clamped, -0) ? 0 : clamped;
+}
+
+export function clampVectorizerInkThreshold(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_VECTORIZER_INK_THRESHOLD;
+  return Math.max(MIN_VECTORIZER_INK_THRESHOLD, Math.min(MAX_VECTORIZER_INK_THRESHOLD, Math.round(numeric)));
+}
+
+export function isGraphVectorizerFidelity(value: unknown): value is GraphVectorizerFidelity {
+  return typeof value === "string" && GRAPH_VECTORIZER_FIDELITY_KEYS.includes(value as GraphVectorizerFidelity);
 }
 
 export function isPrintOrientation(value: unknown): value is PrintOrientation {

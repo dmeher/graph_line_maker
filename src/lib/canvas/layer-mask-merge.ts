@@ -6,6 +6,8 @@ export function mergeLayerPixelMasks(
   regionNumberMap: ReadonlyMap<number, number>,
   outlineColorMap?: Uint16Array,
   outlineColorNumber = 0,
+  outlineCoverageMap?: Uint8Array,
+  layerOutlineCoverageMap?: Uint8Array,
 ) {
   for (let pixel = 0; pixel < localFillRegionMap.length; pixel += 1) {
     const localRegionNumber = localFillRegionMap[pixel];
@@ -17,6 +19,9 @@ export function mergeLayerPixelMasks(
         fillRegionMap[pixel] = globalRegionNumber;
         outlineMask[pixel] = layerOutlineValue;
         if (outlineColorMap) outlineColorMap[pixel] = layerOutlineValue ? outlineColorNumber : 0;
+        if (outlineCoverageMap) {
+          outlineCoverageMap[pixel] = layerOutlineValue ? (layerOutlineCoverageMap?.[pixel] ?? 255) : 0;
+        }
       }
       continue;
     }
@@ -25,6 +30,7 @@ export function mergeLayerPixelMasks(
       fillRegionMap[pixel] = 0;
       outlineMask[pixel] = layerOutlineValue;
       if (outlineColorMap) outlineColorMap[pixel] = outlineColorNumber;
+      if (outlineCoverageMap) outlineCoverageMap[pixel] = layerOutlineCoverageMap?.[pixel] ?? 255;
     }
   }
 }

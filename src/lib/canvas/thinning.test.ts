@@ -78,6 +78,24 @@ test("thick stroke components thin without breaking apart", () => {
   assert.equal(componentCount(result.strokeMask, width, height), 1);
 });
 
+test("vectorized contours bypass legacy thinning and scanline cleanup", () => {
+  const width = 40;
+  const height = 18;
+  const mask = createMask(width, height);
+  fillRect(mask, width, 3, 3, 30, 1);
+  fillRect(mask, width, 5, 9, 24, 5);
+
+  const result = createThinArtworkMasks(mask, width, height, {
+    preserveSourceInk: true,
+    strokeGapClosePixels: 2,
+  });
+
+  maskEquals(result.outlineMask, mask);
+  maskEquals(result.strokeMask, mask);
+  assert.equal(count(result.sourceFillMask), 0);
+  assert.equal(count(result.fillMask), count(result.enclosedFillMask));
+});
+
 test("curved diagonal line art remains connected and faithful", () => {
   const width = 18;
   const height = 18;

@@ -1,0 +1,38 @@
+- generic [ref=e1]:
+  - main [ref=e2]:
+    - region [ref=e62]:
+      - link "Graph Pixel Maker home" [ref=e5] [cursor=pointer]:
+        - /url: /
+        - generic [ref=e6]:
+          - img "Graph Pixel Maker" [ref=e7]
+          - generic [ref=e20]:
+            - paragraph [ref=e21]: Graph Pixel Maker
+            - paragraph [ref=e22]: Precision graph studio
+      - generic [ref=e24]: "2"
+      - generic [ref=e28]:
+        - paragraph [ref=e33]: Check your inbox
+        - heading "Enter your code" [level=1] [ref=e70]
+        - paragraph [ref=e35]:
+          - text: We sent a six-digit code to
+          - strong [ref=e71]: tester@example.com
+          - text: .
+          - button "Edit email" [ref=e72] [cursor=pointer]
+        - generic [ref=e36]:
+          - group "One-time password" [ref=e73]:
+            - generic [ref=e75]:
+              - textbox "Code digit 1" [active] [ref=e76]
+              - textbox "Code digit 2" [ref=e77]
+              - textbox "Code digit 3" [ref=e78]
+              - textbox "Code digit 4" [ref=e79]
+              - textbox "Code digit 5" [ref=e80]
+              - textbox "Code digit 6" [ref=e81]
+          - paragraph [ref=e82]:
+            - text: "Development code:"
+            - strong [ref=e83]: "123456"
+          - status [ref=e84]: Email delivery is disabled locally. Use the development code below.
+          - generic [ref=e85]:
+            - generic [ref=e86]: Code expires in 10:00
+            - button "Resend in 00:30" [disabled] [ref=e87]
+          - button "Verify and sign in" [disabled] [ref=e93]
+  - button "Open Next.js Dev Tools" [ref=e49] [cursor=pointer]
+  - alert [ref=e53]

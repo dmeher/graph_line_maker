@@ -1,0 +1,173 @@
+- generic [ref=f2e1]:
+  - generic [ref=f2e2]:
+    - banner [ref=f2e3]:
+      - generic [ref=f2e4]:
+        - link "Back to dashboard" [ref=f2e5] [cursor=pointer]:
+          - /url: /dashboard
+          - img "Graph Pixel Maker" [ref=f2e6]
+        - generic [ref=f2e19]:
+          - generic [ref=f2e20]: Project
+          - textbox "Project name" [ref=f2e21]:
+            - /placeholder: Untitled graph
+            - text: Dev editor test
+      - generic [ref=f2e22]:
+        - button "Menu" [ref=f2e23] [cursor=pointer]
+        - button "Undo" [ref=f2e25] [cursor=pointer]
+        - button "Redo" [ref=f2e29] [cursor=pointer]
+      - generic [ref=f2e33]:
+        - button "Select" [ref=f2e34] [cursor=pointer]
+        - button "Pan" [ref=f2e37] [cursor=pointer]
+        - button "Eraser" [ref=f2e43] [cursor=pointer]
+      - generic [ref=f2e48]:
+        - button "Show original" [ref=f2e49] [cursor=pointer]
+        - button "Toggle graph numbers" [ref=f2e53] [cursor=pointer]
+        - generic [ref=f2e56]:
+          - button "Zoom out" [ref=f2e57] [cursor=pointer]
+          - generic [ref=f2e61]: 100%
+          - button "Zoom in" [ref=f2e62] [cursor=pointer]
+      - generic [ref=f2e66]:
+        - button "Workspace settings" [ref=f2e68] [cursor=pointer]
+        - button "Save project" [ref=f2e72] [cursor=pointer]
+        - button "Export" [ref=f2e76] [cursor=pointer]
+    - button "Close panel" [ref=f2e133] [cursor=pointer]
+    - generic [ref=f2e82]:
+      - complementary [ref=f2e135]:
+        - generic [ref=f2e136]:
+          - generic [ref=f2e137]:
+            - generic [ref=f2e138]:
+              - paragraph [ref=f2e139]: Assets & Layers
+              - paragraph [ref=f2e140]: 1 layer / 1 source
+            - generic "Add images" [ref=f2e141] [cursor=pointer]:
+              - button [ref=f2e143]
+          - tablist "Assets and layers" [ref=f2e144]:
+            - tab "Sources 1" [ref=f2e145] [cursor=pointer]:
+              - generic [ref=f2e150]:
+                - text: Sources
+                - generic [ref=f2e151]: "1"
+            - tab "Layers 1" [selected] [ref=f2e152] [cursor=pointer]:
+              - generic [ref=f2e157]:
+                - text: Layers
+                - generic [ref=f2e158]: "1"
+            - tab "Assets 0" [ref=f2e159] [cursor=pointer]:
+              - generic [ref=f2e163]:
+                - text: Assets
+                - generic [ref=f2e164]: "0"
+        - generic [ref=f2e165]:
+          - generic [ref=f2e166]:
+            - generic [ref=f2e167]:
+              - heading "Layers" [level=2] [ref=f2e168]
+              - generic "Add layer image" [ref=f2e169] [cursor=pointer]:
+                - button [ref=f2e171]
+            - generic [ref=f2e175]:
+              - button "Hide layer" [ref=f2e176] [cursor=pointer]
+              - button [ref=f2e180] [cursor=pointer]
+              - button "Original image Visible" [ref=f2e181] [cursor=pointer]:
+                - generic [ref=f2e182]: Original image
+                - generic [ref=f2e183]: Visible
+              - generic [ref=f2e184]: 100%
+              - button "Lock layer" [ref=f2e185] [cursor=pointer]
+              - button "Drag to reorder" [ref=f2e189] [cursor=pointer]
+          - generic [ref=f2e191]:
+            - heading "Status" [level=2] [ref=f2e193]
+            - generic [ref=f2e196]:
+              - generic [ref=f2e197]:
+                - generic [ref=f2e198]: Processing complete
+                - generic [ref=f2e203]: Ready
+              - paragraph [ref=f2e204]: "Cells: 10 x 12 (120)"
+              - paragraph [ref=f2e205]: "Colors: 2"
+              - paragraph [ref=f2e206]: "Stitches (est.): 120"
+              - paragraph [ref=f2e207]: "Layers: 1"
+        - button "Resize source panel" [ref=f2e208] [cursor=pointer]
+      - generic [ref=f2e84]:
+        - generic [ref=f2e85]:
+          - generic [ref=f2e86]:
+            - heading "Canvas" [level=1] [ref=f2e87]
+            - paragraph [ref=f2e88]: Processing complete
+          - generic [ref=f2e89]: Ready
+        - generic [ref=f2e93]:
+          - generic "Drag image to move it; double-click a fill area to choose its color; arrow keys move selected image by 0.1cm; Space or Ctrl plus drag pans the view" [ref=f2e94]
+          - generic:
+            - generic: "1"
+            - generic: "2"
+            - generic: "3"
+            - generic: "4"
+            - generic: "5"
+            - generic: "6"
+            - generic: "7"
+            - generic: "8"
+            - generic: "9"
+            - generic: "10"
+            - generic: "1"
+            - generic: "2"
+            - generic: "3"
+            - generic: "4"
+            - generic: "5"
+            - generic: "6"
+            - generic: "7"
+            - generic: "8"
+            - generic: "9"
+            - generic: "10"
+            - generic: "1"
+            - generic: "2"
+            - generic: "3"
+            - generic: "4"
+            - generic: "5"
+            - generic: "6"
+            - generic: "7"
+            - generic: "8"
+            - generic: "9"
+            - generic: "10"
+            - generic: "11"
+            - generic: "12"
+            - generic: "1"
+            - generic: "2"
+            - generic: "3"
+            - generic: "4"
+            - generic: "5"
+            - generic: "6"
+            - generic: "7"
+            - generic: "8"
+            - generic: "9"
+            - generic: "10"
+            - generic: "11"
+            - generic: "12"
+        - generic [ref=f2e95]:
+          - generic [ref=f2e96]: Ready
+          - generic [ref=f2e97]: 10 x 12 cells
+          - generic [ref=f2e98]: No layer selected
+          - generic [ref=f2e99]: Zoom 100%
+          - generic [ref=f2e100]: Auto-save Off
+          - generic [ref=f2e101]: "Snap: On"
+      - option "Centimeters"
+      - option "Inches" [selected]
+      - option "Front"
+      - option "Back" [selected]
+      - option "1 cells"
+      - option "2 cells"
+      - option "5 cells" [selected]
+      - option "10 cells"
+      - option "Solid" [selected]
+      - option "Dashed"
+      - option "Dotted"
+      - option "Square" [selected]
+      - option "Dot"
+      - option "Inside"
+      - option "Outside" [selected]
+      - option "A4 (210 x 297 mm)" [selected]
+      - option "A3 (297 x 420 mm)"
+      - option "Letter (216 x 279 mm)"
+      - option "Legal (216 x 356 mm)"
+      - option "Tabloid (279 x 432 mm)"
+      - option "Left"
+      - option "Center" [selected]
+      - option "Right"
+      - option "Top"
+      - option "Center" [selected]
+      - option "Bottom"
+    - generic [ref=f2e102]:
+      - button "Layers" [active] [ref=f2e103] [cursor=pointer]
+      - button "Select" [ref=f2e108] [cursor=pointer]
+      - button "Pan" [ref=f2e111] [cursor=pointer]
+      - button "Inspector" [ref=f2e117] [cursor=pointer]
+  - button "Open Next.js Dev Tools" [ref=f2e126] [cursor=pointer]
+  - alert [ref=f2e132]

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ChevronDown, CircleHelp, Cloud, Grid3X3, Home, Menu, Moon, X } from "lucide-react";
+import { Cloud, CloudOff, Menu, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { AppNav } from "@/components/layout/app-nav";
 import { BrandMark } from "@/components/layout/brand-mark";
@@ -14,6 +14,8 @@ type OfflineSessionTicket = {
   expiresAt: string;
 };
 
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "graph-pixel-sidebar-collapsed";
+
 export function AppShell({
   session,
   offlineSessionTicket,
@@ -24,97 +26,126 @@ export function AppShell({
   children: React.ReactNode;
 }) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
   const pathname = usePathname();
   const closeMenu = useCallback(() => setIsMenuOpen(false), []);
   const isProjectEditor = pathname.startsWith("/projects/") && pathname !== "/projects/new";
   const showShellChrome = !isProjectEditor;
 
-  const toggleMenu = useCallback(() => setIsMenuOpen((value) => !value), []);
+  const toggleNavigation = useCallback(() => {
+    const desktop = window.matchMedia("(min-width: 1024px)").matches;
+    if (desktop && !isProjectEditor) {
+      setIsSidebarCollapsed((value) => {
+        const next = !value;
+        window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(next));
+        return next;
+      });
+      return;
+    }
+    setIsMenuOpen((value) => !value);
+  }, [isProjectEditor]);
 
   useEffect(() => {
     closeMenu();
   }, [pathname, closeMenu]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    try {
+      setIsSidebarCollapsed(window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "true");
+    } catch {
+      // Keep the expanded default when browser storage is unavailable.
+    }
+  }, []);
 
-    const handleEditorMenu = () => {
-      toggleMenu();
+  useEffect(() => {
+    function syncOnlineState() {
+      setIsOnline(navigator.onLine);
+    }
+    syncOnlineState();
+    window.addEventListener("online", syncOnlineState);
+    window.addEventListener("offline", syncOnlineState);
+    return () => {
+      window.removeEventListener("online", syncOnlineState);
+      window.removeEventListener("offline", syncOnlineState);
     };
+  }, []);
 
+  useEffect(() => {
+    function handleEditorMenu() {
+      setIsMenuOpen((value) => !value);
+    }
     window.addEventListener("graph-pixel-editor-menu", handleEditorMenu);
     return () => window.removeEventListener("graph-pixel-editor-menu", handleEditorMenu);
-  }, [toggleMenu]);
+  }, []);
+
+  const shellClassName = "mock-shell" + (isProjectEditor ? " mock-shell--editor" : "") + (isSidebarCollapsed ? " mock-shell--sidebar-collapsed" : "");
+  const sidebarClassName =
+    "mock-sidebar" +
+    (isMenuOpen ? " mock-sidebar--open" : "") +
+    (isSidebarCollapsed ? " mock-sidebar--collapsed" : "");
+  const mainClassName = "mock-main" + (isProjectEditor ? " mock-main-editor" : "");
 
   return (
-    <div className="mock-shell">
+    <div className={shellClassName}>
       {offlineSessionTicket ? <OfflineSessionBridge session={session} offlineSessionTicket={offlineSessionTicket} /> : null}
-      {isMenuOpen ? <button type="button" className="mock-nav-backdrop" aria-label="Close menu" onClick={closeMenu} /> : null}
+      {isMenuOpen ? <button type="button" className="mock-nav-backdrop" aria-label="Close navigation" onClick={closeMenu} /> : null}
+
       {showShellChrome ? (
         <header className="mock-topbar">
-          <div className="flex min-w-0 items-center gap-5">
+          <div className="mock-topbar__brand">
             <button
               type="button"
-              className="grid h-9 w-9 place-items-center rounded-md text-[#101828] hover:bg-[#f2f4f7]"
-              aria-label={isMenuOpen ? "Close menu" : "Open menu"}
-              onClick={() => setIsMenuOpen((value) => !value)}
+              className="ui-btn-icon mock-menu-button"
+              aria-label={isMenuOpen ? "Close navigation" : isSidebarCollapsed ? "Expand navigation" : "Collapse navigation"}
+              aria-expanded={isMenuOpen || !isSidebarCollapsed}
+              onClick={toggleNavigation}
             >
-              <Menu size={22} strokeWidth={1.8} />
+              <Menu size={20} strokeWidth={1.8} />
             </button>
             <Link href="/dashboard" aria-label="Graph Pixel Maker dashboard" className="[--brand-text:#101828]">
               <BrandMark />
             </Link>
           </div>
 
-          <div className="flex min-w-0 items-center gap-4">
-            <div className="hidden items-center gap-2 text-sm font-medium text-[#101828] lg:flex">
-              <Cloud size={19} className="text-[#008c8f]" strokeWidth={1.8} />
-              <span>Online</span>
-            </div>
-            <button className="hidden h-9 w-9 place-items-center rounded-full text-[#101828] hover:bg-[#f2f4f7] sm:grid" aria-label="Home">
-              <Home size={18} strokeWidth={1.8} />
-            </button>
-            <button className="hidden h-9 w-9 place-items-center rounded-full text-[#101828] hover:bg-[#f2f4f7] sm:grid" aria-label="Apps">
-              <Grid3X3 size={18} strokeWidth={1.8} />
-            </button>
-            <button className="hidden h-9 w-9 place-items-center rounded-full text-[#101828] hover:bg-[#f2f4f7] sm:grid" aria-label="Help">
-              <CircleHelp size={19} strokeWidth={1.8} />
-            </button>
-            <button className="hidden h-9 w-9 place-items-center rounded-full text-[#101828] hover:bg-[#f2f4f7] sm:grid" aria-label="Theme">
-              <Moon size={18} strokeWidth={1.8} />
-            </button>
-            <div className="flex min-w-0 items-center gap-3">
-              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[#007f83] text-sm font-semibold text-white">
-                {(session.displayName || session.email || "DM").slice(0, 2).toUpperCase()}
+          <div className="mock-topbar__actions">
+            <span className={"connection-status " + (isOnline ? "connection-status--online" : "connection-status--offline")} role="status">
+              {isOnline ? <Cloud size={16} aria-hidden="true" /> : <CloudOff size={16} aria-hidden="true" />}
+              <span>{isOnline ? "Online" : "Offline"}</span>
+            </span>
+            <Link href="/projects/new" prefetch={false} className="ui-btn ui-btn-primary mock-topbar__create">
+              <Plus size={16} aria-hidden="true" />
+              <span>New project</span>
+            </Link>
+            <div className="mock-account" title={session.email}>
+              <span className="mock-account__avatar">
+                {(session.displayName || session.email || "GP").slice(0, 2).toUpperCase()}
               </span>
-              <div className="hidden min-w-0 sm:block">
-                <p className="truncate text-sm font-semibold leading-4 text-[#101828]">{session.displayName || "Demo User"}</p>
-                <p className="text-xs capitalize leading-4 text-[#667085]">{session.role}</p>
-              </div>
-              <ChevronDown size={17} className="hidden text-[#101828] sm:block" strokeWidth={1.8} />
+              <span className="mock-account__copy">
+                <strong>{session.displayName || session.email.split("@")[0]}</strong>
+                <small>{session.role}</small>
+              </span>
             </div>
           </div>
         </header>
       ) : null}
 
-      <aside className={`mock-sidebar ${isMenuOpen ? "mock-sidebar--open" : ""}`}>
+      <aside className={sidebarClassName} aria-label="Application navigation">
         <div className="mock-sidebar-head">
-          <button
-            type="button"
-            onClick={closeMenu}
-            className="mock-sidebar-close"
-            aria-label="Close menu"
-          >
-            <X size={16} strokeWidth={1.8} />
+          <Link href="/dashboard" className="[--brand-text:#101828]" aria-label="Graph Pixel Maker dashboard">
+            <BrandMark />
+          </Link>
+          <button type="button" onClick={closeMenu} className="mock-sidebar-close" aria-label="Close navigation">
+            <X size={17} strokeWidth={1.8} />
           </button>
         </div>
-        <AppNav variant="desktop" />
+        <AppNav variant="desktop" collapsed={isSidebarCollapsed && !isProjectEditor} />
       </aside>
 
-      <main className={`mock-main ${isProjectEditor ? "mock-main-editor" : ""}`}>{children}</main>
+      <main className={mainClassName}>{children}</main>
 
       {showShellChrome ? <AppNav variant="mobile" /> : null}
-      {showShellChrome ? <div className="h-16 md:hidden" /> : null}
+      {showShellChrome ? <div className="h-[calc(64px+env(safe-area-inset-bottom))] md:hidden" /> : null}
     </div>
   );
 }

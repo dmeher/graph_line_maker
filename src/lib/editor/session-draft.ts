@@ -1,6 +1,7 @@
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 
 export const EDITOR_SESSION_DRAFT_VERSION = 1;
+export const EDITOR_SESSION_DRAFT_PREFIX = `graph-pixel-maker:editor-draft:v${EDITOR_SESSION_DRAFT_VERSION}:`;
 
 export type EditorSessionDraft = {
   version: typeof EDITOR_SESSION_DRAFT_VERSION;
@@ -28,7 +29,21 @@ export type EditorDraftInput = {
 };
 
 export function editorSessionDraftKey(projectId: string) {
-  return `graph-pixel-maker:editor-draft:v${EDITOR_SESSION_DRAFT_VERSION}:${projectId}`;
+  return `${EDITOR_SESSION_DRAFT_PREFIX}${projectId}`;
+}
+
+export function clearEditorSessionDrafts(storage: Storage | null = browserSessionStorage()) {
+  if (!storage) return;
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key?.startsWith(EDITOR_SESSION_DRAFT_PREFIX)) keys.push(key);
+    }
+    keys.forEach((key) => storage.removeItem(key));
+  } catch {
+    // User-scoped drafts are best-effort cleanup for restricted storage modes.
+  }
 }
 
 function sanitizeSettingsForDraft(settings: GraphSettings): GraphSettings {

@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "graph-pixel-maker-";
-const CACHE_VERSION = `${CACHE_PREFIX}v40`;
+const CACHE_VERSION = `${CACHE_PREFIX}v41`;
 const MAX_CACHED_EDITOR_NAVIGATIONS = 20;
 const LOCAL_HOSTNAMES = ["localhost", "127.0.0.1", "::1"];
 const IS_LOCAL_DEVELOPMENT = LOCAL_HOSTNAMES.includes(self.location.hostname);
@@ -7,15 +7,19 @@ const OFFLINE_SESSION_MARKER = "/__graph-pixel-offline-session";
 const OFFLINE_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const OFFLINE_SESSION_READY_MESSAGE = "GRAPH_PIXEL_OFFLINE_SESSION_READY";
 const OFFLINE_SESSION_CLEAR_MESSAGE = "GRAPH_PIXEL_OFFLINE_SESSION_CLEAR";
+const USER_DATA_CLEAR_MESSAGE = "GRAPH_PIXEL_CLEAR_USER_DATA";
 const PROTECTED_PREFIXES = ["/dashboard", "/projects", "/settings"];
 const BLOCKED_OFFLINE_NAVIGATION_PATHS = ["/projects/new"];
 const APP_SHELL = [
   "/",
   "/offline",
   "/manifest.webmanifest",
-  "/icons/icon-192x192.svg",
-  "/icons/icon-512x512.svg",
-  "/icons/maskable-icon.svg",
+  "/icon.svg",
+  "/icons/favicon-32x32.png",
+  "/icons/icon-192x192.png",
+  "/icons/icon-512x512.png",
+  "/icons/maskable-icon-512x512.png",
+  "/icons/apple-touch-icon.png",
 ];
 
 function isProtectedPath(pathname) {
@@ -193,7 +197,7 @@ self.addEventListener("message", (event) => {
     return;
   }
 
-  if (event.data?.type === OFFLINE_SESSION_CLEAR_MESSAGE) {
+  if (event.data?.type === OFFLINE_SESSION_CLEAR_MESSAGE || event.data?.type === USER_DATA_CLEAR_MESSAGE) {
     event.waitUntil(
       caches.open(CACHE_VERSION).then(async (cache) => {
         await cache.delete(OFFLINE_SESSION_MARKER);

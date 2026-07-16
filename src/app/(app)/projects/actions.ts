@@ -5,6 +5,11 @@ import { z } from "zod";
 import { PROCESSED_IMAGES_BUCKET, ORIGINAL_IMAGES_BUCKET } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
 import {
+  GRAPH_GRID_LINE_STYLE_KEYS,
+  GRAPH_GRID_PATTERN_KEYS,
+  GRAPH_IMAGE_DENOISE_LEVEL_KEYS,
+  GRAPH_IMAGE_EDGE_DETECTION_KEYS,
+  GRAPH_IMAGE_TRACE_ENGINE_KEYS,
   GRAPH_LINE_LAYER_KEYS,
   GRAPH_MAJOR_CELL_PIXELS,
   MAX_IMAGE_LINE_THICKNESS,
@@ -12,15 +17,23 @@ import {
   MAX_SOURCE_FILL_MIN_STROKE_PIXELS,
   MAX_SOURCE_FILL_THRESHOLD,
   MAX_STROKE_GAP_CLOSE_PIXELS,
+  MAX_VECTORIZER_INK_THRESHOLD,
+  MAX_VECTORIZER_LINE_ADJUST,
+  MAX_VECTORIZER_STROKE_WIDTH,
   MIN_IMAGE_LINE_THICKNESS,
   MIN_SOURCE_FILL_MIN_STROKE_PIXELS,
   MIN_SOURCE_FILL_THRESHOLD,
   MIN_STROKE_GAP_CLOSE_PIXELS,
+  MIN_VECTORIZER_INK_THRESHOLD,
+  MIN_VECTORIZER_LINE_ADJUST,
+  MIN_VECTORIZER_STROKE_WIDTH,
   PRINT_HORIZONTAL_ALIGNMENT_KEYS,
   PRINT_ORIENTATION_KEYS,
   PRINT_PAPER_SIZE_KEYS,
   PRINT_VERTICAL_ALIGNMENT_KEYS,
   TRANSPARENT_FILL_COLOR,
+  VECTORIZER_LINE_ADJUST_STEP,
+  GRAPH_VECTORIZER_FIDELITY_KEYS,
 } from "@/lib/graph-paper";
 import { MAX_CANVAS_DIMENSION, inspectCanvasBudget } from "@/lib/canvas/performance-limits";
 import { assertProjectOwner, clipartImagePath, imagePath, normalizeGraphSettings, sourceImagePath } from "@/lib/projects";
@@ -38,6 +51,35 @@ const fillRegionsSchema = z
   .record(z.string().regex(/^\d+$/), fillColorSchema)
   .refine((value) => Object.keys(value).length <= 500, "Too many custom fill regions.");
 const cellLineSideSchema = z.union([z.literal("top"), z.literal("right"), z.literal("bottom"), z.literal("left")]);
+const imageColorQuantizationSchema = z.union([
+  z.literal("off"),
+  z.literal(2),
+  z.literal(4),
+  z.literal(8),
+  z.literal(16),
+]);
+const vectorizerLineAdjustSchema = z
+  .number()
+  .min(MIN_VECTORIZER_LINE_ADJUST)
+  .max(MAX_VECTORIZER_LINE_ADJUST)
+  .refine(
+    (value) => Math.abs(value / VECTORIZER_LINE_ADJUST_STEP - Math.round(value / VECTORIZER_LINE_ADJUST_STEP)) < 0.000001,
+    "Line adjustment must use 0.5 pixel steps.",
+  );
+const groupIdSchema = z.string().min(1).max(80).nullable().optional();
+const eraseStrokeSchema = z.object({
+  points: z
+    .array(z.object({ x: z.number().min(-100000).max(100000), y: z.number().min(-100000).max(100000) }))
+    .min(1)
+    .max(400),
+  radius: z.number().min(1).max(400),
+});
+const eraseStrokesSchema = z.array(eraseStrokeSchema).max(80).optional();
+const backgroundRemovalSchema = z
+  .object({ enabled: z.boolean(), tolerance: z.number().min(0).max(1) })
+  .optional();
+const layerGroupSchema = z.object({ id: z.string().min(1).max(80), name: z.string().min(1).max(120) });
+
 const cellPaintSchema = z.object({
   id: z.string().min(1).max(80),
   name: z.string().min(1).max(160),
@@ -54,6 +96,7 @@ const cellPaintSchema = z.object({
   rotationDegrees: rotationDegreesSchema,
   flipX: z.boolean(),
   flipY: z.boolean(),
+  groupId: groupIdSchema,
 });
 const graphShapeSchema = z.object({
   id: z.string().min(1).max(80),
@@ -72,6 +115,7 @@ const graphShapeSchema = z.object({
   rotationDegrees: rotationDegreesSchema,
   flipX: z.boolean(),
   flipY: z.boolean(),
+  groupId: groupIdSchema,
 });
 const sourceImageSchema = z.object({
   id: z.string().min(1).max(80),
@@ -84,6 +128,13 @@ const sourceImageSchema = z.object({
   sourceFillThreshold: z.number().min(MIN_SOURCE_FILL_THRESHOLD).max(MAX_SOURCE_FILL_THRESHOLD),
   sourceFillMinStrokePixels: z.number().int().min(MIN_SOURCE_FILL_MIN_STROKE_PIXELS).max(MAX_SOURCE_FILL_MIN_STROKE_PIXELS),
   strokeGapClosePixels: z.number().int().min(MIN_STROKE_GAP_CLOSE_PIXELS).max(MAX_STROKE_GAP_CLOSE_PIXELS),
+  imageAutoEnhance: z.boolean(),
+  imageDenoiseLevel: z.enum(GRAPH_IMAGE_DENOISE_LEVEL_KEYS),
+  imageEdgeDetection: z.enum(GRAPH_IMAGE_EDGE_DETECTION_KEYS),
+  imageColorQuantization: imageColorQuantizationSchema,
+  vectorizerLineAdjust: vectorizerLineAdjustSchema,
+  vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
+  vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
   x: z.number().min(-1000).max(1000),
   y: z.number().min(-1000).max(1000),
   topPadding: z.number().min(-1000).max(1000),
@@ -93,6 +144,9 @@ const sourceImageSchema = z.object({
   rotationDegrees: rotationDegreesSchema,
   flipX: z.boolean(),
   flipY: z.boolean(),
+  groupId: groupIdSchema,
+  eraseStrokes: eraseStrokesSchema,
+  backgroundRemoval: backgroundRemovalSchema,
 });
 const clipartAssetSchema = z.object({
   id: z.string().min(1).max(80),
@@ -117,11 +171,21 @@ const clipartImageSchema = z.object({
   sourceFillThreshold: z.number().min(MIN_SOURCE_FILL_THRESHOLD).max(MAX_SOURCE_FILL_THRESHOLD),
   sourceFillMinStrokePixels: z.number().int().min(MIN_SOURCE_FILL_MIN_STROKE_PIXELS).max(MAX_SOURCE_FILL_MIN_STROKE_PIXELS),
   strokeGapClosePixels: z.number().int().min(MIN_STROKE_GAP_CLOSE_PIXELS).max(MAX_STROKE_GAP_CLOSE_PIXELS),
+  imageAutoEnhance: z.boolean(),
+  imageDenoiseLevel: z.enum(GRAPH_IMAGE_DENOISE_LEVEL_KEYS),
+  imageEdgeDetection: z.enum(GRAPH_IMAGE_EDGE_DETECTION_KEYS),
+  imageColorQuantization: imageColorQuantizationSchema,
+  vectorizerLineAdjust: vectorizerLineAdjustSchema,
+  vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
+  vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
   locked: z.boolean(),
   visible: z.boolean(),
   rotationDegrees: rotationDegreesSchema,
   flipX: z.boolean(),
   flipY: z.boolean(),
+  groupId: groupIdSchema,
+  eraseStrokes: eraseStrokesSchema,
+  backgroundRemoval: backgroundRemovalSchema,
 });
 
 const graphSettingsSchema = z.object({
@@ -148,15 +212,27 @@ const graphSettingsSchema = z.object({
   sourceFillThreshold: z.number().min(MIN_SOURCE_FILL_THRESHOLD).max(MAX_SOURCE_FILL_THRESHOLD),
   sourceFillMinStrokePixels: z.number().int().min(MIN_SOURCE_FILL_MIN_STROKE_PIXELS).max(MAX_SOURCE_FILL_MIN_STROKE_PIXELS),
   strokeGapClosePixels: z.number().int().min(MIN_STROKE_GAP_CLOSE_PIXELS).max(MAX_STROKE_GAP_CLOSE_PIXELS),
+  imageAutoEnhance: z.boolean(),
+  imageDenoiseLevel: z.enum(GRAPH_IMAGE_DENOISE_LEVEL_KEYS),
+  imageEdgeDetection: z.enum(GRAPH_IMAGE_EDGE_DETECTION_KEYS),
+  imageColorQuantization: imageColorQuantizationSchema,
+  imageTraceEngine: z.enum(GRAPH_IMAGE_TRACE_ENGINE_KEYS),
+  vectorizerStrokeWidth: z.number().int().min(MIN_VECTORIZER_STROKE_WIDTH).max(MAX_VECTORIZER_STROKE_WIDTH),
+  vectorizerStrokeColor: hexSchema,
+  vectorizerLineAdjust: vectorizerLineAdjustSchema,
+  vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
+  vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
   gridLineColor: hexSchema,
   gridLineLayer: z.enum(GRAPH_LINE_LAYER_KEYS),
+  gridLineStyle: z.enum(GRAPH_GRID_LINE_STYLE_KEYS),
+  gridPattern: z.enum(GRAPH_GRID_PATTERN_KEYS),
   gridLineThickness: z.number().int().min(0).max(10),
   showBorder: z.boolean(),
   transparentBackground: z.boolean(),
   showNumbers: z.boolean(),
   gridNumberPlacement: z.union([z.literal("inside"), z.literal("outside")]),
   showPageBreaks: z.boolean(),
-  majorGridEvery: z.union([z.literal(5), z.literal(10)]),
+  majorGridEvery: z.union([z.literal(1), z.literal(2), z.literal(5), z.literal(10)]),
   imageWidth: z.number().min(0.01).max(1000),
   imageHeight: z.number().min(0.01).max(1000),
   sourceImages: z.array(sourceImageSchema).max(12),
@@ -164,6 +240,7 @@ const graphSettingsSchema = z.object({
   graphShapes: z.array(graphShapeSchema).max(500),
   clipartAssets: z.array(clipartAssetSchema).max(120),
   clipartImages: z.array(clipartImageSchema).max(500),
+  layerGroups: z.array(layerGroupSchema).max(200).optional(),
   imagePadding: z.number().int().min(0).max(MAX_IMAGE_PADDING_PIXELS),
   imageOffsetX: z.number().int().min(-MAX_CANVAS_DIMENSION).max(MAX_CANVAS_DIMENSION),
   imageOffsetY: z.number().int().min(-MAX_CANVAS_DIMENSION).max(MAX_CANVAS_DIMENSION),

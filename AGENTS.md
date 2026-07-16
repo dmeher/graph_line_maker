@@ -52,6 +52,7 @@ This project uses **Next.js 16.2.10** with React 19. APIs, conventions, and file
 | Email | Brevo API (`src/lib/auth/brevo.ts`) | Dev mode prints OTP to console if env missing |
 | PDF export | `jspdf` | Multi-page tiled export in `src/lib/canvas/exports.ts` |
 | PDF reading | `pdfjs-dist` | First-page preview/size extraction |
+| Image vectorization | `@neplex/vectorizer` | Required vector line-art generation engine behind `/api/vectorize` |
 | Validation | `zod` | Used in server actions and API routes |
 | E2E tests | Playwright 1.61+ | Config in `playwright.config.ts` |
 | Unit tests | Node built-in test runner | Run with `--experimental-strip-types` |
@@ -77,6 +78,7 @@ This project uses **Next.js 16.2.10** with React 19. APIs, conventions, and file
 │   │   │   └── auth/send-otp, verify-otp, logout
 │   │   │   └── projects/..., projects/[id]/original-image, processed-image, source-images
 │   │   ├── dev/editor-test/page.tsx   # Dev-only fixture; 404 in production
+│   │   ├── dev/crop-test/page.tsx     # Dev-only crop fixture; 404 in production
 │   │   ├── globals.css         # Tailwind v4 + custom component classes
 │   │   ├── layout.tsx          # Root layout, fonts, service-worker registration
 │   │   ├── manifest.ts         # PWA manifest
@@ -117,7 +119,7 @@ This project uses **Next.js 16.2.10** with React 19. APIs, conventions, and file
 ## 5. Key configuration files
 
 - **`package.json`** — scripts, dependencies, and the explicit list of unit-test files under `test:unit`.
-- **`next.config.ts`** — sets security headers (`X-Content-Type-Options`, `Referrer-Policy`) and a strict CSP for `/sw.js`.
+- **`next.config.ts`** — sets security headers (`X-Content-Type-Options`, `Referrer-Policy`) and a strict CSP for `/sw.js`; keeps native `@neplex/vectorizer` external to server bundles.
 - **`tsconfig.json`** — strict TypeScript, `@/*` path alias mapping to `./src/*`.
 - **`eslint.config.mjs`** — `eslint-config-next/core-web-vitals` + `typescript`.
 - **`postcss.config.mjs`** — Tailwind v4 plugin only.
@@ -146,18 +148,20 @@ This project uses **Next.js 16.2.10** with React 19. APIs, conventions, and file
 | `/settings` | `(app)/settings/page.tsx` | Account + admin user allowlist |
 | `/offline` | `src/app/offline/page.tsx` | Offline fallback page |
 | `/dev/editor-test` | `src/app/dev/editor-test/page.tsx` | **Development only** synthetic fixture |
+| `/dev/crop-test` | `src/app/dev/crop-test/page.tsx` | **Development only** advanced-crop fixture |
 
 ### API routes
 
-- `/api/auth/send-otp` — generates 6-digit OTP, stores hash in `email_otp_attempts`, sends via Brevo (or logs in dev).
+- `/api/auth/send-otp` — generates a 6-digit OTP, atomically enforces the database cooldown and stores its hash through `create_login_otp_attempt`, sends via Brevo (or logs in dev), and returns `resendAfterSeconds` plus `Retry-After` when limited.
 - `/api/auth/verify-otp` — verifies hash, marks attempt consumed, sets `graph_pixel_session` httpOnly cookie.
-- `/api/auth/logout` — clears session cookie.
+- `/api/auth/logout` — always clears the session cookie. Fetch/JSON clients receive `{ ok: true, redirectTo: "/login" }`; native form submissions receive a `303 /login` fallback. Client cleanup runs only after a successful response, removes editor drafts/offline tickets, sends `CLEAR_USER_DATA` to the service worker, and then replaces/refreshes the route.
 - `/api/projects` — coordinates signed project uploads and finalization.
 - `/api/projects` uses a three-step direct-upload contract: JSON `POST` creates the row and exact-path signed upload tokens, the browser uploads directly to Storage, and JSON `PATCH` verifies/finalizes metadata. `DELETE` cleans up a failed pending upload. Multipart project creation is intentionally rejected.
 - `/api/projects/[id]/original-image` — PUT replaces the primary source image.
 - `/api/projects/[id]/source-images` — prepares, finalizes, or cleans up direct source-image uploads.
 - Source-image and clipart upload routes use the same JSON prepare / direct Storage upload / JSON finalize pattern; do not reintroduce multipart bodies into Next.js.
 - `/api/projects/[id]/processed-image` — PUT stores the processed PNG output.
+- `/api/vectorize` — authenticated Node.js route that accepts multipart raster uploads, runs native `@neplex/vectorizer`, and returns SVG for source/clipart line-art generation.
 
 ---
 
@@ -167,14 +171,14 @@ This app does **not** use Supabase Auth. It uses a custom OTP flow:
 
 1. Server generates a 6-digit OTP with `generateOtp()`.
 2. Hashes it with `hashOtp(email, otp)` using `EMAIL_OTP_SECRET`.
-3. Stores the hash + expiry in `email_otp_attempts`.
+3. Atomically rate-limits and stores the hash + expiry through the service-role-only `create_login_otp_attempt` RPC.
 4. Sends via Brevo transactional email; in development, logs the OTP to the console if `BREVO_API_KEY` is missing.
 5. `verify-otp` checks the hash, max attempts (`5`), expiry, consumed state, and active allowlist status.
 6. On success, sets a signed httpOnly `graph_pixel_session` cookie (30-day TTL) via `setSessionCookie`.
 
 Session verification (`getCurrentSession`) reads the cookie, verifies the HMAC signature, validates the user is still active in `app_users`, and returns `{ userId, email, role, displayName }`.
 
-Production session resolution is request-memoized with React `cache()`; never replace it with cross-request caching. OTP verification is atomic through the service-role-only, `SECURITY INVOKER` `image_to_graph.verify_login_otp` RPC.
+Production session resolution is request-memoized with React `cache()`; never replace it with cross-request caching. OTP creation/cooldown and verification are atomic through the service-role-only `image_to_graph.create_login_otp_attempt` and `image_to_graph.verify_login_otp` RPCs.
 
 Local development has an explicit opt-in bypass: set `GRAPH_PIXEL_DEV_AUTH_BYPASS=true` while `NODE_ENV=development`, with optional `GRAPH_PIXEL_DEV_USER_EMAIL` (defaults to the bootstrap admin). The bypass is ignored outside development and therefore cannot disable production auth. When Supabase is configured, the email must resolve to an active `app_users` row; that real user ID/role is used so project ownership and admin checks still apply. With no Supabase configuration, a synthetic local identity supports non-persistent fixtures, but database/storage APIs still require Supabase.
 
@@ -193,7 +197,7 @@ All tables live in the `image_to_graph` schema (migrations in `supabase/migratio
 - `projects` — owner, title, description, original/processed image paths, JSON `settings`, width/height/pixel_size/grid_cell_size/color_count.
 - `project_palettes` — per-project colors with name, hex, locked, cell_count, sort_order.
 
-Migration `20260710091750_optimize_project_persistence.sql` adds cursor/search indexes plus transactional `save_project_state` and `verify_login_otp` RPCs. Apply this migration before deploying code that calls those RPCs.
+Migration `20260710091750_optimize_project_persistence.sql` adds cursor/search indexes plus transactional `save_project_state` and `verify_login_otp` RPCs. Migration `20260714060318_bounded_project_summaries_and_otp_rate_limit.sql` adds bounded six-swatch project summaries and atomic OTP creation/cooldown. Apply both before deploying code that calls those RPCs.
 
 `updated_at` columns are maintained by triggers. The migration seeds the bootstrap admin `dmeher1996@gmail.com`.
 
@@ -232,8 +236,10 @@ GRAPH_PIXEL_DEV_USER_EMAIL=
 
 ### Canvas pipeline
 
-- `src/lib/canvas/processor.ts` is the core conversion engine: fit source canvases, build ink/fill/outline masks, label connected fill regions, draw grid lines/numbers, render manual shapes, and produce a palette.
-- `src/lib/canvas/processor-worker-client.ts` reuses a persistent Web Worker when `OffscreenCanvas` and `createImageBitmap` are available; aborted/failed workers are terminated and recreated, otherwise processing falls back to the main thread.
+- `src/lib/canvas/processor.ts` is the core conversion engine: fit source canvases, vectorize uploaded artwork through `/api/vectorize`, rasterize returned SVG masks, build ink/fill/outline masks, label connected fill regions, draw grid lines/numbers, render manual shapes, and produce a palette.
+- `src/lib/canvas/processor-worker-client.ts` reuses a persistent Web Worker when `OffscreenCanvas` and `createImageBitmap` are available; aborted/failed workers are terminated and recreated, otherwise processing falls back to the main thread. Any visible source/clipart layer bypasses the worker and uses the async main-thread/server route path because `@neplex/vectorizer` is native Node code.
+- `src/lib/canvas/preview-policy.ts` selects low/standard/high resource tiers from browser capabilities. Decode concurrency, history retention, and cache targets follow that policy; full-resolution vector input and settled output remain authoritative.
+- Development-only performance marks cover decode, vector request, SVG rasterization, mask creation, region labeling, composition, paint, export, cache hits, payload bytes, and estimated retained canvas bytes.
 - `src/lib/canvas/processor.worker.ts` runs the same `pixelateLayeredCanvases` logic in the worker.
 - `src/lib/canvas/pdf-layout.ts` plans multi-page PDF/print tiles, respecting paper size, orientation, alignment, margins, and `MAX_PAGES_PER_PDF_FILE = 80`.
 - `src/lib/canvas/exports.ts` implements PNG download, PDF download, browser print, and JSON settings export.
@@ -242,26 +248,70 @@ GRAPH_PIXEL_DEV_USER_EMAIL=
 
 `EditorClient` (`src/components/editor/editor-client.tsx`) is a large client component that:
 
-- Holds the canonical `GraphSettings` state and an undo/redo history (`MAX_SETTINGS_HISTORY = 80`).
+- Holds the canonical `GraphSettings` state and a changed-field command undo/redo history (`MAX_SETTINGS_HISTORY = 80`). Commands are pruned by the active preview policy's history-byte budget; pointer gestures record one before/settled transaction instead of a snapshot per move.
 - Manages source images, cell paints, graph shapes, palette colors, fill-region overrides, zoom, selection, drag/resize interactions, and export menus.
 - A single click selects canvas layers or fill regions; a double-click on a processed fill region opens its floating color palette. Selected source/generated-shape/clipart boxes use a high-contrast cyan selection outline. Source and generated-shape corner resize controls stay visible while selected; top/right/bottom/left resize controls appear only when the pointer reaches the selection boundary or during that resize. Preview-canvas hover cursors follow the active top tool (custom white-filled, black-bordered selector SVG for select, `grab` for pan) instead of placement/copy/crosshair/hand cursors; resize handles keep their directional resize cursors.
 - Debounces canvas reprocessing (`PREVIEW_PROCESSING_DEBOUNCE_MS = 250`) and renders the output to a canvas. During active drag/resize/draw gestures, processing is coalesced with `DRAG_PROCESSING_IDLE_DEBOUNCE_MS = 300`, forced at least every `DRAG_PROCESSING_MAX_WAIT_MS = 1000`, and rerun immediately on pointer-up for the latest committed state. Render signatures are marked processed only after worker/fallback success.
-- Caps each source/clipart full-frame canvas cache at 128 MB and checks total canvas/estimated processing memory before allocation.
-- Saves via the server action `saveProjectState` (`src/app/(app)/projects/actions.ts`) with Zod validation.
+- Keeps source and clipart working canvases at native resolution within the shared 16-million-pixel/512 MB safety guards, avoids graph-sized per-layer editor caches, and bounds vector SVG/raster caches by retained bytes.
+- Tags worker requests and responses with document revisions plus `draft | full` render mode. Stale responses are rejected and transferable bitmaps are closed. Visible native-vector layers still use the bounded async main-thread/server-vector route path; do not claim complete worker offload until vector acquisition and prepared image layers are transferable end to end.
+- Saves via the server action `saveProjectState` (`src/app/(app)/projects/actions.ts`) with Zod validation. Explicit manual saves and user-initiated source/clipart upload saves also upload the current processed canvas PNG to `/api/projects/[id]/processed-image`; interval auto-save remains settings-only to avoid excessive Storage writes.
 - Stores an in-flight session draft in `sessionStorage` (`src/lib/editor/session-draft.ts`) for recovery.
+
+### Editor feature contracts (practical v1)
+
+The former read-only “Feature Suggestions” roadmap is now implemented as practical editor tools. Do **not** re-audit the whole app for these features on every prompt; use this section as the current source of truth unless the related files changed.
+
+- **Drawing productivity**
+  - Drawing mode is controlled by `drawingTool` in `EditorClient`: `image`, `cell`, `shape`, `eraser` (cells), and `image-eraser` (image lines). The tool rail (`EditorToolRail` in `editor-chrome.tsx`) exposes both erasers as **Erase cells** and **Erase image**.
+  - The `eraser` tool removes manual `cellPaints` only. The `image-eraser` tool erases **image lines**: it appends reversible brush strokes to the target source's `eraseStrokes` (per-image pixel space) and never mutates the uploaded original. A contextual canvas toolbar (`.editor-context-toolbar`) exposes the brush size and a **Restore** action (clears `eraseStrokes`). Coordinate mapping uses `graphPixelToSourcePixel` in `src/lib/editor/erase-geometry.ts` (inverse of `placeSourceImageData`).
+  - Source, cell-paint, shape, and clipart layers share `SelectableLayerKey` multi-select state. Shift/Ctrl/Cmd-click adds/removes layers from the selection. Clicking a **grouped** layer selects the whole group (`expandSelectionForGroups`).
+  - Batch actions support delete, lock/unlock, show/hide, duplicate, nudge, **group/ungroup**, and **copy/paste** for selected layers. Grouping assigns a shared `groupId` to selected layers plus a `layerGroups` name entry; copy/paste stores cloned layer defs in an in-memory clipboard ref and re-maps `groupId`s on paste so pasted groups are independent. Shortcuts: Ctrl/Cmd+G group, Ctrl/Cmd+Shift+G ungroup, Ctrl/Cmd+C copy, Ctrl/Cmd+V paste. The group/copy/paste buttons live in `renderLayerActionToolbar` (shown when 2+ layers are selected).
+  - Moving layers uses grid snapping plus snap-to-layer edges/centers via `snapRectToLayerGuides` in `src/lib/editor/source-layout.ts`; holding Alt temporarily disables snapping for the active drag.
+- **Image processing**
+  - **Background remover** (client-side): source layers carry an optional `backgroundRemoval` config (`{ enabled, tolerance }`). `removeBackgroundImageData` in `src/lib/canvas/background-removal.ts` flood-fills from the image borders and clears background alpha within the tolerance. The selected-source contextual toolbar exposes the toggle + a tolerance slider (`MIN/MAX_BACKGROUND_TOLERANCE` in `layer-extras.ts`). It runs best on near-uniform backgrounds and pairs with the image eraser for refinement.
+  - **Working-canvas derivation:** `sourceCanvasesRef` holds pristine loaded canvases; `ensureWorkingSourceCanvas` (in `editor-client.tsx`) derives a per-source *working* canvas = pristine → background removal → erase strokes, cached in `sourceWorkingCanvasesRef` keyed by the erase+background signature (`eraseStrokesSignature`/`backgroundRemovalSignature`). The processing pipeline and both source cache keys (`sourceProcessingCacheKey`, `sourceVectorizerCacheKey`) include those signatures so edits reprocess and never reuse a stale vector. Crop still operates on the pristine canvas.
+  - Source and clipart layers persist these per-layer vectorizer settings inside `projects.settings` JSONB: `vectorizerLineAdjust`, `vectorizerInkThreshold`, and `vectorizerFidelity`.
+  - `GraphSettings` also carries the same fields as project-level render defaults for new layers. Legacy fields such as `imageTraceEngine`, `imageAutoEnhance`, `imageDenoiseLevel`, `imageEdgeDetection`, `imageColorQuantization`, `vectorizerStrokeWidth`, and `vectorizerStrokeColor` remain only for backward-compatible loading/validation; saved `default` and `image-tracer` engines normalize to the vectorizer path.
+  - The selected source/clipart inspector exposes `Line adjustment` (`-8..16`, step `0.5`), `Ink threshold` (`1..254`), and `Fidelity` (`exact | smooth`). Smooth matches the sibling Image Vector app's spline/speckle configuration; it smooths surviving contours after thickness adjustment and does not reconnect ink removed by a negative adjustment. Final visible colors still come from the existing outline/fill/stroke controls, not from `/api/vectorize`.
+  - The editor sends each source/clipart at its loaded native working resolution plus vectorizer settings to `/api/vectorize` before graph placement/resizing. A fixed 1400/1600-pixel preprocessing cap is not used: source working canvases retain native resolution within the shared 128 MB cache and 16-million-pixel safety limits. This keeps pixel-based negative line adjustment from eroding already-downscaled strokes. The route thresholds the raster, applies half-step line adjustment, runs `@neplex/vectorizer.vectorizeRaw`, optimizes the SVG, and returns a black mask SVG. The processor rasterizes that SVG at source resolution, places/transforms it on the graph, and treats every non-zero-alpha contour pixel as authoritative for binary fill topology while carrying the original SVG alpha coverage through layer merging and final outline rendering. Vector ink is painted only by this alpha-aware outline pass; it is not also classified and blurred as a source-fill region. This preserves the sibling app's contour weight and smooth antialiased curves instead of thickening or redrawing them as opaque square pixels. The vector path bypasses the legacy thinning/scanline cleanup that would otherwise collapse paths to one-pixel centerlines. Enclosed fill-region/grid processing still runs; route or rasterization failures fall back to the legacy composed-image mask path.
+  - Vectorized SVG results are cached in editor session memory and in-flight `/api/vectorize` calls are de-duplicated by source/clipart content identity, working dimensions, and vectorizer settings; moving, resizing, rotating, or flipping a layer reuses the source-resolution SVG.
+- **Grid/layout**
+  - `majorGridEvery` supports `1 | 2 | 5 | 10` and affects rendered major grid lines.
+  - `gridLineStyle` supports `solid | dashed | dotted`.
+  - `gridPattern` supports `square | dot`.
+  - Isometric, hex, logarithmic, and multiple graph regions remain deferred because they require deeper canvas/export geometry changes.
+- **Productivity**
+  - Built-in templates are applied from the top-bar **Workspace** menu: Cross-stitch, Pixel art, Dot grid, and A4 tiled print.
+  - Auto-save interval is a browser-local preference stored in `localStorage`; online auto-save uses `saveProjectState` only, offline auto-save writes a session draft.
+  - Keyboard shortcut help is an editor overlay; shortcut customization remains local/productivity scope, not project schema.
+- **Premium editor UI contract**
+  - `EditorClient` uses a pro-design-tool IA with a **modern dark theme**, scoped to the editor via `--editor-*` tokens plus dark overrides of the shared design-system vars (`--line`, `--muted`, `--foreground`, `--brand`, …) on `.editor-dark-shell`. The rest of the app (dashboard/settings/login/new-project) stays light. The layout is: editable project title and primary commands in the top toolbar, a compact tool rail, tabbed **Layers & Library** on the left, canvas in the center, and contextual **Inspector** controls on the right.
+  - A **contextual canvas toolbar** (`.editor-context-toolbar`, pinned at the top of the canvas) shows image-tool controls: the image-eraser brush + Restore when the image-eraser is active, and Remove-background + tolerance + Erase-lines when a source layer is selected.
+  - **On-canvas cropping opens as a large modal popup** (`.editor-crop-modal`, `createPortal` to `body`, z-index above the shell) with a full-height `ManualCropper`, a source thumbnail filmstrip, and a footer of crop/pan/rotate/flip/straighten/guides tools plus Detect/Full/Cancel/Apply. Esc and the backdrop close it. Do not reintroduce the old inline left-panel cropper.
+  - The three-panel layout starts at 1200px. Tablet and mobile keep the canvas mounted while Assets/Layers and Inspector open as overlay drawers; mobile adds a safe-area-aware bottom dock.
+  - The `EditorCommandBar`, `EditorToolRail`, `EditorViewControls`, and `EditorStatusBar` chrome components are `React.memo`-wrapped; `selectEditorTool` is a stable `useCallback` so the tool rail skips reconciliation during canvas interaction.
+  - The top-bar **Workspace** menu owns project description, templates, auto-save, and shortcut help. Keep roadmap/status content out of the editing UI.
+  - Left-panel tabs are `layers` and `library`; source images are image layers and reusable/unplaced content belongs in Library. Layer batch actions should appear only when multiple layers are selected.
+  - The bottom canvas status bar must show real editor state (processing/ready, graph size, selected layer/fill status, zoom, auto-save, snap), not placeholder cursor/color values.
+  - Source and clipart vectorizer controls stay in the selected layer inspector; do not reintroduce the global image-generation engine selector.
+
+When changing any architecture or logic above, update this section in the same change so future agent prompts do not spend credits rediscovering the contracts.
 
 ### New-project crop flow
 
-`NewProjectForm` (`src/components/projects/new-project-form.tsx`) lets users upload up to 12 files, preview/crop/rotate each in `ManualCropper`, then uses signed direct-to-Storage uploads with concurrency two and a 150 MB aggregate limit. The first file becomes the primary `original_image_path`; additional files become source images.
+`NewProjectForm` (`src/components/projects/new-project-form.tsx`) lets users upload up to 12 files and review them in the shared advanced `ManualCropper`. Crop state is normalized in `CropTransform` and supports pan/zoom, eight handles, guides, numeric bounds, aspect presets, quarter-turn rotation, flip, straighten, undo/redo, and batch normalized crops.
+
+**Critical crop rule:** file selection never runs edge detection or changes the upload. **Detect artwork** is an explicit, undoable user action that calls `detectContentCropResult`; it analyzes a worker-side copy capped at 2 MP, reports confidence, and only proposes visible bounds. Unchanged files upload byte-for-byte. A transformed raster is rendered once at native dimensions as lossless PNG, while oversized files are rejected instead of silently reduced.
 
 ---
 
 ## 10. PWA / offline support
 
-- `public/sw.js` caches only public non-redirecting shell resources plus immutable `/_next/static` assets, and keeps at most 20 canonical editable-project documents when an offline session marker is fresh. On localhost, it bypasses runtime caching and clears this app's caches to avoid stale development hydrations.
+- `public/sw.js` cache v41 caches only public non-redirecting shell resources plus immutable `/_next/static` assets, and keeps at most 20 canonical editable-project documents when an offline session marker is fresh. On localhost, it bypasses runtime caching and clears this app's caches to avoid stale development hydrations.
 - `OfflineSessionBridge` writes the offline session ticket into `sessionStorage` and notifies the service worker when the user is logged in.
 - `/offline` is shown when the network fails and no cached project page is available.
 - `BLOCKED_OFFLINE_NAVIGATION_PATHS` includes `/projects/new`, which is not available offline because source uploads require a connection.
+- `CLEAR_USER_DATA` removes the active offline marker and cached protected project documents on successful logout while preserving public shell and immutable static assets.
 - `layout.tsx` registers the service worker and tells installing workers to `SKIP_WAITING`.
 
 ---
@@ -302,14 +352,19 @@ npm run test:pdf-export
 Files listed in `package.json` under `test:unit`:
 
 - `src/lib/auth/dev-bypass.test.ts`
+- `src/lib/canvas/artwork-detection.test.ts`
 - `src/lib/canvas/grid-numbering.test.ts`
+- `src/lib/canvas/crop.test.ts`
 - `src/lib/canvas/ink-mask.test.ts`
 - `src/lib/canvas/pdf-layout.test.ts`
 - `src/lib/canvas/performance-limits.test.ts`
+- `src/lib/canvas/preview-policy.test.ts`
 - `src/lib/canvas/processor.test.ts`
 - `src/lib/canvas/thinning.test.ts`
 - `src/lib/editor/session-draft.test.ts`
+- `src/lib/editor/history.test.ts`
 - `src/lib/editor/source-layout.test.ts`
+- `src/lib/performance/byte-lru.test.ts`
 - `src/lib/projects/crop-queue.test.ts`
 - `src/lib/utils/concurrency.test.ts`
 
@@ -318,8 +373,8 @@ Run with `npm run test:unit`. They use Node's built-in `node:test` and `node:ass
 ### E2E tests
 
 - Located in `tests/e2e/`.
-- `app-ui.spec.ts` — verifies dashboard, settings, login, create-project crop flow, and mock editor layout on desktop/mobile.
-- `graph-generation.spec.ts` — uses `/dev/editor-test` to inspect rendered canvas pixels and confirm fill-region behavior, line-thickness changes, and no framework overlays.
+- `app-ui.spec.ts` — verifies logout JSON/form contracts, the login stepper, explicit Detect artwork crop flow, desktop editor, and canvas-preserving mobile drawers using development-only fixtures.
+- `graph-generation.spec.ts` — uses `/dev/editor-test` to inspect rendered canvas pixels, confirm vector fill-region behavior/current native-quality controls, and reject framework overlays.
 - `playwright.config.ts` uses `workers: 1` and `fullyParallel: false` to avoid cross-test conflicts.
 - The web server command is `npm run dev`; reuse an existing server on `http://localhost:3000` if one is running.
 
@@ -366,9 +421,12 @@ These rules were hard-won; changing them tends to break the mobile menu, editor 
   - `.mock-shell` — `position: relative; isolation: isolate;` normal flow, **not** a fixed overlay host.
   - `.mock-sidebar` — hidden by default with `transform: translateX(-100%)` and `visibility: hidden`; `.mock-sidebar--open` brings it onscreen.
   - `.mock-nav-backdrop` is fixed with z-index below the menu; clicking it closes the menu.
-  - `.editor-dark-shell` stays `position: relative` with `min-height: 0` and `overflow: visible` for page flow.
+  - `.editor-dark-shell` stays `position: relative` with `min-height: 0` and `overflow: visible` for page flow. It also owns the editor's dark theme: the `--editor-*` tokens plus dark overrides of the shared design-system vars. Keep those overrides scoped here so the light app chrome is unaffected. The canvas artboard stays a light graph surface; only `.editor-dark-shell .ui-canvas-bg` (the workspace behind the artboard) and layer/preview **thumbnails** keep light backgrounds so dark line-art stays visible.
+  - `.editor-dark-toolbar` is the premium command bar. Keep related actions grouped with `.editor-toolbar-group`; project renaming belongs in the top-bar title input, not a buried side-panel field. Do not reintroduce horizontal toolbar scrolling: desktop compresses/hides button labels below 1500px, and mobile wraps toolbar groups.
+  - `.editor-context-toolbar` (image-tool contextual bar) and `.editor-crop-modal` (crop popup) are dark surfaces built on the `--editor-*` tokens; the crop modal must render above the shell (`z-index: 10000`, portal to `body`).
+  - `.editor-workspace-menu` is the popover surface for workspace-level controls (description, templates, auto-save, shortcuts, feature status).
   - `.editor-workspace` uses `grid-template-rows: auto` and flexible columns; do not force child overflow that breaks scroll.
-  - `.editor-side-column` is sticky on desktop (`top: 62px`) and static on mobile.
+  - `.editor-side-column` is sticky in the three-panel desktop layout (`min-width: 1200px`, `top: 72px`) and becomes an overlay drawer below 1200px.
 - The editor page (`/projects/{id}`) hides the normal topbar/bottom nav chrome; `AppShell` detects `isProjectEditor` and renders only the sidebar + main area.
 
 ---

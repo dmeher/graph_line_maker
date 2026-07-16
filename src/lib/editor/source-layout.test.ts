@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { clampVectorizerLineAdjust, normalizeGraphImageTraceEngine } from "../graph-paper.ts";
 import {
   applyUnlockedSourcePatch,
   normalizeRotationDegrees,
   reorderSourceImages,
   snapCellToGrid,
+  snapRectToLayerGuides,
   sourceLayouts,
   sourceProcessingCacheKey,
+  sourceVectorizerCacheKey,
   sourceRenderOrder,
   sourcesUseVerticalStackSlots,
   stackEndCell,
@@ -26,6 +29,13 @@ function source(overrides: Partial<GraphSourceImage> = {}): GraphSourceImage {
     sourceFillThreshold: 0.58,
     sourceFillMinStrokePixels: 7,
     strokeGapClosePixels: 0,
+    imageAutoEnhance: false,
+    imageDenoiseLevel: "off",
+    imageEdgeDetection: "standard",
+    imageColorQuantization: "off",
+    vectorizerLineAdjust: 0,
+    vectorizerInkThreshold: 210,
+    vectorizerFidelity: "exact",
     x: 1,
     y: 0,
     topPadding: 0,
@@ -129,8 +139,53 @@ test("source processing cache key changes only for relevant source fields", () =
   const renamed = sourceProcessingCacheKey(source({ name: "Renamed" }), layout);
   const moved = sourceProcessingCacheKey(source(), { ...layout, x: 1.5 });
   const recolored = sourceProcessingCacheKey(source({ sourceFillThreshold: 0.7 }), layout);
+  const enhanced = sourceProcessingCacheKey(source({ imageAutoEnhance: true }), layout);
+  const quantized = sourceProcessingCacheKey(source({ imageColorQuantization: 8 }), layout);
+  const lineAdjusted = sourceProcessingCacheKey(source({ vectorizerLineAdjust: 0.5 }), layout);
+  const thresholdChanged = sourceProcessingCacheKey(source({ vectorizerInkThreshold: 190 }), layout);
+  const smoothed = sourceProcessingCacheKey(source({ vectorizerFidelity: "smooth" }), layout);
+  const imageChanged = sourceProcessingCacheKey(source({ path: "sources/next.png" }), layout);
 
   assert.equal(renamed, base);
   assert.notEqual(moved, base);
   assert.notEqual(recolored, base);
+  assert.notEqual(enhanced, base);
+  assert.notEqual(quantized, base);
+  assert.notEqual(lineAdjusted, base);
+  assert.notEqual(thresholdChanged, base);
+  assert.notEqual(smoothed, base);
+  assert.notEqual(imageChanged, base);
+});
+
+test("native vectorizer cache key ignores graph placement but changes with source content", () => {
+  const original = source({ id: "lion", path: "projects/lion.jpeg", url: "https://example.test/lion.jpeg" });
+  const moved = source({ ...original, x: 4, y: 8, width: 12, height: 16, rotationDegrees: 90 });
+  const replaced = source({ ...original, path: "projects/lion-v2.jpeg", url: "https://example.test/lion-v2.jpeg" });
+
+  assert.equal(sourceVectorizerCacheKey(moved), sourceVectorizerCacheKey(original));
+  assert.notEqual(sourceVectorizerCacheKey(replaced), sourceVectorizerCacheKey(original));
+});
+
+test("vectorizer line adjustment clamps to half steps inside range", () => {
+  assert.equal(clampVectorizerLineAdjust(0.24), 0);
+  assert.equal(clampVectorizerLineAdjust(0.25), 0.5);
+  assert.equal(clampVectorizerLineAdjust(-7.76), -8);
+  assert.equal(clampVectorizerLineAdjust(16.4), 16);
+});
+
+test("legacy image trace engines normalize to vectorizer", () => {
+  assert.equal(normalizeGraphImageTraceEngine("default"), "vectorizer");
+  assert.equal(normalizeGraphImageTraceEngine("image-tracer"), "vectorizer");
+  assert.equal(normalizeGraphImageTraceEngine("vectorizer"), "vectorizer");
+});
+
+test("snap rect aligns moving layer edges and centers to nearby layers", () => {
+  const result = snapRectToLayerGuides(
+    { id: "moving", x: 9.8, y: 1.1, width: 4, height: 4 },
+    [{ id: "target", x: 14, y: 8, width: 6, height: 6 }],
+    { threshold: 0.3, gridStep: 0.5 },
+  );
+
+  assert.equal(result.x, 10);
+  assert.deepEqual(result.guides, [{ axis: "x", value: 14 }]);
 });

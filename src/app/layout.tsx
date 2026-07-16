@@ -20,6 +20,13 @@ export const metadata: Metadata = {
   description:
     "Convert line-art images into accurate graph-paper pixel charts with palette controls and export tools.",
   applicationName: "Graph Pixel Maker",
+  icons: {
+    icon: [
+      { url: "/icon.svg", type: "image/svg+xml" },
+      { url: "/icons/favicon-32x32.png", sizes: "32x32", type: "image/png" },
+    ],
+    apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+  },
   appleWebApp: {
     capable: true,
     title: "Graph Pixel Maker",

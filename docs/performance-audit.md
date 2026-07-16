@@ -24,6 +24,14 @@ For `Resolved` and `Partial` entries, the remediation table below supersedes the
 | Supabase migration runtime check | Pending: no local Supabase database was listening on `127.0.0.1:54322`. Apply the migration before the app deployment, then run database lint/advisors and smoke-test both RPCs. |
 | Rendered browser/E2E validation | Not run; repository instructions require explicit user authorization for rendered UI automation. |
 
+### Targeted validation update - 2026-07-14
+
+- The user explicitly authorized rendered validation. Login was checked at 1440px and Pixel 7; the editor was checked at 1440px, 1024px tablet, Pixel 7 portrait, and mobile landscape; advanced crop was checked on desktop and Pixel 7. The canvas remained mounted when tablet/mobile drawers opened. A synthetic 800 x 600 upload retained full bounds until **Detect artwork** was pressed, then proposed an undoable 345 x 345 crop at 80% confidence.
+- The refreshed browser suites passed **10/10** responsive application/auth scenarios and **4/4** graph/vector rendering scenarios across desktop Chromium and Pixel 7/mobile Chromium.
+- `npm run test:unit` passed **77/77** tests, including crop geometry/edge detection, resource-tier policy, vector-mask topology, smooth/exact fidelity, negative line adjustment, changed-field history round trips/byte pruning, byte-budgeted LRU disposal, source-layout cache keys, and logout session-draft cleanup.
+- The current production build was not run because repository policy requires separate confirmation. The 2026-07-10 bundle numbers remain the comparison baseline.
+- The new Supabase migration could not be runtime-tested because the local Docker/Supabase service was unavailable. Apply it before deployment and run database lint/advisors plus RPC smoke tests.
+
 The Turbopack build manifests reported these initial client-JavaScript contributions. Values are raw/gzip bytes and are a comparison baseline, not a user-visible timing metric.
 
 | Boundary | Raw | Gzip |
@@ -36,19 +44,31 @@ The Turbopack build manifests reported these initial client-JavaScript contribut
 
 Before claiming an optimization, measure at least one representative small project and one stress project. Record processing latency, peak canvas/typed-array bytes, React commit count during a drag, request count, response bytes, and database/storage round trips.
 
-## Remediation update - 2026-07-10
+## Remediation update - 2026-07-14
 
-The first implementation pass addressed the confirmed allocation, upload, request-fan-out, and cache cliffs without re-running a whole-repository audit:
+The current implementation extends the allocation, upload, request-fan-out, cache, auth, crop, and responsive-editor safeguards while retaining unresolved items below:
 
 | Issue IDs | Implemented evidence |
 |---|---|
-| `PERF-CANVAS-001/002/003`, `PERF-REACT-001/002/003` | `src/lib/canvas/performance-limits.ts` enforces side, total-pixel, and estimated-byte budgets in normalization, server validation, and the processor. Malformed saved dimensions are normalized before canvas allocation, and zero-size decoded/cached canvases are rejected or skipped before `drawImage`, worker `createImageBitmap`, or export slicing. Worker reuse, abort reset, complete render signatures, drag-aware preview processing (300ms idle debounce, 1s active-drag max wait, immediate trailing render on pointer-up), 128 MB layer caches, a 64 MB estimated undo budget, memoized PDF guides, and `content-visibility` layer rows are implemented. Render signatures are marked processed only after the worker/main-thread render succeeds. Full-frame layer composition, patch-based history, and component/state decomposition remain follow-ups. |
+| `PERF-CANVAS-001/002/003/005`, `PERF-REACT-001/002/003` | Allocation guards remain in place. Source/clipart vectorization now uses native working resolution before placement, graph-sized per-layer editor caches were removed, SVG/raster vector caches use the disposal-aware `ByteLru`, source moves reuse cached native vectors, and development marks cover processing stages, payloads, cache hits, and retained canvas bytes. Worker requests carry document revision and `draft | full` mode; stale transferable responses are rejected/closed. Capability tiers set 1/1.5/2.5 MP draft targets, 64/96/128 MB image budgets, 24/48/64 MB history budgets, and task concurrency one/two. Undo/redo stores structurally changed top-level fields, prunes commands by bytes/count, and commits pointer gestures once at settle. Entity-granular normalized storage, full prepared-layer worker transfer, and measured target-device latency remain follow-ups. |
 | `PERF-IMPORT-001/002`, `PERF-UPLOAD-001/002` | Preview/PDF preparation and crop work use concurrency two. New-project, source, and clipart files use exact-path signed direct Storage uploads with prepare/finalize/cleanup requests; multipart creation is rejected. The migration aligns buckets to 50 MB and PDF MIME types. Resumable TUS for unreliable networks remains an incremental follow-up, not a server-memory blocker. |
 | `PERF-EXPORT-001` | PDF/print tiling uses async PNG blobs, sequential yielding, object URLs, and a 240-page total cap. |
-| `PERF-DATA-001/002/003/004/005` | Private paths are batch-signed; save+palette persistence is one transactional RPC; normal saves no longer encode/upload an unused processed PNG; dashboard/users use 25-row cursors and trigram/composite indexes; create/delete/duplicate paths now clean up or deep-copy nested assets. Palette preview aggregation is still a bounded follow-up. |
-| `PERF-AUTH-001/002`, `PERF-NET-001` | Session resolution is request-memoized; OTP verification is a locked transactional RPC; limiter keys are pruned/bounded; Brevo has an 8-second timeout. A shared multi-instance limiter and OTP retention job remain follow-ups. |
+| `PERF-DATA-001/002/003/004/005` | Private paths are batch-signed; save+palette persistence is transactional; interval auto-save remains settings-only; dashboard summaries are returned by a bounded RPC with six palette swatches and current-page thumbnail signing; users use 25-row cursors; create/delete/duplicate paths clean up or deep-copy nested assets. |
+| `PERF-AUTH-001/002`, `PERF-NET-001` | Session resolution is request-memoized; OTP creation/cooldown and verification use atomic service-role-only RPCs; the bounded in-memory limiter remains an early guard; Brevo has an 8-second timeout. An OTP retention job remains a follow-up. |
 | `PERF-PAYLOAD-001`, `PERF-ROUTE-001`, `PERF-NAV-001/002`, `PERF-UI-001` | Server Action body limit is 2 MB behind strict schemas; public pages are static; light-route prefetch is restored; duplicate login refresh was removed; dashboard previews use one gradient node. |
-| `PERF-PWA-001/002/003/004` | Cache v40 uses canonical direct lookup, a 20-editor bound, app-prefixed eviction, public-only precache, user-switch cleanup, immutable Next static caching, local-development cache bypass/cleanup, and deduplicated bridge messages. Offline RSC/private source persistence still needs authorized browser validation. |
+| `PERF-PWA-001/002/003/004` | Cache v41 uses canonical direct lookup, a 20-editor bound, app-prefixed eviction, public-only precache, explicit `CLEAR_USER_DATA` logout cleanup, immutable Next static caching, local-development cache bypass/cleanup, and deduplicated bridge messages. Successful logout clears only user-scoped drafts/tickets/protected documents; network failure retains the authenticated UI for retry. Offline RSC/private source cold-start still needs a signed-in offline browser matrix. |
+
+## Remediation update - 2026-07-16 (editor image tools + dark reskin)
+
+New editor features (image-line eraser, background remover, layer group/copy-paste, on-canvas crop modal) and a full editor dark reskin were added. Performance-relevant notes:
+
+| Issue IDs | Implemented evidence |
+|---|---|
+| `PERF-CANVAS-002/003/005` | Per-source **working canvases** (`sourceWorkingCanvasesRef`) are derived from pristine loaded canvases via `ensureWorkingSourceCanvas` (pristine → client background-removal flood-fill → `destination-out` erase strokes) and cached by an erase+background signature. The derivation runs inside the already-debounced processing pass, so erase/background edits reuse the cache until the signature changes. `buildProcessingSignature`, `sourceProcessingCacheKey`, and `sourceVectorizerCacheKey` all include `eraseStrokesSignature`/`backgroundRemovalSignature`, so no stale vector/mask is reused. Follow-up: incremental in-place erase painting during a drag (currently the working canvas is rebuilt from pristine on each coalesced processing tick). |
+| `PERF-REACT-001/003` | `EditorCommandBar`, `EditorToolRail`, `EditorViewControls`, and `EditorStatusBar` are now `React.memo` leaves; `selectEditorTool` is a stable `useCallback`, so the tool rail no longer reconciles during canvas interaction. The large `InspectorPanel` and left-panel lists still re-render on unrelated updates because their prop surface / inline handlers are not yet stabilized — that broader memoization remains the tracked follow-up. |
+| `PERF-PAYLOAD-001` | Erase strokes are bounded in `src/lib/editor/layer-extras.ts` (`MAX_ERASE_STROKES_PER_LAYER=80`, `MAX_ERASE_POINTS_PER_STROKE=400`, `MAX_ERASE_POINTS_PER_LAYER=6000`, integer coords) and capture simplifies by min-distance so a source's erase state stays well under the 2 MB Server Action limit. All new layer fields (`groupId`, `eraseStrokes`, `backgroundRemoval`, `layerGroups`) live in the `settings` JSONB — no schema migration. |
+
+New unit tests: `src/lib/canvas/background-removal.test.ts`, `src/lib/editor/erase-geometry.test.ts`, `src/lib/editor/layer-extras.test.ts` (added to the `test:unit` script). Suite is 91/91. Rendered validation: the editor dark theme, image-eraser contextual toolbar, background-removal toggle+tolerance, and the crop popup were verified at 1440px via the dev fixture `/dev/editor-test`.
 
 ## Known-good boundaries to preserve
 
@@ -58,6 +78,7 @@ The first implementation pass addressed the confirmed allocation, upload, reques
 | `PERF-GUARD-002` | Guard | `src/lib/canvas/pdf.ts`, `src/components/projects/new-project-form.tsx` | `pdfjs-dist` is reached through dynamic imports. Do not statically import it into editor or new-project entry modules. |
 | `PERF-GUARD-003` | Guard | `src/lib/canvas/exports.ts`, editor export handlers | `jspdf` and export code are loaded on export intent. Keep them out of initial editor JavaScript. |
 | `PERF-GUARD-004` | Guard | `src/lib/canvas/processor-worker-client.ts`, production build output | Both Turbopack and Webpack builds compiled the module worker. Turbopack's raw `.ts` media artifact was not the runtime worker entry; do not switch bundlers solely because that artifact exists. Add a production-server worker smoke test before changing this conclusion. |
+| `PERF-GUARD-005` | Guard | `src/components/projects/new-project-form.tsx`, `src/lib/canvas/crop.ts`, `src/lib/canvas/crop-detection.worker.ts` | Edge detection is opt-in. File selection must not call `detectContentCropResult`; Detect artwork analyzes a worker-side copy capped at 2 MP, reports confidence, and proposes one undoable crop. Unchanged files upload byte-for-byte, and native lossless rendering occurs only for an explicit transform. |
 
 ## Editor, canvas, and React issues
 
@@ -69,12 +90,12 @@ The first implementation pass addressed the confirmed allocation, upload, reques
 - **Solution:** Create one shared allocation policy that checks side length, total pixels, estimated bytes per active layer/stage, and device-safe preview limits before allocating. Decouple logical graph size from preview resolution; tile or stream full-resolution export rather than materializing every layer at full output size.
 - **Risks / validation:** A lower hard cap can reject existing projects. Version the policy, show the estimated memory in UI, and test boundary values in normalization, processing, crop, save, and export. Validate peak memory on target desktop and mobile hardware.
 
-### `PERF-CANVAS-002` - every placed source becomes a full-frame canvas and is copied through a short-lived worker
+### `PERF-CANVAS-002` - image layers need bounded source-sized processing and worker transfer
 
 - **Priority / status:** P0 / Partial
-- **Evidence:** `composePlacedImageLayerCanvas` and the source/clipart caches in `src/components/editor/editor-client.tsx`; `createImageBitmap` and `new Worker(...)` per call in `src/lib/canvas/processor-worker-client.ts`; bitmap-to-`OffscreenCanvas` copies in `src/lib/canvas/processor.worker.ts`; preview and overview copies in `drawPreview`.
-- **Impact:** Each source or clipart layer is expanded to graph dimensions, cached by entry count rather than bytes, transferred as a bitmap, copied again inside a newly created worker, and copied back to DOM canvases. At the default 400 x 4,480 output, one RGBA surface is about 6.84 MiB; four cached versions across 12 sources are roughly 328 MiB before masks, worker copies, output, and overview.
-- **Solution:** Keep one persistent worker with request IDs and cancellation. Transfer source-sized bitmaps plus placement metadata and compose inside the worker. Replace count-based maps with a byte-budget LRU, remove irrelevant fields from cache keys, and render the overview at its display resolution.
+- **Evidence:** The editor now retains source-sized working canvases and passes placement metadata to the async processor; it no longer caches a graph-sized canvas per source/clipart. The non-vector path reuses a persistent worker with transferable bitmaps and stale request cleanup. Visible vectorized layers still use the bounded async main-thread path because `/api/vectorize` is an authenticated native Node route.
+- **Impact:** Source working canvases and one graph output remain necessary, but visible vector layers currently keep vector acquisition/rasterization on the main thread before composition. Stress projects can still exceed the target retained-memory or long-task budgets even though the previous graph-sized per-layer cache multiplication is gone.
+- **Solution:** Transfer prepared native vector bitmaps plus placement/revision metadata to the persistent worker, enforce the capability-tier image budget across decoded canvases, and discard stale stage responses without restarting unrelated work.
 - **Risks / validation:** Persistent workers need stale-response protection and deterministic cleanup. Add worker cancellation/restart tests, compare output pixels with the main-thread fallback, and record transfer bytes and peak heap/canvas memory.
 
 ### `PERF-CANVAS-003` - processing invalidation is both coarse and incomplete
@@ -92,6 +113,14 @@ The first implementation pass addressed the confirmed allocation, upload, reques
 - **Impact:** Runtime and allocation grow with total output pixels and layer count, even when ink occupies a small region. Per-color masks add more full-size arrays.
 - **Solution:** Instrument each stage first. Then process content/dirty bounds, use numeric typed lookup/count tables, render colors in one pass, and consider a frontier-based or WASM implementation only if profiles show thinning remains dominant.
 - **Risks / validation:** Bounds optimizations can clip effects near edges. Compare masks, region IDs, palette counts, and rendered pixels against existing fixtures, including rotated and gap-closed sources.
+
+### `PERF-CANVAS-005` - vectorized line generation adds a per-source analysis stage
+
+- **Priority / status:** P1 / Partial
+- **Evidence:** Authenticated `/api/vectorize` accepts native-resolution raster input and runs `@neplex/vectorizer.readImage` / `vectorizeRaw` with per-layer line adjustment, threshold, and fidelity. SVG and rasterized mask results use byte-budgeted LRU caches and in-flight request de-duplication keyed independently of placement. Development marks record request payload, route duration, SVG bytes, rasterization, and cache hits. Alpha coverage remains separate from binary topology so smooth contours are not squared or double-painted.
+- **Impact:** Vectorization can improve line contours, but it adds a same-origin request and server CPU/native-library stage before region labeling and rendering. Source-sized encoding avoids the previous full-frame payload, while each placement still needs client raster composition and mask analysis.
+- **Solution:** Measure vectorized processing latency, request payload size, server duration, cache-hit rate, and peak memory on small, typical, and near-limit projects. If vectorization still dominates latency, persist bounded intermediate masks when a real reuse policy is defined.
+- **Risks / validation:** Vectorization can alter fill-region topology and palette counts. Compare rendered pixels, fill-region selection, exports, and worker/main-thread/server-route fallback behavior across JPEG/PNG/SVG-derived sources and exact/smooth fidelity modes.
 
 ### `PERF-REACT-001` - the editor rerenders too much state for high-frequency interactions
 
@@ -167,13 +196,13 @@ The first implementation pass addressed the confirmed allocation, upload, reques
 - **Solution:** Resolve a request-scoped authenticated/owned-project context once and pass it through the DAL. Use one service-role-only, `SECURITY INVOKER` transactional RPC to update the project and synchronize palettes; enforce a unique `(project_id, sort_order)` constraint if order is the identity.
 - **Risks / validation:** Never cache sessions across requests. Test rollback on invalid palettes, cross-user ownership, admin/member behavior, and a call-budget assertion for a save.
 
-### `PERF-DATA-003` - every manual save persists a full processed PNG with no production reader
+### `PERF-DATA-003` - processed PNG persistence must stay explicit and bounded
 
-- **Priority / status:** P1 / Resolved
-- **Evidence:** `saveProcessedImage` and save flows in `src/components/editor/editor-client.tsx`; `src/app/api/projects/[id]/processed-image/route.ts`; repository search finds no production UI consumer of `processedImageUrl`/`processed_image_path` beyond mapping and persistence.
-- **Impact:** Canvas encoding plus auth/owner checks, optional removal, Storage upload, and database update add several operations and bandwidth to each save without a visible benefit.
-- **Solution:** Stop persisting the full processed image until a consumer requires it. If dashboard previews are desired, generate a bounded thumbnail with explicit dimensions and lifecycle instead.
-- **Risks / validation:** Confirm no external integration depends on the stored object before removal. Add a migration/cleanup plan for existing processed objects and verify save/reopen/export parity.
+- **Priority / status:** P1 / Partial
+- **Evidence:** `saveProjectSnapshot` in `src/components/editor/editor-client.tsx` calls `saveProjectState` for settings/palettes and uploads `processedCanvasRef.current` as PNG to `src/app/api/projects/[id]/processed-image/route.ts` only for explicit manual saves and user-initiated source/clipart upload saves. Interval auto-save calls the same save path with processed upload disabled and offline saves remain session drafts.
+- **Impact:** Manual saves now intentionally persist generated output for downstream DB/storage availability, but canvas PNG encoding plus auth/owner checks, optional removal, Storage upload, and database update still add bandwidth and operations. Auto-save avoiding PNG writes prevents repeated Storage churn on the free plan.
+- **Solution:** Keep processed PNG uploads tied to explicit user intent. If dashboard previews are needed, generate a bounded thumbnail separately rather than reusing the full processed canvas. Track upload failures separately from settings saves.
+- **Risks / validation:** Verify manual saves update `processed_image_path`, auto-save leaves Storage untouched, offline saves do not attempt network writes, and failed processed uploads surface a partial-save notice without rolling back settings.
 
 ### `PERF-UPLOAD-001` - large multipart bodies are buffered and proxied through Next.js
 
@@ -201,10 +230,10 @@ The first implementation pass addressed the confirmed allocation, upload, reques
 
 ### `PERF-DATA-004` - dashboard and settings queries are unbounded while the UI implies pagination
 
-- **Priority / status:** P1 / Partial
-- **Evidence:** `getProjectSummaries` in `src/lib/projects.ts` has no `limit`/`range`, fetches all palettes for all returned project IDs, and uses `%query%` `ilike`; dashboard renders "25 / page". `getAppUsers` in `src/lib/auth/session.ts` also returns all users while settings renders the same control. The migration's full-text GIN index is not used by `ilike`.
-- **Impact:** Database rows, response serialization, palette work, and DOM grow with account history. Substring search will scan unless an appropriate trigram index exists.
-- **Solution:** Add 25-row keyset pagination on `(updated_at DESC, id DESC)` with a matching `(user_id, updated_at DESC, id DESC)` index. Return only the top six palette colors per project through a summary RPC/lateral query. Either switch explicitly to full-text semantics or add `pg_trgm` indexing for substring search. Paginate admin users too.
+- **Priority / status:** P1 / Resolved
+- **Evidence:** `getProjectSummaries` calls `get_project_summaries` with a 25-row cursor, requests one lookahead row, returns only six palette swatches, and batch-signs thumbnail paths for the current page. `getAppUsers` is cursor-bounded, and the migrations provide matching composite/trigram indexes.
+- **Impact:** The previous row, palette, and DOM growth is bounded to one page. Query-plan quality still depends on applying the new migration in the deployed database.
+- **Solution:** Apply the migration, then verify cursor stability and run `EXPLAIN (ANALYZE, BUFFERS)` for empty and substring searches with representative data.
 - **Risks / validation:** Cursor ordering must be stable under updates, and search semantics are a product decision. Use `EXPLAIN (ANALYZE, BUFFERS)` with representative data and test no duplicates/gaps between pages.
 
 ### `PERF-DATA-005` - project asset lifecycle leaks objects and duplication can retain source references
@@ -227,9 +256,9 @@ The first implementation pass addressed the confirmed allocation, upload, reques
 ### `PERF-AUTH-002` - OTP limiting and verification are process-local and non-atomic
 
 - **Priority / status:** P1 / Partial
-- **Evidence:** unbounded module-level `Map` in `src/lib/auth/rate-limit.ts`; select-then-update flow and sequential user/attempt/update calls in `src/app/api/auth/verify-otp/route.ts`; no retention cleanup for consumed/expired attempts.
-- **Impact:** Limits differ across instances, stale keys accumulate in a long-lived process, and concurrent verification requests can race attempt counts/consumption.
-- **Solution:** Use a shared atomic TTL limiter and a transactional database RPC that validates, increments, consumes, and updates login time. Add a partial index for current unconsumed attempts, supersede older codes, and schedule retention cleanup.
+- **Evidence:** OTP creation/cooldown now runs in `create_login_otp_attempt`, and verification/attempt consumption runs in `verify_login_otp`; both are service-role-only atomic RPCs. The bounded in-memory limiter is only a fast early guard. Consumed/expired attempt retention cleanup is not yet scheduled.
+- **Impact:** Multi-instance cooldown and verification races are removed. Database rows still accumulate until retention cleanup is scheduled.
+- **Solution:** Keep the atomic RPCs authoritative and add scheduled retention cleanup for consumed/expired attempts.
 - **Risks / validation:** Auth changes are security-sensitive. Test concurrency, expiry boundaries, max attempts, multiple instances, code supersession, and cleanup without exposing raw OTPs.
 
 ### `PERF-NET-001` - Brevo email calls have no timeout budget
@@ -317,7 +346,7 @@ The first implementation pass addressed the confirmed allocation, upload, reques
 ## Recommended remediation order
 
 1. **Add measurement and safety rails:** per-stage processing timing, estimated/peak memory, request counters, payload bytes, and `PERF-CANVAS-001` allocation guards.
-2. **Remove request/memory cliffs:** direct resumable uploads (`PERF-UPLOAD-001/002`), processed-image write removal (`PERF-DATA-003`), signed-URL batching (`PERF-DATA-001`), and bounded import/export work.
+2. **Remove request/memory cliffs:** direct resumable uploads (`PERF-UPLOAD-001/002`), processed-image write bounding (`PERF-DATA-003`), signed-URL batching (`PERF-DATA-001`), and bounded import/export work.
 3. **Reduce backend fan-out:** request-scoped auth/owner context, transactional save/palette RPC, keyset dashboard/settings queries, and explicit asset lifecycle.
 4. **Refactor the processing pipeline:** persistent worker, source-sized transfers, byte LRU, staged invalidation, then profile-guided pixel-loop changes.
 5. **Refactor editor rendering:** structural sharing/patch history, transient refs, memoized state slices, and virtualized lists.

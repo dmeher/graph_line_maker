@@ -1,8 +1,11 @@
-import { pixelateLayeredImages, type FillRegion, type FittedImageLayer, type ProcessedGraph } from "@/lib/canvas/processor";
+import { pixelateLayeredImages, pixelateLayeredImagesAsync, type FillRegion, type FittedImageLayer, type ProcessedGraph } from "@/lib/canvas/processor";
 import type { PaletteColor, GraphSettings } from "@/lib/types";
+import type { RenderMode } from "@/lib/canvas/render-contracts";
 
 type WorkerResponse = {
   requestId: number;
+  documentRevision: number;
+  mode: RenderMode;
   ok: boolean;
   error?: string;
   bitmap?: ImageBitmap;
@@ -18,6 +21,8 @@ type PendingRequest = {
   reject: (error: Error) => void;
   signal?: AbortSignal;
   abort: () => void;
+  documentRevision: number;
+  mode: RenderMode;
 };
 
 let sharedWorker: Worker | null = null;
@@ -43,6 +48,11 @@ function isDrawableCanvas(canvas: HTMLCanvasElement | null | undefined) {
   return Boolean(canvas && Number.isFinite(canvas.width) && Number.isFinite(canvas.height) && canvas.width > 0 && canvas.height > 0);
 }
 
+function usesServerVectorizer(layers: FittedImageLayer[], settings: GraphSettings) {
+  void settings;
+  return layers.length > 0;
+}
+
 function detachPendingRequest(requestId: number) {
   const pending = pendingRequests.get(requestId);
   if (!pending) return null;
@@ -57,6 +67,10 @@ function resetWorker(error: Error) {
   for (const [requestId] of pendingRequests) {
     detachPendingRequest(requestId)?.reject(error);
   }
+}
+
+export function disposeCanvasProcessingWorker() {
+  resetWorker(processingAbortError());
 }
 
 function resultFromWorkerResponse(data: WorkerResponse): ProcessedGraph {
@@ -98,6 +112,11 @@ function getSharedWorker() {
       event.data.bitmap?.close();
       return;
     }
+    if (event.data.documentRevision !== pending.documentRevision || event.data.mode !== pending.mode) {
+      event.data.bitmap?.close();
+      pending.reject(processingAbortError());
+      return;
+    }
     try {
       pending.resolve(resultFromWorkerResponse(event.data));
     } catch (error) {
@@ -114,8 +133,9 @@ function getSharedWorker() {
 async function pixelateLayeredImagesInWorker(
   layers: FittedImageLayer[],
   settings: GraphSettings,
-  signal?: AbortSignal,
+  options: { signal?: AbortSignal; documentRevision: number; mode: RenderMode },
 ): Promise<ProcessedGraph> {
+  const { signal, documentRevision, mode } = options;
   if (signal?.aborted) throw processingAbortError();
 
   const drawableLayers = layers.filter((layer) => isDrawableCanvas(layer.canvas));
@@ -138,10 +158,10 @@ async function pixelateLayeredImagesInWorker(
       if (!pendingRequests.has(requestId)) return;
       resetWorker(processingAbortError());
     };
-    pendingRequests.set(requestId, { resolve, reject, signal, abort });
+    pendingRequests.set(requestId, { resolve, reject, signal, abort, documentRevision, mode });
     signal?.addEventListener("abort", abort, { once: true });
     try {
-      worker.postMessage({ requestId, layers: workerLayers, settings }, bitmaps as Transferable[]);
+      worker.postMessage({ requestId, documentRevision, mode, layers: workerLayers, settings }, bitmaps as Transferable[]);
     } catch (error) {
       bitmaps.forEach((bitmap) => bitmap.close());
       detachPendingRequest(requestId);
@@ -153,12 +173,17 @@ async function pixelateLayeredImagesInWorker(
 export async function pixelateLayeredImagesWithWorker(
   layers: FittedImageLayer[],
   settings: GraphSettings,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; documentRevision?: number; mode?: RenderMode } = {},
 ) {
+  if (usesServerVectorizer(layers, settings)) return pixelateLayeredImagesAsync(layers, settings, options);
   if (!supportsCanvasWorker()) return pixelateLayeredImages(layers, settings);
 
   try {
-    return await pixelateLayeredImagesInWorker(layers, settings, options.signal);
+    return await pixelateLayeredImagesInWorker(layers, settings, {
+      signal: options.signal,
+      documentRevision: options.documentRevision ?? 0,
+      mode: options.mode ?? "full",
+    });
   } catch (error) {
     if (options.signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
     if (process.env.NODE_ENV === "development") {

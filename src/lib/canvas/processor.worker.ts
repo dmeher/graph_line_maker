@@ -1,5 +1,6 @@
 import { pixelateLayeredCanvases, type WorkerFittedImageLayer } from "@/lib/canvas/processor";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
+import type { RenderMode } from "@/lib/canvas/render-contracts";
 
 type WorkerLayerInput = {
   bitmap: ImageBitmap;
@@ -8,6 +9,8 @@ type WorkerLayerInput = {
 
 type WorkerRequest = {
   requestId: number;
+  documentRevision: number;
+  mode: RenderMode;
   layers: WorkerLayerInput[];
   settings: GraphSettings;
 };
@@ -16,6 +19,8 @@ type WorkerResponse =
   | {
       ok: true;
       requestId: number;
+      documentRevision: number;
+      mode: RenderMode;
       bitmap: ImageBitmap;
       width: number;
       height: number;
@@ -26,6 +31,8 @@ type WorkerResponse =
   | {
       ok: false;
       requestId: number;
+      documentRevision: number;
+      mode: RenderMode;
       error: string;
     };
 
@@ -58,6 +65,8 @@ workerContext.onmessage = (event: MessageEvent<WorkerRequest>) => {
     const response: WorkerResponse = {
       ok: true,
       requestId: event.data.requestId,
+      documentRevision: event.data.documentRevision,
+      mode: event.data.mode,
       bitmap,
       width: output.width,
       height: output.height,
@@ -71,6 +80,8 @@ workerContext.onmessage = (event: MessageEvent<WorkerRequest>) => {
     const response: WorkerResponse = {
       ok: false,
       requestId: event.data.requestId,
+      documentRevision: event.data.documentRevision,
+      mode: event.data.mode,
       error: error instanceof Error ? error.message : "Unable to process image.",
     };
     workerContext.postMessage(response);

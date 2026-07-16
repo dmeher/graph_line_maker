@@ -1,166 +1,128 @@
 import Link from "next/link";
-import { Copy, Plus, Search, Trash2 } from "lucide-react";
-import { duplicateProject, deleteProject } from "@/app/(app)/projects/actions";
+import { ArrowRight, FolderOpen, Grid3X3, ImageIcon, Plus, Search } from "lucide-react";
+import { ProjectCardActions } from "@/components/projects/project-card-actions";
 import { getProjectSummaries } from "@/lib/projects";
 import { formatDateTime } from "@/lib/utils/format";
 import type { ProjectSummary } from "@/lib/types";
 
 export const metadata = {
-  title: "Dashboard",
+  title: "Projects",
 };
 
-const placeholderProjects = [
-  ["Mountain Landscape", "mountain_landscape.png", "96 x 96", 22, ["#14213d", "#4d908e", "#90be6d", "#f9c74f"]],
-  ["City Skyline", "city_skyline.png", "128 x 64", 24, ["#001219", "#005f73", "#94d2bd", "#e9d8a6"]],
-  ["Forest Path", "forest_path.png", "96 x 96", 20, ["#1b4332", "#2d6a4f", "#74c69d", "#d8f3dc"]],
-  ["Sunset Over Sea", "sunset_over_sea.png", "128 x 64", 18, ["#f94144", "#f3722c", "#f9c74f", "#277da1"]],
-  ["Pixel Character", "pixel_character.png", "64 x 64", 16, ["#264653", "#e76f51", "#f4a261", "#2a9d8f"]],
-  ["Retro Car", "retro_car.png", "96 x 64", 19, ["#111827", "#dc2626", "#f8fafc", "#64748b"]],
-  ["Game Tileset", "game_tileset.png", "128 x 128", 32, ["#4a3728", "#8f5d3c", "#6b8e23", "#c9b37e"]],
-] as const;
-
-function PreviewStrip({ colors }: { colors: readonly string[] }) {
-  const colorStops = colors.map((color, index) => `${color} ${(index / colors.length) * 100}% ${((index + 1) / colors.length) * 100}%`).join(", ");
-  return (
-    <div
-      className="h-10 w-[148px] overflow-hidden rounded-sm border border-[#d7dde5] bg-white"
-      style={{
-        backgroundImage: `linear-gradient(rgba(255,255,255,.22) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.22) 1px, transparent 1px), linear-gradient(90deg, ${colorStops})`,
-        backgroundSize: "12px 10px, 12px 10px, 100% 100%",
-      }}
-    />
-  );
+function projectColors(project: ProjectSummary) {
+  return project.palettePreview.length
+    ? project.palettePreview.map((color) => color.hex)
+    : ["#008c8f", "#0f172a", "#cbd5e1"];
 }
 
-function PaletteDots({ colors }: { colors: readonly string[] }) {
+function ProjectThumbnail({ project }: { project: ProjectSummary }) {
+  const previewUrl = project.processedImageUrl || project.originalImageUrl;
+  if (previewUrl) {
+    return (
+      <img
+        src={previewUrl}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        className="project-card__image"
+      />
+    );
+  }
+
+  const colors = projectColors(project);
+  const stops = colors.map((color, index) => color + " " + (index / colors.length) * 100 + "% " + ((index + 1) / colors.length) * 100 + "%").join(", ");
   return (
-    <div className="flex gap-0.5">
-      {colors.map((color, index) => (
-        <span key={`${color}-${index}`} className="h-3.5 w-3.5 rounded-[2px] border border-white shadow-[0_0_0_1px_rgba(0,0,0,0.08)]" style={{ backgroundColor: color }} />
-      ))}
+    <div
+      className="project-card__placeholder"
+      style={{ backgroundImage: "linear-gradient(rgba(255,255,255,.3) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.3) 1px, transparent 1px), linear-gradient(135deg, " + stops + ")" }}
+    >
+      <ImageIcon size={26} aria-hidden="true" />
     </div>
   );
 }
 
-function projectColors(project: ProjectSummary) {
-  return project.palettePreview.length ? project.palettePreview.map((color) => color.hex) : ["#008c8f", "#111827", "#e5e7eb", "#f97316"];
-}
-
 export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ q?: string; cursor?: string }> }) {
   const params = await searchParams;
-  const { projects, nextCursor } = await getProjectSummaries({ query: params.q, cursor: params.cursor });
-  const showingPlaceholders = !params.q && !params.cursor && projects.length === 0;
+  const query = params.q?.trim() ?? "";
+  const { projects, nextCursor } = await getProjectSummaries({ query, cursor: params.cursor });
   const nextParams = new URLSearchParams();
-  if (params.q) nextParams.set("q", params.q);
+  if (query) nextParams.set("q", query);
   if (nextCursor) nextParams.set("cursor", nextCursor);
 
   return (
-    <div className="mock-card min-h-[calc(100dvh-96px)] overflow-hidden">
-      <div className="flex items-center justify-between border-b border-[#d7dde5] px-6 py-4">
+    <div className="projects-page">
+      <header className="page-heading">
         <div>
-          <h1 className="text-[22px] font-semibold tracking-[-0.01em] text-[#101828]">Projects</h1>
+          <p className="page-eyebrow">Workspace</p>
+          <h1>Projects</h1>
+          <p>Create, organize, and reopen graph-ready artwork.</p>
         </div>
-        <Link href="/projects/new" prefetch={false} className="mock-btn mock-btn-primary">
-          Create project
-          <Plus size={16} strokeWidth={2} />
+        <Link href="/projects/new" prefetch={false} className="ui-btn ui-btn-primary page-primary-action">
+          <Plus size={17} aria-hidden="true" />
+          New project
         </Link>
-      </div>
+      </header>
 
-      <div className="flex items-center justify-between gap-4 px-6 py-4">
-        <form className="relative w-full max-w-[320px]">
-          <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#667085]" />
-          <input name="q" defaultValue={params.q || ""} placeholder="Search projects" className="mock-input h-9 pl-9" />
+      <section className="projects-toolbar" aria-label="Project filters">
+        <form className="projects-search">
+          <Search size={17} aria-hidden="true" />
+          <input name="q" defaultValue={query} placeholder="Search projects" aria-label="Search projects" />
+          {query ? <Link href="/dashboard">Clear</Link> : null}
         </form>
-        {showingPlaceholders ? <span className="text-xs font-medium text-[#667085]">Placeholder library shown until projects are saved</span> : null}
-      </div>
+        <span className="ui-status"><Grid3X3 size={14} /> {projects.length} on this page</span>
+      </section>
 
-      <div className="overflow-x-auto px-6 pb-4">
-        <table className="mock-table min-w-[920px]">
-          <thead>
-            <tr>
-              <th>Project name</th>
-              <th>Preview</th>
-              <th>Size</th>
-              <th>Colors</th>
-              <th>Created</th>
-              <th>Updated</th>
-              <th className="text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {projects.map((project) => {
-              const colors = projectColors(project);
-              return (
-                <tr key={project.id}>
-                  <td>
-                    <Link href={`/projects/${project.id}`} prefetch={false} className="font-semibold text-[#101828] hover:text-[#008c8f]">
-                      {project.title}
-                    </Link>
-                    <p className="mt-0.5 text-[11px] text-[#667085]">{project.description || project.originalImagePath?.split("/").pop() || "graph_project.png"}</p>
-                  </td>
-                  <td><PreviewStrip colors={colors} /></td>
-                  <td className="font-semibold text-[#101828]">{project.width} x {project.height}</td>
-                  <td><div className="flex items-center gap-2"><span>{project.colorCount}</span><PaletteDots colors={colors.slice(0, 4)} /></div></td>
-                  <td>{formatDateTime(project.createdAt)}</td>
-                  <td>{formatDateTime(project.updatedAt)}</td>
-                  <td>
-                    <div className="flex justify-end gap-2">
-                      <form action={duplicateProject}>
-                        <input type="hidden" name="projectId" value={project.id} />
-                        <button className="grid h-8 w-8 place-items-center rounded-md text-[#475467] hover:bg-[#f2f4f7]" title="Duplicate">
-                          <Copy size={16} strokeWidth={1.8} />
-                        </button>
-                      </form>
-                      <form action={deleteProject}>
-                        <input type="hidden" name="projectId" value={project.id} />
-                        <button className="grid h-8 w-8 place-items-center rounded-md text-[#ef4444] hover:bg-red-50" title="Delete">
-                          <Trash2 size={16} strokeWidth={1.8} />
-                        </button>
-                      </form>
+      {projects.length ? (
+        <section className="project-grid" aria-label="Projects">
+          {projects.map((project) => {
+            const colors = projectColors(project);
+            return (
+              <article className="project-card" key={project.id}>
+                <Link href={"/projects/" + project.id} prefetch={false} className="project-card__preview" aria-label={"Open " + project.title}>
+                  <ProjectThumbnail project={project} />
+                  <span className="project-card__open">Open editor <ArrowRight size={14} /></span>
+                </Link>
+                <div className="project-card__body">
+                  <div className="project-card__title-row">
+                    <div>
+                      <Link href={"/projects/" + project.id} prefetch={false}>{project.title}</Link>
+                      <p>{project.description || project.originalImagePath?.split("/").pop() || "Graph project"}</p>
                     </div>
-                  </td>
-                </tr>
-              );
-            })}
-            {showingPlaceholders
-              ? placeholderProjects.map(([title, file, size, colorsCount, colors], index) => (
-                  <tr key={title}>
-                    <td>
-                      <Link href="/projects/mock-editor" prefetch={false} className="font-semibold text-[#101828] hover:text-[#008c8f]">
-                        {title}
-                      </Link>
-                      <p className="mt-0.5 text-[11px] text-[#667085]">{file}</p>
-                    </td>
-                    <td><PreviewStrip colors={colors} /></td>
-                    <td className="font-semibold text-[#101828]">{size}</td>
-                    <td><div className="flex items-center gap-2"><span>{colorsCount}</span><PaletteDots colors={colors} /></div></td>
-                    <td>May {12 - Math.min(index, 4)}, 2025<br /><span className="text-[11px] text-[#667085]">10:{45 - index} AM</span></td>
-                    <td>May {12 - Math.min(index, 4)}, 2025<br /><span className="text-[11px] text-[#667085]">10:{45 + index} AM</span></td>
-                    <td>
-                      <div className="flex justify-end gap-2">
-                        <button className="grid h-8 w-8 place-items-center rounded-md text-[#475467] hover:bg-[#f2f4f7]" title="Duplicate placeholder">
-                          <Copy size={16} strokeWidth={1.8} />
-                        </button>
-                        <button className="grid h-8 w-8 place-items-center rounded-md text-[#ef4444] hover:bg-red-50" title="Delete placeholder">
-                          <Trash2 size={16} strokeWidth={1.8} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
-              : null}
-          </tbody>
-        </table>
-      </div>
+                    <ProjectCardActions projectId={project.id} projectTitle={project.title} />
+                  </div>
+                  <div className="project-card__meta">
+                    <span>{project.width} × {project.height}</span>
+                    <span>{project.colorCount} colors</span>
+                    <span>Updated {formatDateTime(project.updatedAt)}</span>
+                  </div>
+                  <div className="project-card__palette" aria-label={colors.length + " preview colors"}>
+                    {colors.slice(0, 6).map((color, index) => <span key={color + index} style={{ backgroundColor: color }} />)}
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </section>
+      ) : (
+        <section className="projects-empty">
+          <span><FolderOpen size={28} /></span>
+          <h2>{query ? "No matching projects" : "Create your first graph project"}</h2>
+          <p>{query ? "Try a different project name or clear the search." : "Upload line art, crop it precisely, and turn it into a printable graph."}</p>
+          {query ? (
+            <Link href="/dashboard" className="ui-btn">Clear search</Link>
+          ) : (
+            <Link href="/projects/new" prefetch={false} className="ui-btn ui-btn-primary"><Plus size={16} /> New project</Link>
+          )}
+        </section>
+      )}
 
-      <div className="flex items-center justify-between border-t border-[#e8edf2] px-6 py-4 text-xs text-[#667085]">
-        <span>Showing up to {showingPlaceholders ? placeholderProjects.length : projects.length} projects on this page</span>
-        <div className="flex items-center gap-2">
-          {params.cursor ? <Link href={params.q ? `/dashboard?q=${encodeURIComponent(params.q)}` : "/dashboard"} className="mock-btn h-8 px-3 text-xs">First page</Link> : null}
-          {nextCursor ? <Link href={`/dashboard?${nextParams.toString()}`} className="mock-btn h-8 px-3 text-xs">Next</Link> : null}
-          <span className="mock-btn h-8 px-3 text-xs">25 / page</span>
+      <footer className="page-pagination">
+        <span>Up to 25 projects per page</span>
+        <div>
+          {params.cursor ? <Link href={query ? "/dashboard?q=" + encodeURIComponent(query) : "/dashboard"} className="ui-btn">First page</Link> : null}
+          {nextCursor ? <Link href={"/dashboard?" + nextParams.toString()} className="ui-btn">Next page <ArrowRight size={15} /></Link> : null}
         </div>
-      </div>
+      </footer>
     </div>
   );
 }

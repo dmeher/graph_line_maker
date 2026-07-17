@@ -11,6 +11,16 @@ export type CropPixels = {
   height: number;
 };
 
+export type QuickCropSegment =
+  | "left"
+  | "right"
+  | "top"
+  | "bottom"
+  | "top-left"
+  | "top-right"
+  | "bottom-left"
+  | "bottom-right";
+
 export type NormalizedCropRect = {
   x: number;
   y: number;
@@ -75,6 +85,52 @@ export function fullCrop(width: number, height: number): CropPixels {
     y: 0,
     width: Math.max(1, Math.round(width)),
     height: Math.max(1, Math.round(height)),
+  };
+}
+
+/**
+ * Returns a half or quarter of the displayed image. The leading segment uses
+ * the floor split, and the trailing segment receives the remaining pixels.
+ */
+export function quickCropSegment(width: number, height: number, segment: QuickCropSegment): CropPixels {
+  const image = fullCrop(width, height);
+  const isQuarter = segment.includes("-");
+  const splitX = Math.floor(image.width / 2);
+  const splitY = Math.floor(image.height / 2);
+  const keepRight = segment === "right" || segment === "top-right" || segment === "bottom-right";
+  const keepBottom = segment === "bottom" || segment === "bottom-left" || segment === "bottom-right";
+  const useHorizontalSplit = segment === "left" || segment === "right" || isQuarter;
+  const useVerticalSplit = segment === "top" || segment === "bottom" || isQuarter;
+  const hasHorizontalSplit = useHorizontalSplit && image.width >= 2;
+  const hasVerticalSplit = useVerticalSplit && image.height >= 2;
+
+  return normalizeCrop(
+    {
+      x: hasHorizontalSplit && keepRight ? splitX : 0,
+      y: hasVerticalSplit && keepBottom ? splitY : 0,
+      width: hasHorizontalSplit ? (keepRight ? image.width - splitX : splitX) : image.width,
+      height: hasVerticalSplit ? (keepBottom ? image.height - splitY : splitY) : image.height,
+    },
+    image.width,
+    image.height,
+  );
+}
+
+/**
+ * Refines an existing crop with a half or quarter selection while retaining
+ * the crop's position in the transformed image. This lets quick crop build on
+ * an artwork-detection result instead of starting over from the image edges.
+ */
+export function quickCropWithin(crop: CropPixels, segment: QuickCropSegment): CropPixels {
+  const x = Math.max(0, Math.round(Number(crop.x) || 0));
+  const y = Math.max(0, Math.round(Number(crop.y) || 0));
+  const segmentCrop = quickCropSegment(crop.width, crop.height, segment);
+
+  return {
+    x: x + segmentCrop.x,
+    y: y + segmentCrop.y,
+    width: segmentCrop.width,
+    height: segmentCrop.height,
   };
 }
 

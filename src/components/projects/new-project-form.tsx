@@ -31,9 +31,12 @@ import {
   fullCrop,
   mapCropBetweenDimensions,
   normalizeCrop,
+  quickCropWithin,
   type CropPixels,
   type CropTransform,
+  type QuickCropSegment,
 } from "@/lib/canvas/crop";
+import { QuickCropControls } from "@/components/projects/quick-crop-controls";
 import {
   ALLOWED_IMAGE_LABEL,
   IMAGE_ACCEPT,
@@ -399,6 +402,14 @@ export function NewProjectForm() {
     if (!selectedItem) return;
     const nextCrop = centeredAspectCrop(selectedItem.width, selectedItem.height, selectedAspectRatio);
     if (nextCrop) updateItemCrop(selectedItem.id, nextCrop);
+  }
+
+  function applyQuickCrop(segment: QuickCropSegment) {
+    if (!selectedItem?.width || !selectedItem.height) return;
+    const currentCrop = selectedItem.transform.crop ?? fullCrop(selectedItem.width, selectedItem.height);
+    const crop = quickCropWithin(currentCrop, segment);
+    setAspectPreset("free");
+    updateItemTransform(selectedItem.id, (transform) => ({ ...transform, crop, aspectRatio: null }));
   }
 
   function applyAspectPreset(nextPreset: AspectPresetKey) {
@@ -916,6 +927,10 @@ export function NewProjectForm() {
                     </label>
                   ))}
                 </div>
+              </div>
+
+              <div className="create-transform-section">
+                <QuickCropControls disabled={!selectedItem?.width || !selectedItem.height || autoTrimmingItemId === selectedItem.id} onSelect={applyQuickCrop} />
               </div>
 
               <div className="create-transform-section">

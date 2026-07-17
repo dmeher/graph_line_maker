@@ -47,8 +47,9 @@ import {
   X,
 } from "lucide-react";
 import { saveProjectState } from "@/app/(app)/projects/actions";
-import { fullCrop, transformedImageSize, type CropPixels } from "@/lib/canvas/crop";
+import { fullCrop, quickCropWithin, transformedImageSize, type CropPixels, type QuickCropSegment } from "@/lib/canvas/crop";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
+import { QuickCropControls } from "@/components/projects/quick-crop-controls";
 import {
   copyFillRegionOverrides,
   fillRegionLayerScope,
@@ -5122,6 +5123,13 @@ export function EditorClient({ project }: { project: Project }) {
     setSourceCropArea(fullCrop(transformed.width, transformed.height));
   }
 
+  function applyQuickSourceCrop(segment: QuickCropSegment) {
+    const sourceCanvas = cropSource ? sourceCanvasesRef.current.get(cropSource.id) ?? null : sourceCanvasRef.current;
+    if (!sourceCanvas) return;
+    const transformed = transformedImageSize(sourceCanvas.width, sourceCanvas.height, sourceCropRotation, sourceCropStraighten);
+    setSourceCropArea(quickCropWithin(sourceCropArea ?? fullCrop(transformed.width, transformed.height), segment));
+  }
+
   function openSourceCrop(sourceId = cropSource?.id) {
     if (!sourceId) return;
     setSelectedSourceId(sourceId);
@@ -7755,6 +7763,7 @@ export function EditorClient({ project }: { project: Project }) {
                         <option value="thirds">Thirds</option><option value="golden">Golden ratio</option><option value="center">Center</option><option value="grid">Grid</option><option value="none">None</option>
                       </select>
                     </label>
+                    <QuickCropControls variant="toolbar" disabled={!cropSourcePreviewUrl || sourceCropAutoPending || sourceCropPending} onSelect={applyQuickSourceCrop} />
                   </div>
                   <div className="editor-crop-modal__actions">
                     <button type="button" onClick={() => void autoTrimSourceCrop()} disabled={!cropSourcePreviewUrl || sourceCropAutoPending || sourceCropPending} className="editor-crop-modal__btn">

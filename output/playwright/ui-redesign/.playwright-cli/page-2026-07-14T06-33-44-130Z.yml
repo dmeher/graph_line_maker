@@ -1,0 +1,114 @@
+- generic [active] [ref=e1]:
+  - main [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]:
+        - complementary [ref=e5]:
+          - heading "Project details" [level=2] [ref=e6]
+          - generic [ref=e7]: Title *
+          - textbox "Title *" [ref=e8]
+          - generic [ref=e9]: Description
+          - textbox "Description" [ref=e10]
+          - paragraph [ref=e11]: 0 / 500
+          - heading "Upload files" [level=2] [ref=e12]
+          - paragraph [ref=e13]: Images, PDF, or SVG line art. Up to 12 files.
+          - generic [ref=e14] [cursor=pointer]:
+            - generic [ref=e15]:
+              - generic [ref=e19]: Drag & drop files here
+              - generic [ref=e20]: or click to browse
+              - generic [ref=e21]:
+                - generic [ref=e22]: PNG, JPG, SVG, PDF
+                - generic [ref=e23]: Max 12 files, 50MB each
+            - button "Drag & drop files here or click to browse PNG, JPG, SVG, PDF Max 12 files, 50MB each" [ref=e24]
+          - generic [ref=e25]:
+            - paragraph [ref=e26]: Files (0)
+            - button "Clear all" [disabled] [ref=e27]
+          - generic [ref=e28]: Select files to start crop review.
+        - main [ref=e35]:
+          - generic [ref=e36]:
+            - generic [ref=e37]:
+              - heading "Crop review" [level=1] [ref=e38]
+              - generic [ref=e39]: Crop each image for best results
+            - generic [ref=e40]:
+              - generic [ref=e41]:
+                - paragraph [ref=e42]: No file selected
+                - paragraph [ref=e43]: Upload a source image to begin
+              - button "View original" [disabled] [ref=e44]
+          - generic [ref=e49]:
+            - generic "Crop tools" [ref=e50]:
+              - button "Crop" [disabled] [ref=e51]
+              - button "Pan image" [disabled] [ref=e55]
+              - button "Zoom in (100%)" [disabled] [ref=e62]
+              - button "Zoom out (100%)" [disabled] [ref=e66]
+              - button "Reset transforms" [disabled] [ref=e71]
+              - button "Undo" [disabled] [ref=e77]
+              - button "Redo" [disabled] [ref=e81]
+            - generic [ref=e85]: Upload a file to activate crop review.
+            - complementary "Crop transform controls" [ref=e92]:
+              - generic [ref=e93]:
+                - generic [ref=e94]:
+                  - paragraph [ref=e95]: Crop & transform
+                  - generic [ref=e96]: No selection
+                - button "Auto trim" [disabled] [ref=e97]
+              - generic [ref=e103]:
+                - generic [ref=e104]: Bounds in pixels
+                - generic [ref=e105]:
+                  - generic [ref=e106]:
+                    - generic [ref=e107]: X
+                    - spinbutton "X" [disabled] [ref=e108]: "0"
+                  - generic [ref=e109]:
+                    - generic [ref=e110]: "Y"
+                    - spinbutton "Y" [disabled] [ref=e111]: "0"
+                  - generic [ref=e112]:
+                    - generic [ref=e113]: W
+                    - spinbutton "W" [disabled] [ref=e114]: "0"
+                  - generic [ref=e115]:
+                    - generic [ref=e116]: H
+                    - spinbutton "H" [disabled] [ref=e117]: "0"
+              - generic [ref=e118]:
+                - generic [ref=e119]:
+                  - generic [ref=e120]:
+                    - generic [ref=e121]: Aspect
+                    - combobox "Aspect" [disabled] [ref=e122]:
+                      - option "Free" [selected]
+                      - option "1:1"
+                      - option "4:3"
+                      - option "16:9"
+                      - option "3:4"
+                      - option "2:3"
+                      - option "Custom"
+                  - generic [ref=e123]:
+                    - generic [ref=e124]: Guides
+                    - combobox "Guides" [disabled] [ref=e125]:
+                      - option "Thirds" [selected]
+                      - option "Golden ratio"
+                      - option "Grid"
+                      - option "None"
+                - generic [ref=e126]:
+                  - button "Rotate left" [disabled] [ref=e127]
+                  - button "Rotate right" [disabled] [ref=e131]
+                  - button "Flip horizontally" [disabled] [ref=e135]
+                  - button "Flip vertically" [disabled] [ref=e139]
+              - generic [ref=e144]:
+                - generic [ref=e145]:
+                  - text: Straighten
+                  - strong [ref=e146]: 0°
+                - slider "Straighten 0°" [disabled] [ref=e147]: "0"
+              - generic [ref=e148]:
+                - button "Fit selection" [disabled] [ref=e149]
+                - button "Reset" [disabled] [ref=e150]
+          - generic [ref=e151]:
+            - button "Previous image" [ref=e152] [cursor=pointer]
+            - paragraph [ref=e155]: 0 of 0 cropped
+            - button "Next image" [ref=e156] [cursor=pointer]
+      - generic [ref=e159]:
+        - generic [ref=e160]:
+          - paragraph [ref=e161]: Add source files to begin.
+          - paragraph [ref=e164]: Project creation uploads the reviewed source files when you start conversion.
+        - generic [ref=e165]:
+          - paragraph [ref=e166]:
+            - strong [ref=e167]: 0 files
+            - text: · 0 with custom crop · unchanged files upload at original quality
+          - generic [ref=e168]:
+            - button "Reset all" [disabled] [ref=e169]
+            - button "Start conversion ->" [disabled] [ref=e170]
+  - button "Open Next.js Dev Tools" [ref=e182] [cursor=pointer]

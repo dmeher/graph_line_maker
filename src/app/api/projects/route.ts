@@ -4,17 +4,18 @@ import {
   ALLOWED_IMAGE_LABEL,
   MAX_PROJECT_UPLOAD_FILES,
   MAX_UPLOAD_BYTES,
+  MAX_PROJECT_UPLOAD_TOTAL_BYTES,
   ORIGINAL_IMAGES_BUCKET,
-  getAllowedImageContentType,
   getImageExtension,
   isAllowedImageFile,
 } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
-import { defaultGraphSettings, imagePath, normalizeGraphSettings, sourceImagePath } from "@/lib/projects";
+import { assertProjectOwner, defaultGraphSettings, imagePath, normalizeGraphSettings, sourceImagePath } from "@/lib/projects";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
+import { mapWithConcurrency } from "@/lib/utils/concurrency";
 
-function getExtension(file: File) {
-  const nameExtension = getImageExtension(file.name);
+function getExtension(file: { name?: string; type?: string }) {
+  const nameExtension = getImageExtension(file.name || "");
   if (ALLOWED_IMAGE_EXTENSIONS.has(nameExtension)) return nameExtension === "jpeg" ? "jpg" : nameExtension;
   if (file.type === "image/png") return "png";
   if (file.type === "image/webp") return "webp";
@@ -54,104 +55,190 @@ function defaultSourceX(graphWidth: number, width: number) {
   return roundCells(Math.max(0, (graphWidth - width) / 2));
 }
 
+type UploadMetadata = {
+  name: string;
+  type: string;
+  size: number;
+};
+
+type PreparedUpload = UploadMetadata & {
+  id: string;
+  path: string;
+  token: string;
+};
+
+function parseUploadMetadata(value: unknown): UploadMetadata[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const file = item as Record<string, unknown>;
+    const name = typeof file.name === "string" ? file.name : "";
+    const type = typeof file.type === "string" ? file.type : "";
+    const size = Number(file.size);
+    if (!name || !Number.isFinite(size) || size < 0) return [];
+    return [{ name, type, size }];
+  });
+}
+
+function validateUploadMetadata(files: UploadMetadata[]) {
+  if (!files.length) return "At least one source file is required.";
+  if (files.length > MAX_PROJECT_UPLOAD_FILES) return `Upload up to ${MAX_PROJECT_UPLOAD_FILES} source files.`;
+  if (files.reduce((total, file) => total + file.size, 0) > MAX_PROJECT_UPLOAD_TOTAL_BYTES) return "Combined upload is too large.";
+  for (const file of files) {
+    if (!isAllowedImageFile(file)) return `Upload ${ALLOWED_IMAGE_LABEL} only.`;
+    if (file.size > MAX_UPLOAD_BYTES) return "File is too large.";
+  }
+  return null;
+}
+
+function buildSettingsWithSources(uploadedImages: Array<{ id: string; name: string; path: string }>) {
+  const settings = settingsForImage();
+  const sourceImages = uploadedImages.map((image, index) => ({
+    ...image,
+    width: settings.imageWidth,
+    height: settings.imageHeight,
+    measurementUnit: settings.measurementUnit,
+    imageLineThickness: settings.imageLineThickness,
+    sourceFillThreshold: settings.sourceFillThreshold,
+    sourceFillMinStrokePixels: settings.sourceFillMinStrokePixels,
+    strokeGapClosePixels: settings.strokeGapClosePixels,
+    imageAutoEnhance: settings.imageAutoEnhance,
+    imageDenoiseLevel: settings.imageDenoiseLevel,
+    imageEdgeDetection: settings.imageEdgeDetection,
+    imageColorQuantization: settings.imageColorQuantization,
+    vectorizerLineAdjust: settings.vectorizerLineAdjust,
+    vectorizerInkThreshold: settings.vectorizerInkThreshold,
+    vectorizerFidelity: settings.vectorizerFidelity,
+    x: defaultSourceX(settings.graphWidth, settings.imageWidth),
+    y: index * settings.imageHeight,
+    topPadding: 0,
+    bottomPadding: 0,
+    locked: false,
+    visible: true,
+    rotationDegrees: 0 as const,
+    flipX: false,
+    flipY: false,
+  }));
+  return normalizeGraphSettings({ ...settings, sourceImages });
+}
+
 export async function POST(request: NextRequest) {
   try {
     const session = await requireSession();
-    const formData = await request.formData();
-    const title = String(formData.get("title") || "").trim();
-    const description = String(formData.get("description") || "").trim();
-    const files = [...formData.getAll("files"), ...formData.getAll("file")].filter((value): value is File => value instanceof File);
+    if (request.headers.get("content-type")?.includes("application/json")) {
+      const body = await request.json().catch(() => ({}));
+      const title = String(body.title || "").trim();
+      const description = String(body.description || "").trim();
+      const files = parseUploadMetadata(body.files);
+      if (!title) return NextResponse.json({ message: "Project title is required." }, { status: 400 });
+      const validationError = validateUploadMetadata(files);
+      if (validationError) return NextResponse.json({ message: validationError }, { status: 400 });
 
-    if (!title) return NextResponse.json({ message: "Project title is required." }, { status: 400 });
-    if (!files.length) return NextResponse.json({ message: "At least one source file is required." }, { status: 400 });
-    if (files.length > MAX_PROJECT_UPLOAD_FILES) return NextResponse.json({ message: `Upload up to ${MAX_PROJECT_UPLOAD_FILES} source files.` }, { status: 400 });
-    for (const file of files) {
-      if (!isAllowedImageFile(file)) {
-        return NextResponse.json({ message: `Upload ${ALLOWED_IMAGE_LABEL} only.` }, { status: 400 });
-      }
-      if (file.size > MAX_UPLOAD_BYTES) {
-        return NextResponse.json({ message: "File is too large." }, { status: 400 });
+      const supabase = getSupabaseAdmin();
+      const settings = settingsForImage();
+      const { data: project, error } = await supabase
+        .from("projects")
+        .insert({
+          user_id: session.userId,
+          title,
+          description: description || null,
+          settings,
+          width: settings.outputWidth,
+          height: settings.outputHeight,
+          pixel_size: settings.pixelSize,
+          grid_cell_size: settings.gridCellSize,
+        })
+        .select("id")
+        .single();
+      if (error) throw new Error(error.message);
+
+      try {
+        const uploads = await mapWithConcurrency(files, 4, async (file, index): Promise<PreparedUpload> => {
+          const id = index === 0 ? "original" : crypto.randomUUID();
+          const path = index === 0
+            ? imagePath(session.userId, project.id, "original", getExtension(file))
+            : sourceImagePath(session.userId, project.id, id, getExtension(file));
+          const { data: signed, error: signError } = await supabase.storage
+            .from(ORIGINAL_IMAGES_BUCKET)
+            .createSignedUploadUrl(path, { upsert: true });
+          if (signError || !signed?.token) throw new Error(signError?.message || "Unable to prepare upload.");
+          return { ...file, id, path, token: signed.token };
+        });
+        return NextResponse.json({ ok: true, projectId: project.id, uploads });
+      } catch (signError) {
+        await supabase.from("projects").delete().eq("id", project.id).eq("user_id", session.userId);
+        throw signError;
       }
     }
-
-    const supabase = getSupabaseAdmin();
-    const settings = settingsForImage();
-    const { data: project, error } = await supabase
-      .from("projects")
-      .insert({
-        user_id: session.userId,
-        title,
-        description: description || null,
-        settings,
-        width: settings.outputWidth,
-        height: settings.outputHeight,
-        pixel_size: settings.pixelSize,
-        grid_cell_size: settings.gridCellSize,
-      })
-      .select("id")
-      .single();
-
-    if (error) throw new Error(error.message);
-
-    const uploadedImages = await Promise.all(
-      files.map(async (file, index) => {
-        const imageId = index === 0 ? "original" : crypto.randomUUID();
-        const path =
-          index === 0
-            ? imagePath(session.userId, project.id, "original", getExtension(file))
-            : sourceImagePath(session.userId, project.id, imageId, getExtension(file));
-        const { error: uploadError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).upload(path, file, {
-          cacheControl: "3600",
-          contentType: getAllowedImageContentType(file) || file.type,
-          upsert: index === 0,
-        });
-
-        if (uploadError) throw new Error(uploadError.message);
-        return {
-          id: imageId,
-          name: file.name || `Source ${index + 1}`,
-          path,
-        };
-      }),
+    return NextResponse.json(
+      { message: "Project files must use the signed direct-upload flow." },
+      { status: 415 },
     );
-
-    const sourceImages = uploadedImages.map((image, index) => ({
-      ...image,
-      width: settings.imageWidth,
-      height: settings.imageHeight,
-      measurementUnit: settings.measurementUnit,
-      imageLineThickness: settings.imageLineThickness,
-      sourceFillThreshold: settings.sourceFillThreshold,
-      sourceFillMinStrokePixels: settings.sourceFillMinStrokePixels,
-      strokeGapClosePixels: settings.strokeGapClosePixels,
-      x: defaultSourceX(settings.graphWidth, settings.imageWidth),
-      y: index * settings.imageHeight,
-      topPadding: 0,
-      bottomPadding: 0,
-      locked: false,
-      visible: true,
-      rotationDegrees: 0 as const,
-      flipX: false,
-      flipY: false,
-    }));
-    const settingsWithSources = normalizeGraphSettings({
-      ...settings,
-      sourceImages,
-    });
-
-    const { error: updateError } = await supabase
-      .from("projects")
-      .update({ original_image_path: uploadedImages[0]?.path ?? null, settings: settingsWithSources })
-      .eq("id", project.id)
-      .eq("user_id", session.userId);
-
-    if (updateError) throw new Error(updateError.message);
-
-    return NextResponse.json({ ok: true, projectId: project.id, redirectTo: `/projects/${project.id}` });
   } catch (error) {
     return NextResponse.json(
       { message: error instanceof Error ? error.message : "Unable to create project." },
       { status: 500 },
     );
+  }
+}
+
+export async function PATCH(request: NextRequest) {
+  try {
+    const session = await requireSession();
+    const body = await request.json().catch(() => ({}));
+    const projectId = String(body.projectId || "");
+    const uploads = Array.isArray(body.uploads) ? body.uploads : [];
+    if (!/^[0-9a-f-]{36}$/i.test(projectId) || !uploads.length || uploads.length > MAX_PROJECT_UPLOAD_FILES) {
+      return NextResponse.json({ message: "Invalid upload finalization request." }, { status: 400 });
+    }
+    await assertProjectOwner(projectId);
+    const prefix = `${session.userId}/${projectId}/`;
+    const uploadedImages: Array<{ id: string; name: string; path: string }> = uploads.flatMap((item: unknown) => {
+      if (!item || typeof item !== "object") return [];
+      const upload = item as Record<string, unknown>;
+      const id = String(upload.id || "");
+      const name = String(upload.name || "");
+      const path = String(upload.path || "");
+      if (!/^[a-zA-Z0-9-]{1,80}$/.test(id) || !name || !path.startsWith(prefix)) return [];
+      return [{ id, name, path }];
+    });
+    if (uploadedImages.length !== uploads.length || uploadedImages[0]?.id !== "original") {
+      return NextResponse.json({ message: "Invalid uploaded file metadata." }, { status: 400 });
+    }
+
+    const supabase = getSupabaseAdmin();
+    await mapWithConcurrency(uploadedImages, 4, async (image) => {
+      const { data: exists, error } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).exists(image.path);
+      if (error || !exists) throw new Error(`Upload did not complete for ${image.name}.`);
+    });
+    const finalizedSettings = buildSettingsWithSources(uploadedImages);
+    const { error } = await supabase
+      .from("projects")
+      .update({ original_image_path: uploadedImages[0].path, settings: finalizedSettings })
+      .eq("id", projectId)
+      .eq("user_id", session.userId);
+    if (error) throw new Error(error.message);
+    return NextResponse.json({ ok: true, projectId, redirectTo: `/projects/${projectId}` });
+  } catch (error) {
+    return NextResponse.json({ message: error instanceof Error ? error.message : "Unable to finalize project." }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const session = await requireSession();
+    const body = await request.json().catch(() => ({}));
+    const projectId = String(body.projectId || "");
+    if (!/^[0-9a-f-]{36}$/i.test(projectId)) return NextResponse.json({ message: "Invalid project." }, { status: 400 });
+    await assertProjectOwner(projectId);
+    const prefix = `${session.userId}/${projectId}/`;
+    const paths: string[] = (Array.isArray(body.paths) ? body.paths : []).map(String).filter((path: string) => path.startsWith(prefix));
+    const supabase = getSupabaseAdmin();
+    if (paths.length) await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove(paths);
+    const { error } = await supabase.from("projects").delete().eq("id", projectId).eq("user_id", session.userId);
+    if (error) throw new Error(error.message);
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    return NextResponse.json({ message: error instanceof Error ? error.message : "Unable to clean up upload." }, { status: 500 });
   }
 }

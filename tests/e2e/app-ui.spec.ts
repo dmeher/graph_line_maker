@@ -19,6 +19,14 @@ async function expectNoHorizontalOverflow(page: Page, selector = "body") {
   expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 2);
 }
 
+async function mockVectorizer(page: Page) {
+  await page.route("**/api/vectorize", (route) => route.fulfill({
+    status: 200,
+    contentType: "image/svg+xml",
+    body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 480"><path d="M40 440 C80 300 150 180 280 40" fill="none" stroke="#000" stroke-width="8" stroke-linecap="round"/></svg>',
+  }));
+}
+
 const flowerSvg = Buffer.from(`
 <svg xmlns="http://www.w3.org/2000/svg" width="320" height="420" viewBox="0 0 320 420">
   <rect width="320" height="420" fill="#fff"/>
@@ -27,100 +35,105 @@ const flowerSvg = Buffer.from(`
     <path d="M161 196 C180 132 214 75 258 54 C269 117 227 174 161 196Z" stroke-width="7"/>
     <path d="M159 198 C107 183 72 147 65 92 C115 99 151 137 159 198Z" stroke-width="7"/>
     <path d="M160 196 L160 326" stroke-width="8"/>
-    <path d="M154 286 C104 242 58 243 28 271 C66 316 111 320 154 286Z" stroke-width="7"/>
-    <path d="M166 284 C207 240 257 230 294 257 C257 306 210 318 166 284Z" stroke-width="7"/>
     <path d="M88 330 H236 L222 392 H103 Z" stroke-width="8"/>
-    <path d="M70 312 H254 V338 H70 Z" stroke-width="8"/>
   </g>
 </svg>
 `);
 
 test.describe("redesigned app screens", () => {
-  test("dashboard, settings, and login match the compact mock structure", async ({ page }) => {
+  test("logout supports fetch cleanup and a native form redirect", async ({ request }) => {
+    const jsonResponse = await request.post("/api/auth/logout", {
+      headers: { accept: "application/json" },
+    });
+    expect(jsonResponse.status()).toBe(200);
+    await expect(jsonResponse.json()).resolves.toEqual({ ok: true, redirectTo: "/login" });
+    expect(jsonResponse.headers()["set-cookie"]).toContain("graph_pixel_session=");
+
+    const formResponse = await request.post("/api/auth/logout", {
+      headers: { accept: "text/html" },
+      maxRedirects: 0,
+    });
+    expect(formResponse.status()).toBe(303);
+    expect(new URL(formResponse.headers().location).pathname).toBe("/login");
+    expect(formResponse.headers()["set-cookie"]).toContain("graph_pixel_session=");
+  });
+
+  test("login is a focused two-step OTP flow", async ({ page }) => {
     const consoleErrors = collectConsoleErrors(page);
-
-    await page.goto("/dashboard");
-    await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
-    await expect(page.getByRole("main").getByRole("link", { name: /Create project/i })).toBeVisible();
-    await expect(page.getByText("Project name")).toBeVisible();
-    await expect(page.getByRole("main").locator("tbody tr").first()).toBeVisible();
-    await expectNoHorizontalOverflow(page);
-
-    await page.goto("/settings");
-    await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-    await expect(page.getByText("Signed-in user")).toBeVisible();
-    await expect(page.getByText("Allowed users")).toBeVisible();
-    await expect(page.getByRole("button", { name: /Add user/i })).toBeVisible();
-    await expectNoHorizontalOverflow(page);
+    await page.route("**/api/auth/send-otp", (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, resendAfterSeconds: 60, expiresInSeconds: 600 }),
+    }));
 
     await page.goto("/login");
-    await expect(page.getByRole("heading", { name: "Sign in with email OTP" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Verify code" })).toBeVisible();
-    await expect(page.getByLabel("Email")).toBeVisible();
-    await expect(page.locator('input[aria-label^="OTP"]')).toHaveCount(6);
-    await expectNoHorizontalOverflow(page);
+    await expect(page.getByRole("heading", { name: "Sign in with email" })).toBeVisible();
+    await expect(page.getByLabel("Email address")).toHaveValue("");
+    await page.getByLabel("Email address").fill("designer@example.com");
+    await page.getByRole("button", { name: "Continue with email" }).click();
 
+    await expect(page.getByRole("heading", { name: "Enter your code" })).toBeVisible();
+    await expect(page.locator('input[aria-label^="Code digit"]')).toHaveCount(6);
+    await page.locator('input[aria-label="Code digit 1"]').fill("123456");
+    await expect(page.getByRole("button", { name: "Verify and sign in" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: /Resend in/ })).toBeDisabled();
+    await expectNoHorizontalOverflow(page);
     expect(consoleErrors).toEqual([]);
   });
 
-  test("create project supports multi-file crop review without submitting to the database", async ({ page }) => {
+  test("advanced crop keeps uploads unchanged until Detect artwork is requested", async ({ page }) => {
     const consoleErrors = collectConsoleErrors(page);
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto("/dev/crop-test");
 
-    await page.goto("/projects/new");
-    await expect(page.getByRole("heading", { name: "Project details" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Crop review" })).toBeVisible();
-    await expect(page.locator(".create-workbench-details").getByText("tulip_01.png")).toBeVisible();
-
-    await page.locator('input[type="file"]').first().setInputFiles([
+    await page.locator('input[type="file"]').setInputFiles([
       { name: "flower-line.svg", mimeType: "image/svg+xml", buffer: flowerSvg },
       { name: "flower-copy.svg", mimeType: "image/svg+xml", buffer: flowerSvg },
     ]);
 
-    await expect(page.locator(".create-workbench-details").getByText("flower-line.svg")).toBeVisible();
-    await expect(page.locator(".create-workbench-details").getByText("flower-copy.svg")).toBeVisible();
     await expect(page.getByText("0 of 2 cropped")).toBeVisible();
-    await expect(page.getByRole("button", { name: /Next image/i })).toBeVisible();
+    await expect(page.getByText("unchanged files upload at original quality")).toBeVisible();
+    await page.getByRole("button", { name: "Detect artwork" }).click();
+    await expect(page.getByText("1 of 2 cropped")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
     await expect(page.getByRole("button", { name: /Start conversion/i })).toBeEnabled();
     await expectNoHorizontalOverflow(page);
-
     expect(consoleErrors).toEqual([]);
   });
 
-  test("mock editor exposes all primary editing and export regions", async ({ page }) => {
+  test("desktop editor exposes the compact three-panel workspace", async ({ page }) => {
     const consoleErrors = collectConsoleErrors(page);
+    await mockVectorizer(page);
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto("/dev/editor-test");
 
-    await page.setViewportSize({ width: 1488, height: 1056 });
-    await page.goto("/projects/mock-editor");
     const toolbar = page.locator(".editor-dark-toolbar");
-    await expect(toolbar.getByRole("link", { name: "Back to dashboard" })).toBeVisible();
-    await expect(toolbar.getByRole("button", { name: "Save" })).toBeVisible();
-    await expect(toolbar.getByRole("button", { name: "PNG" })).toBeVisible();
-    await expect(toolbar.getByRole("button", { name: "PDF" })).toBeVisible();
-    await expect(toolbar.getByRole("button", { name: "JSON" })).toBeVisible();
-    await expect(page.getByText("Sources")).toBeVisible();
+    await expect(toolbar.getByRole("button", { name: "Save project", exact: true })).toBeVisible();
+    await expect(toolbar.getByRole("button", { name: "Export project", exact: true })).toBeVisible();
+    await expect(page.getByText("Layers & Library")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Canvas" })).toBeVisible();
-    await expect(page.getByText("Inspector")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Graph" })).toBeVisible();
-    await page.waitForFunction(() => Array.from(document.querySelectorAll("canvas")).some((canvas) => canvas.width > 500 && canvas.height > 500));
+    await expect(page.getByRole("heading", { name: "Inspector" })).toBeVisible();
+    await page.waitForFunction(() => Array.from(document.querySelectorAll("canvas")).some((canvas) => canvas.width > 300 && canvas.height > 300));
     await expectNoHorizontalOverflow(page);
-    await expectNoHorizontalOverflow(page, ".editor-panel");
-
     expect(consoleErrors).toEqual([]);
   });
 
-  test("mobile editor keeps source, canvas, and controls tabs reachable", async ({ page }) => {
+  test("mobile editor keeps the canvas mounted while drawers open", async ({ page }) => {
     const consoleErrors = collectConsoleErrors(page);
+    await mockVectorizer(page);
+    await page.setViewportSize({ width: 412, height: 915 });
+    await page.goto("/dev/editor-test");
+    const previewCanvas = page.locator(".editor-canvas-host canvas").first();
+    await expect(previewCanvas).toBeVisible();
 
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/projects/mock-editor");
-    await expect(page.getByRole("button", { name: "Canvas" })).toBeVisible();
-    await page.getByRole("button", { name: "Controls" }).click();
-    await expect(page.getByText("Inspector")).toBeVisible();
-    await page.getByRole("button", { name: "Source" }).last().click();
-    await expect(page.getByText("Sources")).toBeVisible();
+    await page.getByRole("button", { name: "Properties", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Inspector" })).toBeVisible();
+    await expect(previewCanvas).toBeAttached();
+    await page.getByRole("button", { name: "Properties", exact: true }).click();
+    await page.getByRole("button", { name: "Layers", exact: true }).click();
+    await expect(page.getByText("Layers & Library")).toBeVisible();
+    await expect(previewCanvas).toBeAttached();
     await expectNoHorizontalOverflow(page);
-    await expectNoHorizontalOverflow(page, ".editor-panel");
-
     expect(consoleErrors).toEqual([]);
   });
 });

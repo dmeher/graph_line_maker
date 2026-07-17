@@ -1,0 +1,277 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - link "Back to dashboard" [ref=e5] [cursor=pointer]:
+          - /url: /dashboard
+          - img "Graph Pixel Maker" [ref=e6]
+        - generic [ref=e19]:
+          - generic [ref=e20]: Project
+          - textbox "Project name" [ref=e21]:
+            - /placeholder: Untitled graph
+            - text: Dev editor test
+      - generic [ref=e22]:
+        - button "Menu" [ref=e23] [cursor=pointer]
+        - button "Undo" [ref=e25] [cursor=pointer]
+        - button "Redo" [ref=e29] [cursor=pointer]
+      - generic [ref=e33]:
+        - button "Select" [ref=e34] [cursor=pointer]
+        - button "Pan" [ref=e37] [cursor=pointer]
+        - button "Eraser" [ref=e43] [cursor=pointer]
+      - generic [ref=e48]:
+        - button "Show original" [ref=e49] [cursor=pointer]
+        - button "Toggle graph numbers" [ref=e53] [cursor=pointer]
+        - generic [ref=e56]:
+          - button "Zoom out" [ref=e57] [cursor=pointer]
+          - generic [ref=e61]: 100%
+          - button "Zoom in" [ref=e62] [cursor=pointer]
+      - generic [ref=e66]:
+        - button "Hide assets panel" [ref=e67] [cursor=pointer]
+        - button "Hide inspector" [ref=e71] [cursor=pointer]
+        - button "Workspace settings" [ref=e76] [cursor=pointer]
+        - button "Save project" [ref=e80] [cursor=pointer]
+        - button "Export" [ref=e84] [cursor=pointer]
+    - generic [ref=e90]:
+      - complementary [ref=e92]:
+        - generic [ref=e93]:
+          - generic [ref=e94]:
+            - generic [ref=e95]:
+              - paragraph [ref=e96]: Assets & Layers
+              - paragraph [ref=e97]: 1 layer / 1 source
+            - generic "Add images" [ref=e98] [cursor=pointer]:
+              - button [ref=e100]
+          - tablist "Assets and layers" [ref=e101]:
+            - tab "Sources 1" [ref=e102] [cursor=pointer]:
+              - generic [ref=e107]:
+                - text: Sources
+                - generic [ref=e108]: "1"
+            - tab "Layers 1" [selected] [ref=e109] [cursor=pointer]:
+              - generic [ref=e114]:
+                - text: Layers
+                - generic [ref=e115]: "1"
+            - tab "Assets 0" [ref=e116] [cursor=pointer]:
+              - generic [ref=e120]:
+                - text: Assets
+                - generic [ref=e121]: "0"
+        - generic [ref=e122]:
+          - generic [ref=e123]:
+            - generic [ref=e124]:
+              - heading "Layers" [level=2] [ref=e125]
+              - generic "Add layer image" [ref=e126] [cursor=pointer]:
+                - button [ref=e128]
+            - generic [ref=e132]:
+              - button "Hide layer" [ref=e133] [cursor=pointer]
+              - button [ref=e137] [cursor=pointer]
+              - button "Original image Visible" [ref=e143] [cursor=pointer]:
+                - generic [ref=e144]: Original image
+                - generic [ref=e145]: Visible
+              - generic [ref=e146]: 100%
+              - button "Lock layer" [ref=e147] [cursor=pointer]
+              - button "Drag to reorder" [ref=e151] [cursor=pointer]
+          - generic [ref=e153]:
+            - heading "Status" [level=2] [ref=e155]
+            - generic [ref=e158]:
+              - generic [ref=e159]:
+                - generic [ref=e160]: Loading source files
+                - generic [ref=e165]: Loading
+              - paragraph [ref=e166]: "Cells: 10 x 12 (120)"
+              - paragraph [ref=e167]: "Colors: 0"
+              - paragraph [ref=e168]: "Stitches (est.): 120"
+              - paragraph [ref=e169]: "Layers: 1"
+        - button "Resize source panel" [ref=e170] [cursor=pointer]
+      - generic [ref=e177]:
+        - generic [ref=e178]:
+          - generic [ref=e179]:
+            - heading "Canvas" [level=1] [ref=e180]
+            - paragraph [ref=e181]: Loading source files
+          - generic [ref=e182]: Ready
+        - generic [ref=e186]:
+          - generic "Drag image to move it; double-click a fill area to choose its color; arrow keys move selected image by 0.1cm; Space or Ctrl plus drag pans the view" [ref=e187]
+          - generic:
+            - generic: "1"
+            - generic: "2"
+            - generic: "3"
+            - generic: "4"
+            - generic: "5"
+            - generic: "6"
+            - generic: "7"
+            - generic: "8"
+            - generic: "9"
+            - generic: "10"
+            - generic: "1"
+            - generic: "2"
+            - generic: "3"
+            - generic: "4"
+            - generic: "5"
+            - generic: "6"
+            - generic: "7"
+            - generic: "8"
+            - generic: "9"
+            - generic: "10"
+            - generic: "1"
+            - generic: "2"
+            - generic: "3"
+            - generic: "4"
+            - generic: "5"
+            - generic: "6"
+            - generic: "7"
+            - generic: "8"
+            - generic: "9"
+            - generic: "10"
+            - generic: "11"
+            - generic: "12"
+            - generic: "1"
+            - generic: "2"
+            - generic: "3"
+            - generic: "4"
+            - generic: "5"
+            - generic: "6"
+            - generic: "7"
+            - generic: "8"
+            - generic: "9"
+            - generic: "10"
+            - generic: "11"
+            - generic: "12"
+          - generic:
+            - generic: Page 2
+            - generic: Page 3
+        - generic [ref=e188]:
+          - generic [ref=e189]: Loading
+          - generic [ref=e190]: 10 x 12 cells
+          - generic [ref=e191]: No layer selected
+          - generic [ref=e192]: Zoom 100%
+          - generic [ref=e193]: Auto-save Off
+          - generic [ref=e194]: "Snap: On"
+      - complementary [ref=e196]:
+        - generic [ref=e197]:
+          - generic [ref=e198]:
+            - generic [ref=e199]:
+              - heading "Inspector" [level=2] [ref=e205]
+              - button "Reset settings" [ref=e206] [cursor=pointer]
+            - tablist "Inspector tabs" [ref=e212]:
+              - tab "Graph" [selected] [ref=e213] [cursor=pointer]
+              - tab "Source" [ref=e216] [cursor=pointer]
+              - tab "Draw" [ref=e221] [cursor=pointer]
+              - tab "Palette" [ref=e227] [cursor=pointer]
+          - generic [ref=e234]:
+            - generic [ref=e235]:
+              - heading "Dimensions" [level=3] [ref=e236]
+              - generic [ref=e245]:
+                - generic [ref=e246]:
+                  - generic [ref=e247]:
+                    - generic [ref=e248]: Width (cells)
+                    - spinbutton "Width (cells)" [ref=e249]: "10"
+                  - generic [ref=e250]:
+                    - generic [ref=e251]: Height (cells)
+                    - spinbutton "Height (cells)" [ref=e252]: "12"
+                - generic [ref=e253]:
+                  - checkbox "Square cells" [checked] [disabled] [ref=e254]
+                  - generic [ref=e255]: Square cells
+            - generic [ref=e256]:
+              - heading "Measurements" [level=3] [ref=e257]
+              - generic [ref=e266]:
+                - generic [ref=e267]:
+                  - generic [ref=e268]: Units
+                  - combobox "Measurement units" [ref=e270]:
+                    - option "Centimeters"
+                    - option "Inches" [selected]
+                - generic [ref=e271]:
+                  - generic [ref=e272]: Cell size
+                  - generic [ref=e274]:
+                    - textbox "Cell size millimeters" [ref=e275]: "10.00"
+                    - generic [ref=e276]: mm
+                - paragraph [ref=e277]: 10 x 12 cells = 10 x 12 cm
+                - generic [ref=e278]:
+                  - generic [ref=e279]: Graph height
+                  - generic [ref=e281]:
+                    - generic [ref=e282]:
+                      - generic [ref=e283]: Graph height (IN)
+                      - spinbutton "Graph height (IN)" [ref=e284]: "4.72"
+                    - generic [ref=e285]: IN
+                - generic [ref=e286]:
+                  - generic [ref=e287]: Artwork
+                  - generic [ref=e289]:
+                    - generic [ref=e290]:
+                      - generic [ref=e291]: Artwork width (CM)
+                      - spinbutton "Artwork width (CM)" [ref=e292]: "10"
+                    - generic [ref=e293]:
+                      - generic [ref=e294]: Artwork height (IN)
+                      - spinbutton "Artwork height (IN)" [ref=e295]: "3.94"
+            - generic [ref=e296]:
+              - heading "Grid Lines" [level=3] [ref=e297]
+              - generic [ref=e302]:
+                - generic [ref=e303]:
+                  - generic [ref=e304]: Line color
+                  - 'generic "Graph line color: #dc2626" [ref=e306] [cursor=pointer]':
+                    - textbox "Graph line color" [ref=e307]: "#dc2626"
+                    - generic [ref=e309]: "#DC2626"
+                - generic [ref=e312]:
+                  - generic [ref=e313]: Layer
+                  - combobox "Graph lines layer" [ref=e315]:
+                    - option "Front"
+                    - option "Back" [selected]
+                - generic [ref=e316]:
+                  - generic [ref=e317]: Major every
+                  - combobox "Major grid interval" [ref=e319]:
+                    - option "1 cells"
+                    - option "2 cells"
+                    - option "5 cells" [selected]
+                    - option "10 cells"
+                - generic [ref=e320]:
+                  - combobox "Grid line style" [ref=e321]:
+                    - option "Solid" [selected]
+                    - option "Dashed"
+                    - option "Dotted"
+                  - combobox "Grid pattern" [ref=e322]:
+                    - option "Square" [selected]
+                    - option "Dot"
+                - generic [ref=e323]:
+                  - generic [ref=e324]:
+                    - checkbox "Show numbers" [checked] [ref=e325]
+                    - generic [ref=e326]: Show numbers
+                  - generic [ref=e327]:
+                    - checkbox "Show guides" [checked] [ref=e328]
+                    - generic [ref=e329]: Show guides
+                - generic [ref=e330]:
+                  - generic [ref=e331]: Numbers
+                  - combobox "Grid number position" [ref=e333]:
+                    - option "Inside"
+                    - option "Outside" [selected]
+            - generic [ref=e334]:
+              - heading "Print Settings" [level=3] [ref=e335]
+              - generic [ref=e342]:
+                - generic [ref=e343]:
+                  - generic [ref=e344]: Paper size
+                  - combobox "Print paper size" [ref=e346]:
+                    - option "A4 (210 x 297 mm)" [selected]
+                    - option "A3 (297 x 420 mm)"
+                    - option "Letter (216 x 279 mm)"
+                    - option "Legal (216 x 356 mm)"
+                    - option "Tabloid (279 x 432 mm)"
+                - generic [ref=e347]:
+                  - generic [ref=e348]: Orientation
+                  - group "Print orientation" [ref=e350]:
+                    - button "Auto" [ref=e351] [cursor=pointer]
+                    - button "Portrait" [ref=e353] [cursor=pointer]
+                    - button "Landscape" [ref=e355] [cursor=pointer]
+                - generic [ref=e357]:
+                  - generic [ref=e358]: Margin
+                  - generic [ref=e360]:
+                    - generic [ref=e361]:
+                      - generic [ref=e362]: Page margin
+                      - spinbutton "Page margin" [ref=e363]: "24"
+                    - generic [ref=e364]: px
+                - generic [ref=e365]:
+                  - generic [ref=e366]: Align
+                  - generic [ref=e368]:
+                    - combobox "Horizontal print alignment" [ref=e369]:
+                      - option "Left"
+                      - option "Center" [selected]
+                      - option "Right"
+                    - combobox "Vertical print alignment" [ref=e370]:
+                      - option "Top"
+                      - option "Center" [selected]
+                      - option "Bottom"
+            - paragraph [ref=e372]: Graph 10 x 12 cm / Print 10 x 12 cm / 1 cell 1 cm / artwork 8 x 10 cells / back grid / outside numbers / page guides on / center center
+        - button "Resize controls panel" [ref=e373] [cursor=pointer]
+  - button "Open Next.js Dev Tools" [ref=e384] [cursor=pointer]

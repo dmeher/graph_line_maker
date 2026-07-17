@@ -1,4 +1,18 @@
-import type { GraphLineLayer, PrintHorizontalAlignment, PrintOrientation, PrintPaperSize, PrintVerticalAlignment } from "@/lib/graph-paper";
+import type {
+  GraphGridLineStyle,
+  GraphGridPattern,
+  GraphImageColorQuantization,
+  GraphImageDenoiseLevel,
+  GraphImageEdgeDetection,
+  GraphImageTraceEngine,
+  GraphVectorizerFidelity,
+  GraphLineLayer,
+  MajorGridEvery,
+  PrintHorizontalAlignment,
+  PrintOrientation,
+  PrintPaperSize,
+  PrintVerticalAlignment,
+} from "@/lib/graph-paper";
 
 export type AppRole = "admin" | "member";
 export type AppUserStatus = "active" | "inactive";
@@ -33,6 +47,30 @@ export type PaletteColor = {
 
 export type GraphRotationDegrees = number;
 
+/**
+ * A freehand erase stroke stored in resolution-independent coordinates:
+ * `points` are normalized UV positions (0..1) across the image's working canvas
+ * and `radius` is a fraction of the canvas width. This keeps strokes aligned
+ * when working canvases are downscaled to the shared pixel budget.
+ */
+export type GraphEraseStroke = {
+  points: { x: number; y: number }[];
+  radius: number;
+};
+
+/** Non-destructive background-removal configuration for an image layer. */
+export type GraphBackgroundRemoval = {
+  enabled: boolean;
+  /** 0..1 colour-distance threshold; higher removes more of the background. */
+  tolerance: number;
+};
+
+/** A named grouping of selectable layers, referenced by each member's `groupId`. */
+export type GraphLayerGroup = {
+  id: string;
+  name: string;
+};
+
 export type GraphSourceImage = {
   id: string;
   name: string;
@@ -45,6 +83,13 @@ export type GraphSourceImage = {
   sourceFillThreshold: number;
   sourceFillMinStrokePixels: number;
   strokeGapClosePixels: number;
+  imageAutoEnhance: boolean;
+  imageDenoiseLevel: GraphImageDenoiseLevel;
+  imageEdgeDetection: GraphImageEdgeDetection;
+  imageColorQuantization: GraphImageColorQuantization;
+  vectorizerLineAdjust: number;
+  vectorizerInkThreshold: number;
+  vectorizerFidelity: GraphVectorizerFidelity;
   x: number;
   y: number;
   topPadding: number;
@@ -54,6 +99,12 @@ export type GraphSourceImage = {
   rotationDegrees: GraphRotationDegrees;
   flipX: boolean;
   flipY: boolean;
+  /** Optional group membership; layers sharing a `groupId` select/move/copy together. */
+  groupId?: string | null;
+  /** Reversible erase strokes applied to the working image before vectorization. */
+  eraseStrokes?: GraphEraseStroke[];
+  /** Non-destructive background removal applied to the working image. */
+  backgroundRemoval?: GraphBackgroundRemoval;
 };
 
 export type MeasurementUnit = "cm" | "in";
@@ -75,6 +126,7 @@ export type GraphCellPaint = {
   rotationDegrees: GraphRotationDegrees;
   flipX: boolean;
   flipY: boolean;
+  groupId?: string | null;
 };
 
 export type GraphShapeKind = "square" | "rectangle" | "circle" | "oval" | "half-circle" | "line" | "arrow";
@@ -96,6 +148,7 @@ export type GraphShapeDrawing = {
   rotationDegrees: GraphRotationDegrees;
   flipX: boolean;
   flipY: boolean;
+  groupId?: string | null;
 };
 
 export type GraphClipartAsset = {
@@ -124,11 +177,21 @@ export type GraphClipartImage = {
   sourceFillThreshold: number;
   sourceFillMinStrokePixels: number;
   strokeGapClosePixels: number;
+  imageAutoEnhance: boolean;
+  imageDenoiseLevel: GraphImageDenoiseLevel;
+  imageEdgeDetection: GraphImageEdgeDetection;
+  imageColorQuantization: GraphImageColorQuantization;
+  vectorizerLineAdjust: number;
+  vectorizerInkThreshold: number;
+  vectorizerFidelity: GraphVectorizerFidelity;
   locked: boolean;
   visible: boolean;
   rotationDegrees: GraphRotationDegrees;
   flipX: boolean;
   flipY: boolean;
+  groupId?: string | null;
+  eraseStrokes?: GraphEraseStroke[];
+  backgroundRemoval?: GraphBackgroundRemoval;
 };
 
 export type GraphSettings = {
@@ -155,15 +218,27 @@ export type GraphSettings = {
   sourceFillThreshold: number;
   sourceFillMinStrokePixels: number;
   strokeGapClosePixels: number;
+  imageAutoEnhance: boolean;
+  imageDenoiseLevel: GraphImageDenoiseLevel;
+  imageEdgeDetection: GraphImageEdgeDetection;
+  imageColorQuantization: GraphImageColorQuantization;
+  imageTraceEngine: GraphImageTraceEngine;
+  vectorizerStrokeWidth: number;
+  vectorizerStrokeColor: string;
+  vectorizerLineAdjust: number;
+  vectorizerInkThreshold: number;
+  vectorizerFidelity: GraphVectorizerFidelity;
   gridLineColor: string;
   gridLineLayer: GraphLineLayer;
+  gridLineStyle: GraphGridLineStyle;
+  gridPattern: GraphGridPattern;
   gridLineThickness: number;
   showBorder: boolean;
   transparentBackground: boolean;
   showNumbers: boolean;
   gridNumberPlacement: "inside" | "outside";
   showPageBreaks: boolean;
-  majorGridEvery: 5 | 10;
+  majorGridEvery: MajorGridEvery;
   imageWidth: number;
   imageHeight: number;
   sourceImages: GraphSourceImage[];
@@ -171,6 +246,7 @@ export type GraphSettings = {
   graphShapes: GraphShapeDrawing[];
   clipartAssets: GraphClipartAsset[];
   clipartImages: GraphClipartImage[];
+  layerGroups?: GraphLayerGroup[];
   imagePadding: number;
   imageOffsetX: number;
   imageOffsetY: number;

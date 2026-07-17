@@ -2,30 +2,49 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { PROCESSED_IMAGES_BUCKET, ORIGINAL_IMAGES_BUCKET } from "@/lib/constants";
+import { MAX_SOURCE_IMAGES, PROCESSED_IMAGES_BUCKET, ORIGINAL_IMAGES_BUCKET } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
 import {
+  GRAPH_GRID_LINE_STYLE_KEYS,
+  GRAPH_GRID_PATTERN_KEYS,
+  CANVAS_COLOR_VALUES,
+  GRAPH_LINE_COLOR_VALUES,
+  GRAPH_IMAGE_DENOISE_LEVEL_KEYS,
+  GRAPH_IMAGE_EDGE_DETECTION_KEYS,
+  GRAPH_IMAGE_TRACE_ENGINE_KEYS,
   GRAPH_LINE_LAYER_KEYS,
+  GRAPH_MAJOR_CELL_PIXELS,
   MAX_IMAGE_LINE_THICKNESS,
   MAX_IMAGE_PADDING_PIXELS,
   MAX_SOURCE_FILL_MIN_STROKE_PIXELS,
   MAX_SOURCE_FILL_THRESHOLD,
   MAX_STROKE_GAP_CLOSE_PIXELS,
+  MAX_VECTORIZER_INK_THRESHOLD,
+  MAX_VECTORIZER_LINE_ADJUST,
+  MAX_VECTORIZER_STROKE_WIDTH,
   MIN_IMAGE_LINE_THICKNESS,
   MIN_SOURCE_FILL_MIN_STROKE_PIXELS,
   MIN_SOURCE_FILL_THRESHOLD,
   MIN_STROKE_GAP_CLOSE_PIXELS,
+  MIN_VECTORIZER_INK_THRESHOLD,
+  MIN_VECTORIZER_LINE_ADJUST,
+  MIN_VECTORIZER_STROKE_WIDTH,
   PRINT_HORIZONTAL_ALIGNMENT_KEYS,
   PRINT_ORIENTATION_KEYS,
   PRINT_PAPER_SIZE_KEYS,
   PRINT_VERTICAL_ALIGNMENT_KEYS,
   TRANSPARENT_FILL_COLOR,
+  VECTORIZER_LINE_ADJUST_STEP,
+  GRAPH_VECTORIZER_FIDELITY_KEYS,
 } from "@/lib/graph-paper";
-import { assertProjectOwner, defaultGraphSettings, imagePath, normalizeGraphSettings, replaceProjectPalettes } from "@/lib/projects";
+import { MAX_CANVAS_DIMENSION, MAX_GRAPH_HEIGHT_CELLS, MAX_GRAPH_WIDTH_CELLS, inspectCanvasBudget } from "@/lib/canvas/performance-limits";
+import { assertProjectOwner, clipartImagePath, imagePath, normalizeGraphSettings, sourceImagePath } from "@/lib/projects";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
+import type { GraphSettings, PaletteColor } from "@/lib/types";
+import { mapWithConcurrency } from "@/lib/utils/concurrency";
 
-const MAX_CANVAS_DIMENSION = 24000;
-const hexSchema = z.string().regex(/^#[0-9A-Fa-f]{6}$/);
+const hexSchema = z.enum(CANVAS_COLOR_VALUES);
+const graphLineColorSchema = z.enum(GRAPH_LINE_COLOR_VALUES);
 const fillColorSchema = z.union([hexSchema, z.literal(TRANSPARENT_FILL_COLOR)]);
 const rotationDegreesSchema = z
   .number()
@@ -36,6 +55,36 @@ const fillRegionsSchema = z
   .record(z.string().regex(/^\d+$/), fillColorSchema)
   .refine((value) => Object.keys(value).length <= 500, "Too many custom fill regions.");
 const cellLineSideSchema = z.union([z.literal("top"), z.literal("right"), z.literal("bottom"), z.literal("left")]);
+const imageColorQuantizationSchema = z.union([
+  z.literal("off"),
+  z.literal(2),
+  z.literal(4),
+  z.literal(8),
+  z.literal(16),
+]);
+const vectorizerLineAdjustSchema = z
+  .number()
+  .min(MIN_VECTORIZER_LINE_ADJUST)
+  .max(MAX_VECTORIZER_LINE_ADJUST)
+  .refine(
+    (value) => Math.abs(value / VECTORIZER_LINE_ADJUST_STEP - Math.round(value / VECTORIZER_LINE_ADJUST_STEP)) < 0.000001,
+    "Line adjustment must use 0.5 pixel steps.",
+  );
+const groupIdSchema = z.string().min(1).max(80).nullable().optional();
+const eraseStrokeSchema = z.object({
+  // Normalized UV coordinates across the source's working canvas; radius is a fraction of the canvas width.
+  points: z
+    .array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }))
+    .min(1)
+    .max(400),
+  radius: z.number().min(0.0005).max(0.5),
+});
+const eraseStrokesSchema = z.array(eraseStrokeSchema).max(80).optional();
+const backgroundRemovalSchema = z
+  .object({ enabled: z.boolean(), tolerance: z.number().min(0).max(1) })
+  .optional();
+const layerGroupSchema = z.object({ id: z.string().min(1).max(80), name: z.string().min(1).max(120) });
+
 const cellPaintSchema = z.object({
   id: z.string().min(1).max(80),
   name: z.string().min(1).max(160),
@@ -52,6 +101,7 @@ const cellPaintSchema = z.object({
   rotationDegrees: rotationDegreesSchema,
   flipX: z.boolean(),
   flipY: z.boolean(),
+  groupId: groupIdSchema,
 });
 const graphShapeSchema = z.object({
   id: z.string().min(1).max(80),
@@ -70,6 +120,7 @@ const graphShapeSchema = z.object({
   rotationDegrees: rotationDegreesSchema,
   flipX: z.boolean(),
   flipY: z.boolean(),
+  groupId: groupIdSchema,
 });
 const sourceImageSchema = z.object({
   id: z.string().min(1).max(80),
@@ -82,6 +133,13 @@ const sourceImageSchema = z.object({
   sourceFillThreshold: z.number().min(MIN_SOURCE_FILL_THRESHOLD).max(MAX_SOURCE_FILL_THRESHOLD),
   sourceFillMinStrokePixels: z.number().int().min(MIN_SOURCE_FILL_MIN_STROKE_PIXELS).max(MAX_SOURCE_FILL_MIN_STROKE_PIXELS),
   strokeGapClosePixels: z.number().int().min(MIN_STROKE_GAP_CLOSE_PIXELS).max(MAX_STROKE_GAP_CLOSE_PIXELS),
+  imageAutoEnhance: z.boolean(),
+  imageDenoiseLevel: z.enum(GRAPH_IMAGE_DENOISE_LEVEL_KEYS),
+  imageEdgeDetection: z.enum(GRAPH_IMAGE_EDGE_DETECTION_KEYS),
+  imageColorQuantization: imageColorQuantizationSchema,
+  vectorizerLineAdjust: vectorizerLineAdjustSchema,
+  vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
+  vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
   x: z.number().min(-1000).max(1000),
   y: z.number().min(-1000).max(1000),
   topPadding: z.number().min(-1000).max(1000),
@@ -91,6 +149,9 @@ const sourceImageSchema = z.object({
   rotationDegrees: rotationDegreesSchema,
   flipX: z.boolean(),
   flipY: z.boolean(),
+  groupId: groupIdSchema,
+  eraseStrokes: eraseStrokesSchema,
+  backgroundRemoval: backgroundRemovalSchema,
 });
 const clipartAssetSchema = z.object({
   id: z.string().min(1).max(80),
@@ -115,16 +176,26 @@ const clipartImageSchema = z.object({
   sourceFillThreshold: z.number().min(MIN_SOURCE_FILL_THRESHOLD).max(MAX_SOURCE_FILL_THRESHOLD),
   sourceFillMinStrokePixels: z.number().int().min(MIN_SOURCE_FILL_MIN_STROKE_PIXELS).max(MAX_SOURCE_FILL_MIN_STROKE_PIXELS),
   strokeGapClosePixels: z.number().int().min(MIN_STROKE_GAP_CLOSE_PIXELS).max(MAX_STROKE_GAP_CLOSE_PIXELS),
+  imageAutoEnhance: z.boolean(),
+  imageDenoiseLevel: z.enum(GRAPH_IMAGE_DENOISE_LEVEL_KEYS),
+  imageEdgeDetection: z.enum(GRAPH_IMAGE_EDGE_DETECTION_KEYS),
+  imageColorQuantization: imageColorQuantizationSchema,
+  vectorizerLineAdjust: vectorizerLineAdjustSchema,
+  vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
+  vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
   locked: z.boolean(),
   visible: z.boolean(),
   rotationDegrees: rotationDegreesSchema,
   flipX: z.boolean(),
   flipY: z.boolean(),
+  groupId: groupIdSchema,
+  eraseStrokes: eraseStrokesSchema,
+  backgroundRemoval: backgroundRemovalSchema,
 });
 
 const graphSettingsSchema = z.object({
-  graphWidth: z.number().int().min(1).max(1000),
-  graphHeight: z.number().int().min(1).max(1000),
+  graphWidth: z.number().int().min(1).max(MAX_GRAPH_WIDTH_CELLS),
+  graphHeight: z.number().int().min(1).max(MAX_GRAPH_HEIGHT_CELLS),
   cellWidth: z.number().int().min(1).max(240),
   cellHeight: z.number().int().min(1).max(240),
   cellSizeCm: z.number().min(0.05).max(100),
@@ -146,22 +217,35 @@ const graphSettingsSchema = z.object({
   sourceFillThreshold: z.number().min(MIN_SOURCE_FILL_THRESHOLD).max(MAX_SOURCE_FILL_THRESHOLD),
   sourceFillMinStrokePixels: z.number().int().min(MIN_SOURCE_FILL_MIN_STROKE_PIXELS).max(MAX_SOURCE_FILL_MIN_STROKE_PIXELS),
   strokeGapClosePixels: z.number().int().min(MIN_STROKE_GAP_CLOSE_PIXELS).max(MAX_STROKE_GAP_CLOSE_PIXELS),
-  gridLineColor: hexSchema,
+  imageAutoEnhance: z.boolean(),
+  imageDenoiseLevel: z.enum(GRAPH_IMAGE_DENOISE_LEVEL_KEYS),
+  imageEdgeDetection: z.enum(GRAPH_IMAGE_EDGE_DETECTION_KEYS),
+  imageColorQuantization: imageColorQuantizationSchema,
+  imageTraceEngine: z.enum(GRAPH_IMAGE_TRACE_ENGINE_KEYS),
+  vectorizerStrokeWidth: z.number().int().min(MIN_VECTORIZER_STROKE_WIDTH).max(MAX_VECTORIZER_STROKE_WIDTH),
+  vectorizerStrokeColor: hexSchema,
+  vectorizerLineAdjust: vectorizerLineAdjustSchema,
+  vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
+  vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
+  gridLineColor: graphLineColorSchema,
   gridLineLayer: z.enum(GRAPH_LINE_LAYER_KEYS),
+  gridLineStyle: z.enum(GRAPH_GRID_LINE_STYLE_KEYS),
+  gridPattern: z.enum(GRAPH_GRID_PATTERN_KEYS),
   gridLineThickness: z.number().int().min(0).max(10),
   showBorder: z.boolean(),
   transparentBackground: z.boolean(),
   showNumbers: z.boolean(),
   gridNumberPlacement: z.union([z.literal("inside"), z.literal("outside")]),
   showPageBreaks: z.boolean(),
-  majorGridEvery: z.union([z.literal(5), z.literal(10)]),
-  imageWidth: z.number().min(0.01).max(1000),
-  imageHeight: z.number().min(0.01).max(1000),
-  sourceImages: z.array(sourceImageSchema).max(100),
+  majorGridEvery: z.union([z.literal(1), z.literal(2), z.literal(5), z.literal(10)]),
+  imageWidth: z.number().min(0.01).max(MAX_GRAPH_HEIGHT_CELLS),
+  imageHeight: z.number().min(0.01).max(MAX_GRAPH_HEIGHT_CELLS),
+  sourceImages: z.array(sourceImageSchema).max(MAX_SOURCE_IMAGES),
   cellPaints: z.array(cellPaintSchema).max(2000),
   graphShapes: z.array(graphShapeSchema).max(500),
   clipartAssets: z.array(clipartAssetSchema).max(120),
   clipartImages: z.array(clipartImageSchema).max(500),
+  layerGroups: z.array(layerGroupSchema).max(200).optional(),
   imagePadding: z.number().int().min(0).max(MAX_IMAGE_PADDING_PIXELS),
   imageOffsetX: z.number().int().min(-MAX_CANVAS_DIMENSION).max(MAX_CANVAS_DIMENSION),
   imageOffsetY: z.number().int().min(-MAX_CANVAS_DIMENSION).max(MAX_CANVAS_DIMENSION),
@@ -171,6 +255,18 @@ const graphSettingsSchema = z.object({
   blackAndWhite: z.boolean(),
   limitedColorMode: z.boolean(),
   maxColors: z.union([z.literal(2), z.literal(4), z.literal(8), z.literal(16)]),
+}).superRefine((settings, context) => {
+  const visibleLayers =
+    settings.sourceImages.filter((source) => source.visible).length +
+    settings.clipartImages.filter((clipart) => clipart.visible).length;
+  const budget = inspectCanvasBudget(
+    settings.graphWidth * GRAPH_MAJOR_CELL_PIXELS,
+    settings.graphHeight * GRAPH_MAJOR_CELL_PIXELS,
+    Math.max(1, visibleLayers),
+  );
+  if (!budget.allowed) {
+    context.addIssue({ code: "custom", path: ["graphWidth"], message: budget.reason || "Canvas exceeds the safe processing budget." });
+  }
 });
 
 const paletteSchema = z.object({
@@ -192,10 +288,20 @@ const saveProjectSchema = z.object({
   palettes: z.array(paletteSchema).max(256),
 });
 
-export async function saveProjectState(input: z.infer<typeof saveProjectSchema>) {
+type SaveProjectStateInput = {
+  projectId: string;
+  title: string;
+  description?: string;
+  settings: GraphSettings;
+  width: number;
+  height: number;
+  colorCount: number;
+  palettes: PaletteColor[];
+};
+
+export async function saveProjectState(input: SaveProjectStateInput) {
   const session = await requireSession();
   const payload = saveProjectSchema.parse(input);
-  await assertProjectOwner(payload.projectId);
   const normalizedSettings = normalizeGraphSettings({
     ...payload.settings,
     lineColor: payload.settings.outlineColor,
@@ -207,24 +313,28 @@ export async function saveProjectState(input: z.infer<typeof saveProjectSchema>)
   });
 
   const supabase = getSupabaseAdmin();
-  const { error } = await supabase
-    .from("projects")
-    .update({
-      title: payload.title,
-      description: payload.description?.trim() || null,
-      settings: normalizedSettings,
-      width: normalizedSettings.outputWidth,
-      height: normalizedSettings.outputHeight,
-      pixel_size: normalizedSettings.cellWidth,
-      grid_cell_size: normalizedSettings.cellWidth,
-      color_count: payload.colorCount,
-    })
-    .eq("id", payload.projectId)
-    .eq("user_id", session.userId);
+  const { data: saved, error } = await supabase.rpc("save_project_state", {
+    p_project_id: payload.projectId,
+    p_user_id: session.userId,
+    p_title: payload.title,
+    p_description: payload.description?.trim() || "",
+    p_settings: normalizedSettings,
+    p_width: normalizedSettings.outputWidth,
+    p_height: normalizedSettings.outputHeight,
+    p_pixel_size: normalizedSettings.cellWidth,
+    p_grid_cell_size: normalizedSettings.cellWidth,
+    p_color_count: payload.colorCount,
+    p_palettes: payload.palettes.map((color, index) => ({
+      name: color.name || `Color ${index + 1}`,
+      hex: color.hex,
+      locked: color.locked,
+      cell_count: color.cellCount,
+      sort_order: index,
+    })),
+  });
 
   if (error) return { ok: false, message: error.message };
-
-  await replaceProjectPalettes(payload.projectId, payload.palettes);
+  if (!saved) return { ok: false, message: "Project not found." };
   revalidatePath(`/projects/${payload.projectId}`);
   revalidatePath("/dashboard");
   return { ok: true, message: "Project saved." };
@@ -237,9 +347,19 @@ export async function deleteProject(formData: FormData) {
 
   const owner = await assertProjectOwner(projectId);
   const supabase = getSupabaseAdmin();
+  const settings = normalizeGraphSettings(owner.settings);
 
   const removals: Promise<unknown>[] = [];
-  if (owner.original_image_path) removals.push(supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove([owner.original_image_path]));
+  const originalPaths = Array.from(
+    new Set(
+      [
+        owner.original_image_path,
+        ...settings.sourceImages.map((source) => source.path),
+        ...settings.clipartAssets.map((asset) => asset.path),
+      ].filter((path): path is string => Boolean(path)),
+    ),
+  );
+  if (originalPaths.length) removals.push(supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove(originalPaths));
   if (owner.processed_image_path) removals.push(supabase.storage.from(PROCESSED_IMAGES_BUCKET).remove([owner.processed_image_path]));
   await Promise.all(removals);
 
@@ -256,48 +376,82 @@ export async function duplicateProject(formData: FormData) {
   const project = await assertProjectOwner(projectId);
   const supabase = getSupabaseAdmin();
 
-  const { data: source, error: sourceError } = await supabase
-    .from("projects")
-    .select("title, description, settings, width, height, pixel_size, grid_cell_size, color_count")
-    .eq("id", projectId)
-    .eq("user_id", session.userId)
-    .single();
-
-  if (sourceError) throw new Error(sourceError.message);
-
   const { data: duplicate, error } = await supabase
     .from("projects")
     .insert({
       user_id: session.userId,
-      title: `${source.title} Copy`,
-      description: source.description,
-      settings: source.settings ?? defaultGraphSettings,
-      width: source.width,
-      height: source.height,
-      pixel_size: source.pixel_size,
-      grid_cell_size: source.grid_cell_size,
-      color_count: source.color_count,
+      title: `${project.title} Copy`,
+      description: project.description,
+      settings: project.settings,
+      width: project.width,
+      height: project.height,
+      pixel_size: project.pixel_size,
+      grid_cell_size: project.grid_cell_size,
+      color_count: project.color_count,
     })
     .select("id")
     .single();
 
   if (error) throw new Error(error.message);
 
+  const settings = normalizeGraphSettings(project.settings);
+  const copyTargets = new Map<string, string>();
   if (project.original_image_path) {
-    const extension = project.original_image_path.split(".").pop() || "png";
-    const newPath = imagePath(session.userId, duplicate.id, "original", extension);
-    const { error: copyError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).copy(project.original_image_path, newPath);
-    if (!copyError) {
-      await supabase.from("projects").update({ original_image_path: newPath }).eq("id", duplicate.id);
-    }
+    copyTargets.set(
+      project.original_image_path,
+      imagePath(session.userId, duplicate.id, "original", project.original_image_path.split(".").pop() || "png"),
+    );
+  }
+  for (const source of settings.sourceImages) {
+    if (!source.path || copyTargets.has(source.path)) continue;
+    copyTargets.set(
+      source.path,
+      sourceImagePath(session.userId, duplicate.id, source.id, source.path.split(".").pop() || "png"),
+    );
+  }
+  for (const asset of settings.clipartAssets) {
+    if (!asset.path || copyTargets.has(asset.path)) continue;
+    copyTargets.set(
+      asset.path,
+      clipartImagePath(session.userId, duplicate.id, asset.id, asset.path.split(".").pop() || "png"),
+    );
   }
 
-  if (project.processed_image_path) {
-    const newPath = imagePath(session.userId, duplicate.id, "processed", "png");
-    const { error: copyError } = await supabase.storage.from(PROCESSED_IMAGES_BUCKET).copy(project.processed_image_path, newPath);
-    if (!copyError) {
-      await supabase.from("projects").update({ processed_image_path: newPath }).eq("id", duplicate.id);
-    }
+  const copiedPaths: string[] = [];
+  try {
+    await mapWithConcurrency(Array.from(copyTargets.entries()), 2, async ([sourcePath, targetPath]) => {
+      const { error: copyError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).copy(sourcePath, targetPath);
+      if (copyError) throw new Error(copyError.message);
+      copiedPaths.push(targetPath);
+    });
+    const duplicateSettings = normalizeGraphSettings({
+      ...settings,
+      sourceImages: settings.sourceImages.map(({ url: _url, ...source }) => ({
+        ...source,
+        path: source.path ? copyTargets.get(source.path) ?? null : null,
+        url: null,
+      })),
+      clipartAssets: settings.clipartAssets.map(({ url: _url, dataUrl: _dataUrl, ...asset }) => ({
+        ...asset,
+        path: asset.path ? copyTargets.get(asset.path) ?? null : null,
+        url: null,
+        dataUrl: null,
+      })),
+    });
+    const { error: updateError } = await supabase
+      .from("projects")
+      .update({
+        original_image_path: project.original_image_path ? copyTargets.get(project.original_image_path) ?? null : null,
+        processed_image_path: null,
+        settings: duplicateSettings,
+      })
+      .eq("id", duplicate.id)
+      .eq("user_id", session.userId);
+    if (updateError) throw new Error(updateError.message);
+  } catch (copyError) {
+    if (copiedPaths.length) await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove(copiedPaths);
+    await supabase.from("projects").delete().eq("id", duplicate.id).eq("user_id", session.userId);
+    throw copyError;
   }
 
   const { data: palettes, error: paletteError } = await supabase

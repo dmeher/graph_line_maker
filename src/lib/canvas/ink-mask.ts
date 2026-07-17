@@ -5,6 +5,7 @@ export type ImageDataLike = {
 };
 
 const MIN_ALPHA_FOR_INK = 16;
+const MIN_ALPHA_FOR_VECTORIZED_INK = 1;
 const BACKGROUND_CONTRAST_GAP = 72;
 const COLOR_DISTANCE_THRESHOLD = 58;
 const MIN_COLORED_INK_CHANNEL_SPREAD = 18;
@@ -166,4 +167,24 @@ export function maskFromImageData(imageData: ImageDataLike) {
     count: cleaned.count,
     threshold: analysis.inkThreshold,
   };
+}
+
+export function maskFromVectorizedImageData(imageData: ImageDataLike) {
+  const mask = new Uint8Array(imageData.width * imageData.height);
+  const coverage = new Uint8Array(mask.length);
+  const data = imageData.data;
+  let count = 0;
+
+  // The vectorizer route normalizes every SVG shape to black on a transparent
+  // background. Alpha therefore represents the vector contour directly; do
+  // not run the photographed-artwork speckle or background cleanup here.
+  for (let index = 0, pixel = 0; index < data.length; index += 4, pixel += 1) {
+    const alpha = data[index + 3];
+    if (alpha < MIN_ALPHA_FOR_VECTORIZED_INK) continue;
+    mask[pixel] = 1;
+    coverage[pixel] = alpha;
+    count += 1;
+  }
+
+  return { mask, coverage, count };
 }

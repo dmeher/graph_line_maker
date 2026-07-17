@@ -17,8 +17,19 @@ const OUTSIDE_LABEL_BOTTOM_Y = 8;
 const OUTSIDE_LABEL_LEFT_X = 8;
 const OUTSIDE_LABEL_RIGHT_X = 10;
 const OUTSIDE_LABEL_FALLBACK_TOLERANCE_PX = Math.round(GRAPH_MAJOR_CELL_PIXELS * 0.9);
+const MAX_TOTAL_PDF_PAGES = 240;
 const LEFT_RIGHT_OUTSIDE_Y_OFFSET = 0.45;
 const OUTSIDE_GRID_NUMBER_COLOR = "#000000";
+
+function isDrawableCanvas(canvas: HTMLCanvasElement | null | undefined) {
+  return Boolean(canvas && Number.isFinite(canvas.width) && Number.isFinite(canvas.height) && canvas.width > 0 && canvas.height > 0);
+}
+
+function positiveInteger(value: unknown, fallback = 1) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+  return Math.max(1, Math.round(numeric));
+}
 
 function getOutsideGridNumberLines(settings: GraphSettings): OutsideGridNumberLines {
   const graphWidth = Math.max(1, Math.round(settings.graphWidth || 1));
@@ -197,20 +208,38 @@ function pdfFilename(filename: string, part?: number) {
   return part ? `${clean}-part-${part}.pdf` : `${clean}.pdf`;
 }
 
-function canvasSliceToDataUrl(
+function canvasToPngBlob(canvas: HTMLCanvasElement) {
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error("Unable to encode canvas image."));
+    }, "image/png");
+  });
+}
+
+async function canvasSliceToPngBlob(
   canvas: HTMLCanvasElement,
   sourceX: number,
   sourceY: number,
   sourceWidth: number,
   sourceHeight: number,
 ) {
+  if (!isDrawableCanvas(canvas)) throw new Error("The processed image is empty. Reprocess the project before exporting.");
+  const safeSourceX = Math.max(0, Math.round(Number(sourceX) || 0));
+  const safeSourceY = Math.max(0, Math.round(Number(sourceY) || 0));
+  const safeSourceWidth = Math.min(canvas.width - safeSourceX, positiveInteger(sourceWidth));
+  const safeSourceHeight = Math.min(canvas.height - safeSourceY, positiveInteger(sourceHeight));
+  if (safeSourceWidth <= 0 || safeSourceHeight <= 0) {
+    throw new Error("The export tile is empty. Reprocess the project before exporting.");
+  }
+
   const slice = document.createElement("canvas");
-  slice.width = sourceWidth;
-  slice.height = sourceHeight;
+  slice.width = safeSourceWidth;
+  slice.height = safeSourceHeight;
   const context = slice.getContext("2d");
   if (!context) throw new Error("Canvas is not available.");
-  context.drawImage(canvas, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
-  return slice.toDataURL("image/png");
+  context.drawImage(canvas, safeSourceX, safeSourceY, safeSourceWidth, safeSourceHeight, 0, 0, safeSourceWidth, safeSourceHeight);
+  return canvasToPngBlob(slice);
 }
 
 function escapeHtml(value: string) {
@@ -253,6 +282,7 @@ function drawPdfCutGuides(
 }
 
 export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: string, settingsOrMargin: GraphSettings | number = 0) {
+  if (!isDrawableCanvas(canvas)) throw new Error("The processed image is empty. Reprocess the project before exporting.");
   const { jsPDF } = await import("jspdf");
   const settings = typeof settingsOrMargin === "number" ? null : settingsOrMargin;
   const margin = typeof settingsOrMargin === "number" ? Math.max(0, Math.round(settingsOrMargin)) : 0;
@@ -260,6 +290,9 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
   if (settings) {
     const paper = PRINT_PAPER_SIZES[settings.printPaperSize] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
     const plan = createPdfExportPlan({ settings, paper, canvasWidth: canvas.width, canvasHeight: canvas.height });
+    if (plan.tiles.length > MAX_TOTAL_PDF_PAGES) {
+      throw new Error(`This export needs ${plan.tiles.length.toLocaleString()} pages. The limit is ${MAX_TOTAL_PDF_PAGES}; reduce the graph size or increase the cell size.`);
+    }
     const outsideGridNumberLines =
       settings.showNumbers && settings.gridNumberPlacement === "outside" ? getOutsideGridNumberLines(settings) : null;
     const graphWidthPx = Math.max(1, Math.round(canvas.width));
@@ -285,8 +318,11 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
       if (plan.splitIntoFiles && pagesInCurrentFile >= MAX_PAGES_PER_PDF_FILE) saveCurrentPdf();
       if (pagesInCurrentFile > 0) pdf.addPage([plan.pageWidthMm, plan.pageHeightMm], plan.orientation);
 
+      const tileBytes = new Uint8Array(
+        await (await canvasSliceToPngBlob(canvas, tile.sourceX, tile.sourceY, tile.sourceWidth, tile.sourceHeight)).arrayBuffer(),
+      );
       pdf.addImage(
-        canvasSliceToDataUrl(canvas, tile.sourceX, tile.sourceY, tile.sourceWidth, tile.sourceHeight),
+        tileBytes,
         "PNG",
         tile.destinationXMm,
         tile.destinationYMm,
@@ -298,6 +334,7 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
       }
       drawPdfCutGuides(pdf, tile.cutGuideTopYMm, tile.cutGuideBottomYMm, plan.pageWidthMm, plan.pageHeightMm);
       pagesInCurrentFile += 1;
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     }
 
     if (pagesInCurrentFile > 0) saveCurrentPdf();
@@ -308,13 +345,18 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
   const height = canvas.height + margin * 2;
   const orientation = canvas.width >= canvas.height ? "landscape" : "portrait";
   const pdf = new jsPDF({ orientation, unit: "px", format: [width, height] });
-  pdf.addImage(canvas.toDataURL("image/png"), "PNG", margin, margin, canvas.width, canvas.height);
+  const imageBytes = new Uint8Array(await (await canvasToPngBlob(canvas)).arrayBuffer());
+  pdf.addImage(imageBytes, "PNG", margin, margin, canvas.width, canvas.height);
   pdf.save(pdfFilename(filename));
 }
 
-export function printCanvas(canvas: HTMLCanvasElement, settings: GraphSettings, title = "Graph") {
+export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSettings, title = "Graph") {
+  if (!isDrawableCanvas(canvas)) throw new Error("The processed image is empty. Reprocess the project before printing.");
   const paper = PRINT_PAPER_SIZES[settings.printPaperSize] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
   const plan = createPdfExportPlan({ settings, paper, canvasWidth: canvas.width, canvasHeight: canvas.height });
+  if (plan.tiles.length > MAX_TOTAL_PDF_PAGES) {
+    throw new Error(`This print needs ${plan.tiles.length.toLocaleString()} pages. The limit is ${MAX_TOTAL_PDF_PAGES}; reduce the graph size or increase the cell size.`);
+  }
   const outsideGridNumberLines =
     settings.showNumbers && settings.gridNumberPlacement === "outside" ? getOutsideGridNumberLines(settings) : null;
   const printWindow = window.open("", "_blank");
@@ -323,9 +365,13 @@ export function printCanvas(canvas: HTMLCanvasElement, settings: GraphSettings, 
   const graphWidthPx = Math.max(1, Math.round(canvas.width));
   const graphHeightPx = Math.max(1, Math.round(canvas.height));
 
-  const pages = plan.tiles
-    .map((tile) => {
-      const imageUrl = canvasSliceToDataUrl(canvas, tile.sourceX, tile.sourceY, tile.sourceWidth, tile.sourceHeight);
+  const objectUrls: string[] = [];
+  const pages: string[] = [];
+  for (const tile of plan.tiles) {
+      const imageUrl = URL.createObjectURL(
+        await canvasSliceToPngBlob(canvas, tile.sourceX, tile.sourceY, tile.sourceWidth, tile.sourceHeight),
+      );
+      objectUrls.push(imageUrl);
       const cutGuides = uniqueCutGuideYPositions(tile.cutGuideTopYMm, tile.cutGuideBottomYMm, plan.pageHeightMm)
         .map((y) => `<span class="cut-guide" style="top:${y}mm"></span>`)
         .join("");
@@ -337,9 +383,9 @@ export function printCanvas(canvas: HTMLCanvasElement, settings: GraphSettings, 
             graphHeightPx,
           )
         : "";
-      return `<section class="page"><img src="${imageUrl}" alt="" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" />${gridNumberSpans}${cutGuides}</section>`;
-    })
-    .join("");
+      pages.push(`<section class="page"><img src="${imageUrl}" alt="" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" />${gridNumberSpans}${cutGuides}</section>`);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+  }
 
   printWindow.document.open();
   printWindow.document.write(`<!doctype html>
@@ -391,7 +437,7 @@ export function printCanvas(canvas: HTMLCanvasElement, settings: GraphSettings, 
   </style>
 </head>
 <body>
-  ${pages}
+  ${pages.join("")}
   <script>
     window.addEventListener("load", () => {
       setTimeout(() => {
@@ -403,6 +449,7 @@ export function printCanvas(canvas: HTMLCanvasElement, settings: GraphSettings, 
 </body>
 </html>`);
   printWindow.document.close();
+  printWindow.addEventListener("afterprint", () => objectUrls.forEach((url) => URL.revokeObjectURL(url)), { once: true });
 }
 
 export function exportSettingsAsJSON(

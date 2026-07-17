@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  clearEditorSessionDrafts,
   createEditorSessionDraft,
   editorSessionDraftKey,
   readEditorSessionDraft,
@@ -61,8 +62,20 @@ function settingsFixture(url = "https://example.test/source.svg"): GraphSettings
     sourceFillThreshold: 0.58,
     sourceFillMinStrokePixels: 7,
     strokeGapClosePixels: 0,
+    imageAutoEnhance: false,
+    imageDenoiseLevel: "off",
+    imageEdgeDetection: "standard",
+    imageColorQuantization: "off",
+    imageTraceEngine: "default",
+    vectorizerStrokeWidth: 3,
+    vectorizerStrokeColor: "#111827",
+    vectorizerLineAdjust: 0,
+    vectorizerInkThreshold: 210,
+    vectorizerFidelity: "exact",
     gridLineColor: "#94a3b8",
     gridLineLayer: "front",
+    gridLineStyle: "solid",
+    gridPattern: "square",
     gridLineThickness: 1,
     showBorder: true,
     transparentBackground: false,
@@ -85,6 +98,13 @@ function settingsFixture(url = "https://example.test/source.svg"): GraphSettings
         sourceFillThreshold: 0.58,
         sourceFillMinStrokePixels: 7,
         strokeGapClosePixels: 0,
+        imageAutoEnhance: false,
+        imageDenoiseLevel: "off",
+        imageEdgeDetection: "standard",
+        imageColorQuantization: "off",
+        vectorizerLineAdjust: 0,
+        vectorizerInkThreshold: 210,
+        vectorizerFidelity: "exact",
         x: 1,
         y: 0,
         topPadding: 0,
@@ -160,4 +180,17 @@ test("session draft restore ignores drafts older than the database project", () 
 
   const restored = readEditorSessionDraft("project-1", "2026-07-07T11:00:00.000Z", settings, storage);
   assert.equal(restored, null);
+});
+
+test("logout cleanup removes every editor draft without deleting unrelated preferences", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(editorSessionDraftKey("project-1"), "one");
+  storage.setItem(editorSessionDraftKey("project-2"), "two");
+  storage.setItem("graph-pixel-maker:autosave-interval", "30000");
+
+  clearEditorSessionDrafts(storage);
+
+  assert.equal(storage.getItem(editorSessionDraftKey("project-1")), null);
+  assert.equal(storage.getItem(editorSessionDraftKey("project-2")), null);
+  assert.equal(storage.getItem("graph-pixel-maker:autosave-interval"), "30000");
 });

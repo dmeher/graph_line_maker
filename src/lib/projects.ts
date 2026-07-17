@@ -5,13 +5,22 @@ import { MAX_SOURCE_IMAGES, ORIGINAL_IMAGES_BUCKET, PROCESSED_IMAGES_BUCKET } fr
 import { requireSession } from "@/lib/auth/session";
 import {
   DEFAULT_CELL_SIZE_CM,
+  DEFAULT_BACKGROUND_COLOR,
+  DEFAULT_GRID_LINE_STYLE,
   DEFAULT_GRAPH_LINE_LAYER,
   DEFAULT_GRAPH_HEIGHT_CELLS,
   DEFAULT_GRAPH_WIDTH_CELLS,
+  DEFAULT_GRID_PATTERN,
+  DEFAULT_IMAGE_AUTO_ENHANCE,
+  DEFAULT_IMAGE_COLOR_QUANTIZATION,
+  DEFAULT_IMAGE_DENOISE_LEVEL,
+  DEFAULT_IMAGE_EDGE_DETECTION,
+  DEFAULT_IMAGE_TRACE_ENGINE,
   DEFAULT_IMAGE_HEIGHT_CELLS,
   DEFAULT_IMAGE_LINE_THICKNESS,
   DEFAULT_IMAGE_WIDTH_CELLS,
   DEFAULT_GRID_LINE_COLOR,
+  DEFAULT_MAJOR_GRID_EVERY,
   DEFAULT_OUTLINE_COLOR,
   DEFAULT_PRINT_HORIZONTAL_ALIGNMENT,
   DEFAULT_PRINT_ORIENTATION,
@@ -20,10 +29,24 @@ import {
   DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
   DEFAULT_SOURCE_FILL_THRESHOLD,
   DEFAULT_STROKE_GAP_CLOSE_PIXELS,
+  DEFAULT_VECTORIZER_STROKE_COLOR,
+  DEFAULT_VECTORIZER_STROKE_WIDTH,
+  DEFAULT_VECTORIZER_LINE_ADJUST,
+  DEFAULT_VECTORIZER_INK_THRESHOLD,
+  DEFAULT_VECTORIZER_FIDELITY,
   GRAPH_MAJOR_CELL_PIXELS,
   TRANSPARENT_FILL_COLOR,
+  isGraphGridLineStyle,
+  isGraphGridPattern,
+  isGraphImageColorQuantization,
+  isGraphImageDenoiseLevel,
+  isGraphImageEdgeDetection,
+  isGraphVectorizerFidelity,
   isGraphLineLayer,
-  isFillColor,
+  normalizeCanvasColor,
+  normalizeCanvasFillColor,
+  normalizeGraphLineColor,
+  isMajorGridEvery,
   isPrintHorizontalAlignment,
   isPrintOrientation,
   isPrintPaperSize,
@@ -33,11 +56,21 @@ import {
   clampSourceFillMinStrokePixels,
   clampSourceFillThreshold,
   clampStrokeGapClosePixels,
+  clampVectorizerInkThreshold,
+  clampVectorizerLineAdjust,
+  clampVectorizerStrokeWidth,
+  normalizeGraphImageTraceEngine,
 } from "@/lib/graph-paper";
+import { MAX_CANVAS_DIMENSION, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
+import {
+  normalizeBackgroundRemoval,
+  normalizeEraseStrokes,
+  normalizeGroupId,
+  normalizeLayerGroups,
+} from "@/lib/editor/layer-extras";
 import type { GraphClipartAsset, GraphClipartImage, GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSummary } from "@/lib/types";
 
-const MAX_CANVAS_DIMENSION = 24000;
 const MAX_CLIPART_ASSETS = 120;
 const MAX_CLIPART_IMAGES = 500;
 const CELL_LINE_SIDE_KEYS = ["top", "right", "bottom", "left"] as const;
@@ -62,7 +95,7 @@ export const defaultGraphSettings: GraphSettings = {
   gridCellSize: GRAPH_MAJOR_CELL_PIXELS,
   outputWidth: DEFAULT_GRAPH_WIDTH_CELLS * GRAPH_MAJOR_CELL_PIXELS,
   outputHeight: DEFAULT_GRAPH_HEIGHT_CELLS * GRAPH_MAJOR_CELL_PIXELS,
-  backgroundColor: "#ffffff",
+  backgroundColor: DEFAULT_BACKGROUND_COLOR,
   lineColor: DEFAULT_OUTLINE_COLOR,
   outlineColor: DEFAULT_OUTLINE_COLOR,
   fillColor: TRANSPARENT_FILL_COLOR,
@@ -71,15 +104,27 @@ export const defaultGraphSettings: GraphSettings = {
   sourceFillThreshold: DEFAULT_SOURCE_FILL_THRESHOLD,
   sourceFillMinStrokePixels: DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS,
   strokeGapClosePixels: DEFAULT_STROKE_GAP_CLOSE_PIXELS,
+  imageAutoEnhance: DEFAULT_IMAGE_AUTO_ENHANCE,
+  imageDenoiseLevel: DEFAULT_IMAGE_DENOISE_LEVEL,
+  imageEdgeDetection: DEFAULT_IMAGE_EDGE_DETECTION,
+  imageColorQuantization: DEFAULT_IMAGE_COLOR_QUANTIZATION,
+  imageTraceEngine: DEFAULT_IMAGE_TRACE_ENGINE,
+  vectorizerStrokeWidth: DEFAULT_VECTORIZER_STROKE_WIDTH,
+  vectorizerStrokeColor: DEFAULT_VECTORIZER_STROKE_COLOR,
+  vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
+  vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+  vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
   gridLineColor: DEFAULT_GRID_LINE_COLOR,
   gridLineLayer: DEFAULT_GRAPH_LINE_LAYER,
+  gridLineStyle: DEFAULT_GRID_LINE_STYLE,
+  gridPattern: DEFAULT_GRID_PATTERN,
   gridLineThickness: 1,
   showBorder: true,
   transparentBackground: false,
   showNumbers: true,
   gridNumberPlacement: "outside",
   showPageBreaks: true,
-  majorGridEvery: 5,
+  majorGridEvery: DEFAULT_MAJOR_GRID_EVERY,
   imageWidth: DEFAULT_IMAGE_WIDTH_CELLS,
   imageHeight: DEFAULT_IMAGE_HEIGHT_CELLS,
   sourceImages: [],
@@ -93,9 +138,9 @@ export const defaultGraphSettings: GraphSettings = {
   spotPadding: 0,
   spotShape: "round",
   pageMargin: 24,
-  blackAndWhite: false,
+  blackAndWhite: true,
   limitedColorMode: true,
-  maxColors: 8,
+  maxColors: 4,
 };
 
 function dataSvgUrl(svg: string) {
@@ -124,6 +169,13 @@ export function getMockEditorProject(): Project {
         sourceFillThreshold: 0.58,
         sourceFillMinStrokePixels: 7,
         strokeGapClosePixels: 0,
+        imageAutoEnhance: DEFAULT_IMAGE_AUTO_ENHANCE,
+        imageDenoiseLevel: DEFAULT_IMAGE_DENOISE_LEVEL,
+        imageEdgeDetection: DEFAULT_IMAGE_EDGE_DETECTION,
+        imageColorQuantization: DEFAULT_IMAGE_COLOR_QUANTIZATION,
+        vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
+        vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+        vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
         x: 16,
         y: 8,
         topPadding: 0,
@@ -210,7 +262,7 @@ function mapPalette(row: DbPalette): PaletteColor {
   return {
     id: row.id,
     name: row.color_name,
-    hex: row.hex_code,
+    hex: normalizeCanvasColor(row.hex_code),
     locked: Boolean(row.locked),
     cellCount: Number(row.cell_count ?? 0),
     sortOrder: Number(row.sort_order ?? 0),
@@ -266,9 +318,32 @@ function clampSourceSizeCells(value: unknown, fallback: number) {
 function normalizeFillRegions(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const entries = Object.entries(value)
-    .filter(([regionId, color]) => /^\d+$/.test(regionId) && isFillColor(color))
+    .filter(([regionId]) => /^\d+$/.test(regionId))
+    .map(([regionId, color]) => [regionId, normalizeCanvasFillColor(color)] as const)
     .slice(0, 500);
   return Object.fromEntries(entries);
+}
+
+function normalizeImageAutoEnhance(value: unknown) {
+  return typeof value === "boolean" ? value : DEFAULT_IMAGE_AUTO_ENHANCE;
+}
+
+function normalizeImageDenoiseLevel(value: unknown) {
+  return isGraphImageDenoiseLevel(value) ? value : DEFAULT_IMAGE_DENOISE_LEVEL;
+}
+
+function normalizeImageEdgeDetection(value: unknown) {
+  return isGraphImageEdgeDetection(value) ? value : DEFAULT_IMAGE_EDGE_DETECTION;
+}
+
+function normalizeImageColorQuantization(value: unknown) {
+  if (isGraphImageColorQuantization(value)) return value;
+  const numeric = typeof value === "string" ? Number(value) : value;
+  return isGraphImageColorQuantization(numeric) ? numeric : DEFAULT_IMAGE_COLOR_QUANTIZATION;
+}
+
+function normalizeVectorizerFidelity(value: unknown) {
+  return isGraphVectorizerFidelity(value) ? value : DEFAULT_VECTORIZER_FIDELITY;
 }
 
 const GRAPH_CELL_LINE_SIDES = ["top", "right", "bottom", "left"] as const;
@@ -287,8 +362,8 @@ function normalizeCellPaints(value: unknown) {
       const sides = Array.isArray(record.sides)
         ? Array.from(new Set(record.sides.filter((side): side is (typeof GRAPH_CELL_LINE_SIDES)[number] => GRAPH_CELL_LINE_SIDES.includes(side as never))))
         : [];
-      const lineColor = isHexColor(record.lineColor) ? record.lineColor : DEFAULT_OUTLINE_COLOR;
-      const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
+      const lineColor = normalizeCanvasColor(record.lineColor);
+      const fillColor = normalizeCanvasFillColor(record.fillColor);
       const lineWidthValue = Number(record.lineWidth);
       const lineWidth = Math.max(1, Math.min(24, Number.isFinite(lineWidthValue) ? Math.round(lineWidthValue) : 3));
       if (!sides.length && fillColor === TRANSPARENT_FILL_COLOR) return [];
@@ -309,6 +384,7 @@ function normalizeCellPaints(value: unknown) {
           rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
           flipX: Boolean(record.flipX),
           flipY: Boolean(record.flipY),
+          groupId: normalizeGroupId(record.groupId),
         },
       ];
     })
@@ -326,8 +402,8 @@ function normalizeGraphShapes(value: unknown) {
       const heightFallback = kind === "line" || kind === "arrow" ? 0 : 1;
       const width = clampFreeCellCoordinate(record.width, widthFallback);
       const height = clampFreeCellCoordinate(record.height, heightFallback);
-      const strokeColor = isHexColor(record.strokeColor) ? record.strokeColor : DEFAULT_OUTLINE_COLOR;
-      const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
+      const strokeColor = normalizeCanvasColor(record.strokeColor);
+      const fillColor = normalizeCanvasFillColor(record.fillColor);
       const strokeWidthValue = Number(record.strokeWidth);
       const strokeWidth = Math.max(1, Math.min(24, Number.isFinite(strokeWidthValue) ? Math.round(strokeWidthValue) : 3));
       const rawSides = Array.isArray(record.sides) ? record.sides : [...CELL_LINE_SIDE_KEYS];
@@ -357,6 +433,7 @@ function normalizeGraphShapes(value: unknown) {
           rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
           flipX: Boolean(record.flipX),
           flipY: Boolean(record.flipY),
+          groupId: normalizeGroupId(record.groupId),
         },
       ];
     })
@@ -389,7 +466,16 @@ function normalizeClipartAssets(value: unknown): GraphClipartAsset[] {
 
 function normalizeClipartImages(
   value: unknown,
-  defaults: Pick<GraphSettings, "imageLineThickness" | "sourceFillThreshold" | "sourceFillMinStrokePixels" | "strokeGapClosePixels">,
+  defaults: Pick<
+    GraphSettings,
+    | "imageLineThickness"
+    | "sourceFillThreshold"
+    | "sourceFillMinStrokePixels"
+    | "strokeGapClosePixels"
+    | "vectorizerLineAdjust"
+    | "vectorizerInkThreshold"
+    | "vectorizerFidelity"
+  >,
 ): GraphClipartImage[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -398,8 +484,8 @@ function normalizeClipartImages(
       const record = image as Record<string, unknown>;
       const assetId = typeof record.assetId === "string" && record.assetId.trim() ? record.assetId.trim().slice(0, 80) : "";
       if (!assetId) return [];
-      const strokeColor = isHexColor(record.strokeColor) ? record.strokeColor : DEFAULT_OUTLINE_COLOR;
-      const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
+      const strokeColor = normalizeCanvasColor(record.strokeColor);
+      const fillColor = normalizeCanvasFillColor(record.fillColor);
       return [
         {
           id: typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 80) : `clipart-image-${index + 1}`,
@@ -415,11 +501,21 @@ function normalizeClipartImages(
           sourceFillThreshold: clampSourceFillThreshold(record.sourceFillThreshold ?? defaults.sourceFillThreshold),
           sourceFillMinStrokePixels: clampSourceFillMinStrokePixels(record.sourceFillMinStrokePixels ?? defaults.sourceFillMinStrokePixels),
           strokeGapClosePixels: clampStrokeGapClosePixels(record.strokeGapClosePixels ?? defaults.strokeGapClosePixels),
+          imageAutoEnhance: normalizeImageAutoEnhance(record.imageAutoEnhance),
+          imageDenoiseLevel: normalizeImageDenoiseLevel(record.imageDenoiseLevel),
+          imageEdgeDetection: normalizeImageEdgeDetection(record.imageEdgeDetection),
+          imageColorQuantization: normalizeImageColorQuantization(record.imageColorQuantization),
+          vectorizerLineAdjust: clampVectorizerLineAdjust(record.vectorizerLineAdjust ?? defaults.vectorizerLineAdjust),
+          vectorizerInkThreshold: clampVectorizerInkThreshold(record.vectorizerInkThreshold ?? defaults.vectorizerInkThreshold),
+          vectorizerFidelity: normalizeVectorizerFidelity(record.vectorizerFidelity ?? defaults.vectorizerFidelity),
           locked: Boolean(record.locked),
           visible: typeof record.visible === "boolean" ? record.visible : true,
           rotationDegrees: normalizeRotationDegrees(record.rotationDegrees),
           flipX: Boolean(record.flipX),
           flipY: Boolean(record.flipY),
+          groupId: normalizeGroupId(record.groupId),
+          eraseStrokes: normalizeEraseStrokes(record.eraseStrokes),
+          backgroundRemoval: normalizeBackgroundRemoval(record.backgroundRemoval),
         },
       ];
     })
@@ -432,7 +528,14 @@ function normalizeSourceImages(
   graphHeight: number,
   defaults: Pick<
     GraphSettings,
-    "measurementUnit" | "imageLineThickness" | "sourceFillThreshold" | "sourceFillMinStrokePixels" | "strokeGapClosePixels"
+    | "measurementUnit"
+    | "imageLineThickness"
+    | "sourceFillThreshold"
+    | "sourceFillMinStrokePixels"
+    | "strokeGapClosePixels"
+    | "vectorizerLineAdjust"
+    | "vectorizerInkThreshold"
+    | "vectorizerFidelity"
   >,
 ): GraphSourceImage[] {
   if (!Array.isArray(value)) return [];
@@ -452,6 +555,13 @@ function normalizeSourceImages(
       const sourceFillThreshold = clampSourceFillThreshold(record.sourceFillThreshold ?? defaults.sourceFillThreshold);
       const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(record.sourceFillMinStrokePixels ?? defaults.sourceFillMinStrokePixels);
       const strokeGapClosePixels = clampStrokeGapClosePixels(record.strokeGapClosePixels ?? defaults.strokeGapClosePixels);
+      const imageAutoEnhance = normalizeImageAutoEnhance(record.imageAutoEnhance);
+      const imageDenoiseLevel = normalizeImageDenoiseLevel(record.imageDenoiseLevel);
+      const imageEdgeDetection = normalizeImageEdgeDetection(record.imageEdgeDetection);
+      const imageColorQuantization = normalizeImageColorQuantization(record.imageColorQuantization);
+      const vectorizerLineAdjust = clampVectorizerLineAdjust(record.vectorizerLineAdjust ?? defaults.vectorizerLineAdjust);
+      const vectorizerInkThreshold = clampVectorizerInkThreshold(record.vectorizerInkThreshold ?? defaults.vectorizerInkThreshold);
+      const vectorizerFidelity = normalizeVectorizerFidelity(record.vectorizerFidelity ?? defaults.vectorizerFidelity);
       const x = clampSourceX(record.x, graphWidth, width);
       const topPadding = clampPaddingCells(record.topPadding, graphHeight, 0);
       const bottomPadding = clampPaddingCells(record.bottomPadding, graphHeight, 0);
@@ -475,6 +585,13 @@ function normalizeSourceImages(
           sourceFillThreshold,
           sourceFillMinStrokePixels,
           strokeGapClosePixels,
+          imageAutoEnhance,
+          imageDenoiseLevel,
+          imageEdgeDetection,
+          imageColorQuantization,
+          vectorizerLineAdjust,
+          vectorizerInkThreshold,
+          vectorizerFidelity,
           x,
           y,
           topPadding,
@@ -484,6 +601,9 @@ function normalizeSourceImages(
           rotationDegrees,
           flipX,
           flipY,
+          groupId: normalizeGroupId(record.groupId),
+          eraseStrokes: normalizeEraseStrokes(record.eraseStrokes),
+          backgroundRemoval: normalizeBackgroundRemoval(record.backgroundRemoval),
         },
       ];
     })
@@ -502,10 +622,11 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const { cellSizeInches: legacyCellSizeInches, ...cleanMerged } = merged;
   const cellWidth = GRAPH_MAJOR_CELL_PIXELS;
   const cellHeight = GRAPH_MAJOR_CELL_PIXELS;
-  const graphWidthLimit = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / cellWidth));
-  const graphHeightLimit = Math.max(1, Math.floor(MAX_CANVAS_DIMENSION / cellHeight));
-  const rawGraphWidth = Math.max(1, Math.min(graphWidthLimit, Math.round(merged.graphWidth || Math.round((merged.outputWidth || defaultGraphSettings.outputWidth) / cellWidth))));
-  const rawGraphHeight = Math.max(1, Math.min(graphHeightLimit, Math.round(merged.graphHeight || Math.round((merged.outputHeight || defaultGraphSettings.outputHeight) / cellHeight))));
+  const requestedGraphWidth = Math.round(merged.graphWidth || Math.round((merged.outputWidth || defaultGraphSettings.outputWidth) / cellWidth));
+  const requestedGraphHeight = Math.round(merged.graphHeight || Math.round((merged.outputHeight || defaultGraphSettings.outputHeight) / cellHeight));
+  const safeGraphDimensions = clampGraphCellDimensions(requestedGraphWidth, requestedGraphHeight, GRAPH_MAJOR_CELL_PIXELS);
+  const rawGraphWidth = safeGraphDimensions.width;
+  const rawGraphHeight = safeGraphDimensions.height;
   const hasBrokenLegacyArtworkWidth = Number(cleanMerged.imageWidth) > 0 && Number(cleanMerged.imageWidth) <= 0.05;
   const graphWidth = hasBrokenLegacyArtworkWidth ? defaultGraphSettings.graphWidth : rawGraphWidth;
   const graphHeight = hasBrokenLegacyArtworkWidth ? defaultGraphSettings.graphHeight : rawGraphHeight;
@@ -532,8 +653,12 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const outputHeight = imageAreaHeight;
   const imageOffsetX = Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(merged.imageOffsetX ?? 0)));
   const imageOffsetY = Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(merged.imageOffsetY ?? 0)));
-  const outlineColor = isHexColor(cleanMerged.outlineColor) ? cleanMerged.outlineColor : isHexColor(cleanMerged.lineColor) ? cleanMerged.lineColor : DEFAULT_OUTLINE_COLOR;
-  const fillColor = isFillColor(cleanMerged.fillColor) ? cleanMerged.fillColor : TRANSPARENT_FILL_COLOR;
+  const backgroundColor = normalizeCanvasColor(cleanMerged.backgroundColor, DEFAULT_BACKGROUND_COLOR);
+  const outlineColor = normalizeCanvasColor(
+    isHexColor(cleanMerged.outlineColor) ? cleanMerged.outlineColor : cleanMerged.lineColor,
+    DEFAULT_OUTLINE_COLOR,
+  );
+  const fillColor = normalizeCanvasFillColor(cleanMerged.fillColor);
   const fillRegions = normalizeFillRegions(cleanMerged.fillRegions);
   const cellPaints = normalizeCellPaints(cleanMerged.cellPaints);
   const graphShapes = normalizeGraphShapes(cleanMerged.graphShapes);
@@ -541,23 +666,39 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const sourceFillThreshold = clampSourceFillThreshold(cleanMerged.sourceFillThreshold);
   const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(cleanMerged.sourceFillMinStrokePixels);
   const strokeGapClosePixels = clampStrokeGapClosePixels(cleanMerged.strokeGapClosePixels);
+  const imageAutoEnhance = normalizeImageAutoEnhance(cleanMerged.imageAutoEnhance);
+  const imageDenoiseLevel = normalizeImageDenoiseLevel(cleanMerged.imageDenoiseLevel);
+  const imageEdgeDetection = normalizeImageEdgeDetection(cleanMerged.imageEdgeDetection);
+  const imageColorQuantization = normalizeImageColorQuantization(cleanMerged.imageColorQuantization);
+  const imageTraceEngine = normalizeGraphImageTraceEngine(cleanMerged.imageTraceEngine);
+  const vectorizerStrokeWidth = clampVectorizerStrokeWidth(cleanMerged.vectorizerStrokeWidth);
+  const vectorizerStrokeColor = normalizeCanvasColor(cleanMerged.vectorizerStrokeColor, outlineColor);
+  const vectorizerLineAdjust = clampVectorizerLineAdjust(cleanMerged.vectorizerLineAdjust);
+  const vectorizerInkThreshold = clampVectorizerInkThreshold(cleanMerged.vectorizerInkThreshold);
+  const vectorizerFidelity = normalizeVectorizerFidelity(cleanMerged.vectorizerFidelity);
   const clipartAssets = normalizeClipartAssets(cleanMerged.clipartAssets);
   const clipartImages = normalizeClipartImages(cleanMerged.clipartImages, {
     imageLineThickness,
     sourceFillThreshold,
     sourceFillMinStrokePixels,
     strokeGapClosePixels,
+    vectorizerLineAdjust,
+    vectorizerInkThreshold,
+    vectorizerFidelity,
   }).filter((image) => clipartAssets.some((asset) => asset.id === image.assetId));
-  const gridLineColor = isHexColor(cleanMerged.gridLineColor) && cleanMerged.gridLineColor.toLowerCase() !== "#cbd5e1" ? cleanMerged.gridLineColor : DEFAULT_GRID_LINE_COLOR;
+  const gridLineColor = normalizeGraphLineColor(cleanMerged.gridLineColor, DEFAULT_GRID_LINE_COLOR);
   const gridLineLayer = hasBrokenLegacyArtworkWidth
     ? DEFAULT_GRAPH_LINE_LAYER
     : isGraphLineLayer(cleanMerged.gridLineLayer)
       ? cleanMerged.gridLineLayer
       : DEFAULT_GRAPH_LINE_LAYER;
+  const gridLineStyle = isGraphGridLineStyle(cleanMerged.gridLineStyle) ? cleanMerged.gridLineStyle : DEFAULT_GRID_LINE_STYLE;
+  const gridPattern = isGraphGridPattern(cleanMerged.gridPattern) ? cleanMerged.gridPattern : DEFAULT_GRID_PATTERN;
   const showNumbers = typeof cleanMerged.showNumbers === "boolean" ? cleanMerged.showNumbers : true;
   const gridNumberPlacement =
     cleanMerged.gridNumberPlacement === "outside" ? "outside" : defaultGraphSettings.gridNumberPlacement;
   const showPageBreaks = typeof cleanMerged.showPageBreaks === "boolean" ? cleanMerged.showPageBreaks : true;
+  const majorGridEvery = isMajorGridEvery(cleanMerged.majorGridEvery) ? cleanMerged.majorGridEvery : DEFAULT_MAJOR_GRID_EVERY;
   void legacyCellSizeInches;
   const cellSizeCm = DEFAULT_CELL_SIZE_CM;
   const measurementUnit = isMeasurementUnit(cleanMerged.measurementUnit) ? cleanMerged.measurementUnit : defaultGraphSettings.measurementUnit;
@@ -567,6 +708,9 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     sourceFillThreshold,
     sourceFillMinStrokePixels,
     strokeGapClosePixels,
+    vectorizerLineAdjust,
+    vectorizerInkThreshold,
+    vectorizerFidelity,
   });
   const printPaperSize = isPrintPaperSize(cleanMerged.printPaperSize) ? cleanMerged.printPaperSize : DEFAULT_PRINT_PAPER_SIZE;
   const printOrientation = isPrintOrientation(cleanMerged.printOrientation) ? cleanMerged.printOrientation : DEFAULT_PRINT_ORIENTATION;
@@ -593,6 +737,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     gridCellSize: cellWidth,
     outputWidth,
     outputHeight,
+    backgroundColor,
     lineColor: outlineColor,
     outlineColor,
     fillColor,
@@ -601,15 +746,29 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     graphShapes,
     clipartAssets,
     clipartImages,
+    layerGroups: normalizeLayerGroups((cleanMerged as { layerGroups?: unknown }).layerGroups),
     imageLineThickness,
     sourceFillThreshold,
     sourceFillMinStrokePixels,
     strokeGapClosePixels,
+    imageAutoEnhance,
+    imageDenoiseLevel,
+    imageEdgeDetection,
+    imageColorQuantization,
+    imageTraceEngine,
+    vectorizerStrokeWidth,
+    vectorizerStrokeColor,
+    vectorizerLineAdjust,
+    vectorizerInkThreshold,
+    vectorizerFidelity,
     gridLineColor,
     gridLineLayer,
+    gridLineStyle,
+    gridPattern,
     showNumbers,
     gridNumberPlacement,
     showPageBreaks,
+    majorGridEvery,
     imageWidth,
     imageHeight,
     sourceImages,
@@ -617,63 +776,35 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     imageOffsetX,
     imageOffsetY,
     spotShape: "round",
+    blackAndWhite: true,
+    limitedColorMode: true,
+    maxColors: 4,
   };
 }
 
-async function signedImageUrl(bucket: string, path?: string | null) {
-  if (!path) return null;
+async function signedUrlsForBucket(bucket: string, paths: Array<string | null | undefined>) {
+  const uniquePaths = Array.from(new Set(paths.filter((path): path is string => Boolean(path))));
+  const signedByPath = new Map<string, string | null>();
+  if (!uniquePaths.length) return signedByPath;
   const supabase = tryGetSupabaseAdmin();
-  if (!supabase) return null;
-  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60);
-  if (error) return null;
-  return data.signedUrl;
-}
-
-async function signedSourceImages(
-  sourceImages: GraphSourceImage[],
-  signedImageUrlMode: SignedImageUrlMode,
-  originalImagePath: string | null,
-  originalImageUrl: string | null,
-) {
-  if (signedImageUrlMode === "none") {
-    return sourceImages.map(({ url: _url, ...source }) => ({ ...source, url: null }));
+  if (!supabase) return signedByPath;
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrls(uniquePaths, 60 * 60);
+  if (error) return signedByPath;
+  for (const item of data ?? []) {
+    if (item.path) signedByPath.set(item.path, item.signedUrl ?? null);
   }
-
-  return Promise.all(
-    sourceImages.map(async (source) => ({
-      ...source,
-      url: source.path === originalImagePath ? originalImageUrl : await signedImageUrl(ORIGINAL_IMAGES_BUCKET, source.path),
-    })),
-  );
-}
-
-async function signedClipartAssets(clipartAssets: GraphClipartAsset[], signedImageUrlMode: SignedImageUrlMode) {
-  if (signedImageUrlMode === "none") {
-    return clipartAssets.map(({ url: _url, dataUrl: _dataUrl, ...asset }) => ({ ...asset, url: null, dataUrl: null }));
-  }
-
-  return Promise.all(
-    clipartAssets.map(async ({ url: _url, dataUrl: _dataUrl, ...asset }) => ({
-      ...asset,
-      url: asset.path ? await signedImageUrl(ORIGINAL_IMAGES_BUCKET, asset.path) : null,
-      dataUrl: null,
-    })),
-  );
+  return signedByPath;
 }
 
 async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImageUrlMode: SignedImageUrlMode = "all"): Promise<Project> {
   const baseSettings = normalizeGraphSettings(row.settings);
-  const [originalImageUrl, processedImageUrl] = await Promise.all([
-    signedImageUrlMode === "none" ? Promise.resolve(null) : signedImageUrl(ORIGINAL_IMAGES_BUCKET, row.original_image_path),
-    signedImageUrlMode === "all" ? signedImageUrl(PROCESSED_IMAGES_BUCKET, row.processed_image_path) : Promise.resolve(null),
-  ]);
   const fallbackSourceImages = row.original_image_path
     ? [
         {
           id: "original",
           name: sourceNameFromPath(row.original_image_path),
           path: row.original_image_path,
-          url: originalImageUrl,
+          url: null,
           width: baseSettings.imageWidth,
           height: baseSettings.imageHeight,
           measurementUnit: baseSettings.measurementUnit,
@@ -681,6 +812,13 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
           sourceFillThreshold: baseSettings.sourceFillThreshold,
           sourceFillMinStrokePixels: baseSettings.sourceFillMinStrokePixels,
           strokeGapClosePixels: baseSettings.strokeGapClosePixels,
+          imageAutoEnhance: DEFAULT_IMAGE_AUTO_ENHANCE,
+          imageDenoiseLevel: DEFAULT_IMAGE_DENOISE_LEVEL,
+          imageEdgeDetection: DEFAULT_IMAGE_EDGE_DETECTION,
+          imageColorQuantization: DEFAULT_IMAGE_COLOR_QUANTIZATION,
+          vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
+          vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+          vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
           x: defaultSourceX(baseSettings.graphWidth, baseSettings.imageWidth),
           y: 0,
           topPadding: 0,
@@ -693,13 +831,31 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
         },
       ]
     : [];
-  const sourceImages = await signedSourceImages(
-    baseSettings.sourceImages.length ? baseSettings.sourceImages : fallbackSourceImages,
-    signedImageUrlMode,
-    row.original_image_path,
-    originalImageUrl,
-  );
-  const clipartAssets = await signedClipartAssets(baseSettings.clipartAssets ?? [], signedImageUrlMode);
+  const unsignedSourceImages = baseSettings.sourceImages.length ? baseSettings.sourceImages : fallbackSourceImages;
+  const unsignedClipartAssets = baseSettings.clipartAssets ?? [];
+  const [originalSignedUrls, processedSignedUrls] = await Promise.all([
+    signedImageUrlMode === "none"
+      ? Promise.resolve(new Map<string, string | null>())
+      : signedUrlsForBucket(ORIGINAL_IMAGES_BUCKET, [
+          row.original_image_path,
+          ...unsignedSourceImages.map((source) => source.path),
+          ...unsignedClipartAssets.map((asset) => asset.path),
+        ]),
+    signedImageUrlMode === "all"
+      ? signedUrlsForBucket(PROCESSED_IMAGES_BUCKET, [row.processed_image_path])
+      : Promise.resolve(new Map<string, string | null>()),
+  ]);
+  const originalImageUrl = row.original_image_path ? originalSignedUrls.get(row.original_image_path) ?? null : null;
+  const processedImageUrl = row.processed_image_path ? processedSignedUrls.get(row.processed_image_path) ?? null : null;
+  const sourceImages = unsignedSourceImages.map(({ url: _url, ...source }) => ({
+    ...source,
+    url: source.path ? originalSignedUrls.get(source.path) ?? null : null,
+  }));
+  const clipartAssets = unsignedClipartAssets.map(({ url: _url, dataUrl: _dataUrl, ...asset }) => ({
+    ...asset,
+    url: asset.path ? originalSignedUrls.get(asset.path) ?? null : null,
+    dataUrl: null,
+  }));
   const settings = {
     ...baseSettings,
     sourceImages,
@@ -727,48 +883,64 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
   };
 }
 
-export async function getProjectSummaries(query?: string): Promise<ProjectSummary[]> {
+type ProjectSummaryPageOptions = {
+  query?: string;
+  cursor?: string;
+  pageSize?: number;
+};
+
+type ProjectSummaryCursor = {
+  updatedAt: string;
+  id: string;
+};
+
+function decodeProjectCursor(cursor?: string): ProjectSummaryCursor | null {
+  if (!cursor) return null;
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Partial<ProjectSummaryCursor>;
+    if (typeof value.updatedAt !== "string" || Number.isNaN(Date.parse(value.updatedAt))) return null;
+    if (typeof value.id !== "string" || !/^[0-9a-f-]{36}$/i.test(value.id)) return null;
+    return { updatedAt: value.updatedAt, id: value.id };
+  } catch {
+    return null;
+  }
+}
+
+function encodeProjectCursor(cursor: ProjectSummaryCursor) {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+export async function getProjectSummaries(options: ProjectSummaryPageOptions = {}) {
   const session = await requireSession();
   const supabase = tryGetSupabaseAdmin();
-  if (!supabase) return [];
+  if (!supabase) return { projects: [] as ProjectSummary[], nextCursor: null };
+  const pageSize = Math.max(1, Math.min(100, options.pageSize ?? 25));
 
-  let request = supabase
-    .from("projects")
-    .select(
-      "id, user_id, title, description, original_image_path, processed_image_path, width, height, pixel_size, grid_cell_size, color_count, created_at, updated_at",
-    )
-    .eq("user_id", session.userId)
-    .order("updated_at", { ascending: false });
-
-  const normalizedQuery = query?.trim();
-  if (normalizedQuery) {
-    request = request.ilike("title", `%${normalizedQuery}%`);
-  }
-
-  const { data, error } = await request;
+  const normalizedQuery = options.query?.trim();
+  const cursor = decodeProjectCursor(options.cursor);
+  const { data, error } = await supabase.rpc("get_project_summaries", {
+    p_user_id: session.userId,
+    p_query: normalizedQuery || null,
+    p_cursor_updated_at: cursor?.updatedAt ?? null,
+    p_cursor_id: cursor?.id ?? null,
+    p_limit: pageSize + 1,
+  });
   if (error) throw new Error(error.message);
 
-  const rows = (data ?? []) as Array<Omit<DbProject, "settings">>;
-  const ids = rows.map((row) => row.id);
-  const paletteByProject = new Map<string, DbPalette[]>();
+  const allRows = (data ?? []) as Array<Omit<DbProject, "settings"> & { palette_preview: unknown }>;
+  const hasMore = allRows.length > pageSize;
+  const rows = allRows.slice(0, pageSize);
 
-  if (ids.length) {
-    const { data: palettes, error: paletteError } = await supabase
-      .from("project_palettes")
-      .select("id, project_id, color_name, hex_code, locked, cell_count, sort_order")
-      .in("project_id", ids)
-      .order("sort_order", { ascending: true });
+  const [processedSignedUrls, originalSignedUrls] = await Promise.all([
+    signedUrlsForBucket(PROCESSED_IMAGES_BUCKET, rows.map((row) => row.processed_image_path)),
+    signedUrlsForBucket(ORIGINAL_IMAGES_BUCKET, rows.map((row) => row.original_image_path)),
+  ]);
 
-    if (paletteError) throw new Error(paletteError.message);
-    for (const palette of (palettes ?? []) as (DbPalette & { project_id: string })[]) {
-      const list = paletteByProject.get(palette.project_id) ?? [];
-      list.push(palette);
-      paletteByProject.set(palette.project_id, list);
-    }
-  }
-
-  return rows.map((row) => {
-    const palettes = (paletteByProject.get(row.id) ?? []).map(mapPalette).sort((a, b) => a.sortOrder - b.sortOrder);
+  const projects = rows.map((row) => {
+    const paletteRows = Array.isArray(row.palette_preview)
+      ? row.palette_preview.filter((palette): palette is DbPalette => Boolean(palette && typeof palette === "object"))
+      : [];
+    const palettes = paletteRows.map(mapPalette).sort((a, b) => a.sortOrder - b.sortOrder);
     return {
       id: row.id,
       userId: row.user_id,
@@ -783,11 +955,16 @@ export async function getProjectSummaries(query?: string): Promise<ProjectSummar
       colorCount: Number(row.color_count ?? palettes.length),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      originalImageUrl: null,
-      processedImageUrl: null,
+      originalImageUrl: row.original_image_path ? originalSignedUrls.get(row.original_image_path) ?? null : null,
+      processedImageUrl: row.processed_image_path ? processedSignedUrls.get(row.processed_image_path) ?? null : null,
       palettePreview: palettes.slice(0, 6),
     };
   });
+  const lastRow = rows.at(-1);
+  return {
+    projects,
+    nextCursor: hasMore && lastRow ? encodeProjectCursor({ updatedAt: lastRow.updated_at, id: lastRow.id }) : null,
+  };
 }
 
 export async function getProjectForCurrentUser(projectId: string) {
@@ -824,7 +1001,7 @@ export async function assertProjectOwner(projectId: string) {
   const supabase = getSupabaseAdmin();
   const { data, error } = await supabase
     .from("projects")
-    .select("id, user_id, original_image_path, processed_image_path")
+    .select("id, user_id, title, description, original_image_path, processed_image_path, settings, width, height, pixel_size, grid_cell_size, color_count")
     .eq("id", projectId)
     .eq("user_id", session.userId)
     .maybeSingle();
@@ -834,8 +1011,16 @@ export async function assertProjectOwner(projectId: string) {
   return data as {
     id: string;
     user_id: string;
+    title: string;
+    description: string | null;
     original_image_path: string | null;
     processed_image_path: string | null;
+    settings: StoredGraphSettings | null;
+    width: number;
+    height: number;
+    pixel_size: number;
+    grid_cell_size: number;
+    color_count: number;
   };
 }
 

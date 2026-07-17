@@ -1,4 +1,5 @@
 import type { GraphSourceImage } from "@/lib/types";
+import { backgroundRemovalSignature, eraseStrokesSignature } from "./layer-extras.ts";
 
 export const ROTATION_STEP_DEGREES = 15;
 const STACK_POSITION_EPSILON = 0.01;
@@ -13,6 +14,22 @@ export type SourceLayout = {
 
 export type SourcePositionPatch = Partial<Pick<GraphSourceImage, "x" | "y" | "topPadding" | "bottomPadding" | "width" | "height">>;
 export type SourceTransformPatch = Partial<Pick<GraphSourceImage, "rotationDegrees" | "flipX" | "flipY">>;
+export type LayerSnapBox = {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+export type LayerSnapGuide = {
+  axis: "x" | "y";
+  value: number;
+};
+export type LayerSnapResult = {
+  x: number;
+  y: number;
+  guides: LayerSnapGuide[];
+};
 
 export function sourceLayouts(sources: GraphSourceImage[]): SourceLayout[] {
   return sources.map((source) => ({
@@ -86,6 +103,66 @@ export function snapCellToGrid(value: number, gridStep = 0.5) {
   return Math.round((Math.round(value / step) * step) * 100) / 100;
 }
 
+function snapCandidate(value: number, candidates: number[], threshold: number) {
+  let bestValue: number | null = null;
+  let bestDistance = threshold;
+  for (const candidate of candidates) {
+    const distance = Math.abs(value - candidate);
+    if (distance > bestDistance) continue;
+    bestDistance = distance;
+    bestValue = candidate;
+  }
+  return bestValue;
+}
+
+export function snapRectToLayerGuides(
+  rect: LayerSnapBox,
+  targets: LayerSnapBox[],
+  options: { threshold?: number; gridStep?: number; disabled?: boolean } = {},
+): LayerSnapResult {
+  if (options.disabled) return { x: roundCells(rect.x), y: roundCells(rect.y), guides: [] };
+  const threshold = Math.max(0.01, options.threshold ?? 0.25);
+  const gridStep = options.gridStep ?? 0.5;
+  let x = snapCellToGrid(rect.x, gridStep);
+  let y = snapCellToGrid(rect.y, gridStep);
+  const sourceXAnchors = [x, x + rect.width / 2, x + rect.width];
+  const sourceYAnchors = [y, y + rect.height / 2, y + rect.height];
+  const targetXAnchors = targets.flatMap((target) => [target.x, target.x + target.width / 2, target.x + target.width]);
+  const targetYAnchors = targets.flatMap((target) => [target.y, target.y + target.height / 2, target.y + target.height]);
+  const snappedLeft = snapCandidate(sourceXAnchors[0], targetXAnchors, threshold);
+  const snappedCenterX = snapCandidate(sourceXAnchors[1], targetXAnchors, threshold);
+  const snappedRight = snapCandidate(sourceXAnchors[2], targetXAnchors, threshold);
+  const snappedTop = snapCandidate(sourceYAnchors[0], targetYAnchors, threshold);
+  const snappedCenterY = snapCandidate(sourceYAnchors[1], targetYAnchors, threshold);
+  const snappedBottom = snapCandidate(sourceYAnchors[2], targetYAnchors, threshold);
+  const xOptions = [
+    snappedLeft === null ? null : { x: snappedLeft, guide: snappedLeft },
+    snappedCenterX === null ? null : { x: snappedCenterX - rect.width / 2, guide: snappedCenterX },
+    snappedRight === null ? null : { x: snappedRight - rect.width, guide: snappedRight },
+  ].filter((option): option is { x: number; guide: number } => Boolean(option));
+  const yOptions = [
+    snappedTop === null ? null : { y: snappedTop, guide: snappedTop },
+    snappedCenterY === null ? null : { y: snappedCenterY - rect.height / 2, guide: snappedCenterY },
+    snappedBottom === null ? null : { y: snappedBottom - rect.height, guide: snappedBottom },
+  ].filter((option): option is { y: number; guide: number } => Boolean(option));
+  const bestX = xOptions.length
+    ? xOptions.reduce((best, option) => (Math.abs(option.x - x) < Math.abs(best.x - x) ? option : best), xOptions[0])
+    : null;
+  const bestY = yOptions.length
+    ? yOptions.reduce((best, option) => (Math.abs(option.y - y) < Math.abs(best.y - y) ? option : best), yOptions[0])
+    : null;
+  const guides: LayerSnapGuide[] = [];
+  if (bestX && Math.abs(bestX.x - x) <= threshold) {
+    x = roundCells(bestX.x);
+    guides.push({ axis: "x", value: roundCells(bestX.guide) });
+  }
+  if (bestY && Math.abs(bestY.y - y) <= threshold) {
+    y = roundCells(bestY.y);
+    guides.push({ axis: "y", value: roundCells(bestY.guide) });
+  }
+  return { x: roundCells(x), y: roundCells(y), guides };
+}
+
 export function sourceProcessingCacheKey(source: GraphSourceImage, layout: Pick<SourceLayout, "x" | "y" | "width" | "height">) {
   return [
     source.id,
@@ -102,6 +179,31 @@ export function sourceProcessingCacheKey(source: GraphSourceImage, layout: Pick<
     source.sourceFillThreshold,
     source.sourceFillMinStrokePixels,
     source.strokeGapClosePixels,
+    source.imageAutoEnhance ? 1 : 0,
+    source.imageDenoiseLevel,
+    source.imageEdgeDetection,
+    source.imageColorQuantization,
+    source.vectorizerLineAdjust,
+    source.vectorizerInkThreshold,
+    source.vectorizerFidelity,
+    eraseStrokesSignature(source.eraseStrokes),
+    backgroundRemovalSignature(source.backgroundRemoval),
+  ].join("|");
+}
+
+/** Stable identity for a source asset shared by multiple editable layers. */
+export function sourceAssetCacheKey(source: GraphSourceImage) {
+  if (source.path) return `path:${source.path}`;
+  if (source.url) return `url:${source.url}`;
+  return `source:${source.id}`;
+}
+
+export function sourceVectorizerCacheKey(source: GraphSourceImage) {
+  return [
+    "source",
+    sourceAssetCacheKey(source),
+    eraseStrokesSignature(source.eraseStrokes),
+    backgroundRemovalSignature(source.backgroundRemoval),
   ].join("|");
 }
 

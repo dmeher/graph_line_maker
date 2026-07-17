@@ -1,6 +1,15 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  serverExternalPackages: ["@neplex/vectorizer"],
+  // The editor E2E contract requires no framework overlay; the dev-tools badge
+  // also overlaps the mobile bottom dock and intercepts taps.
+  devIndicators: false,
+  experimental: {
+    serverActions: {
+      bodySizeLimit: "2mb",
+    },
+  },
   async headers() {
     return [
       {

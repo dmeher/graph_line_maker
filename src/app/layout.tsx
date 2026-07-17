@@ -1,6 +1,10 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+
+export const viewport: Viewport = {
+  themeColor: "#0b1017",
+};
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -20,10 +24,17 @@ export const metadata: Metadata = {
   description:
     "Convert line-art images into accurate graph-paper pixel charts with palette controls and export tools.",
   applicationName: "Graph Pixel Maker",
+  icons: {
+    icon: [
+      { url: "/icon.svg", type: "image/svg+xml" },
+      { url: "/icons/favicon-32x32.png", sizes: "32x32", type: "image/png" },
+    ],
+    apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+  },
   appleWebApp: {
     capable: true,
     title: "Graph Pixel Maker",
-    statusBarStyle: "default",
+    statusBarStyle: "black-translucent",
   },
 };
 
@@ -53,6 +64,21 @@ const serviceWorkerRegistrationScript = `
 })();
 `;
 
+const themePreferenceScript = `
+(() => {
+  const storageKey = "graph-pixel-theme";
+  const colors = { dark: "#0b1017", light: "#f5f7fa" };
+  let theme = "dark";
+  try {
+    const stored = window.localStorage.getItem(storageKey);
+    if (stored === "dark" || stored === "light") theme = stored;
+  } catch {}
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme;
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", colors[theme]);
+})();
+`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -61,9 +87,13 @@ export default function RootLayout({
   return (
     <html
       lang="en"
+      data-theme="dark"
+      style={{ colorScheme: "dark" }}
+      suppressHydrationWarning
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full bg-background text-foreground antialiased">
+        <script dangerouslySetInnerHTML={{ __html: themePreferenceScript }} />
         {children}
         <script dangerouslySetInnerHTML={{ __html: serviceWorkerRegistrationScript }} />
       </body>

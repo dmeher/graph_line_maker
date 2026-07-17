@@ -32,6 +32,7 @@ export async function sendBrevoOtp(email: string, otp: string) {
       "content-type": "application/json",
       accept: "application/json",
     },
+    signal: AbortSignal.timeout(8_000),
     body: JSON.stringify({
       sender: { email: senderEmail, name: senderName },
       to: [{ email: normalizeEmail(email) }],
@@ -54,4 +55,3 @@ export async function sendBrevoOtp(email: string, otp: string) {
 
   return response.json();
 }
-

@@ -1,26 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
-import { normalizeEmail, verifyOtpHash } from "@/lib/auth/security";
+import { hashOtp, normalizeEmail } from "@/lib/auth/security";
 import { setSessionCookie } from "@/lib/auth/session";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import type { AppRole } from "@/lib/types";
 
-const MAX_VERIFY_ATTEMPTS = 5;
-
-type OtpAttempt = {
-  id: string;
-  app_user_id: string;
-  email: string;
-  otp_hash: string;
-  attempt_count: number;
-  expires_at: string;
+type OtpVerificationResult = {
+  result: "ok" | "not_allowed" | "not_found" | "expired" | "too_many" | "invalid";
+  user_id: string | null;
+  user_email: string | null;
+  user_role: string | null;
 };
 
-type DbUser = {
-  id: string;
-  email: string;
-  role: AppRole;
-  status: "active" | "inactive";
-};
+function verificationError(result: OtpVerificationResult["result"]) {
+  switch (result) {
+    case "not_allowed":
+      return { message: "This email is not allowed for Graph Pixel Maker.", status: 403 };
+    case "not_found":
+      return { message: "OTP not found. Please request a new code.", status: 400 };
+    case "expired":
+      return { message: "OTP expired. Please request a new code.", status: 400 };
+    case "too_many":
+      return { message: "Too many attempts. Please request a new code.", status: 429 };
+    default:
+      return { message: "Invalid OTP.", status: 400 };
+  }
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -33,57 +37,25 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = getSupabaseAdmin();
-    const { data: userData, error: userError } = await supabase
-      .from("app_users")
-      .select("id, email, role, status")
-      .eq("email", email)
-      .eq("status", "active")
-      .maybeSingle();
-
-    if (userError) throw new Error("Unable to verify user access.");
-    if (!userData) {
-      return NextResponse.json({ message: "This email is not allowed for Graph Pixel Maker." }, { status: 403 });
-    }
-
-    const user = userData as DbUser;
-    const { data, error } = await supabase
-      .from("email_otp_attempts")
-      .select("id, app_user_id, email, otp_hash, attempt_count, expires_at")
-      .eq("email", email)
-      .eq("app_user_id", user.id)
-      .eq("purpose", "app_login")
-      .is("consumed_at", null)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
+    const { data, error } = await supabase.rpc("verify_login_otp", {
+      p_email: email,
+      p_otp_hash: hashOtp(email, otp),
+      p_now: new Date().toISOString(),
+    });
     if (error) throw new Error("Unable to verify OTP.");
-    if (!data) return NextResponse.json({ message: "OTP not found. Please request a new code." }, { status: 400 });
 
-    const attempt = data as OtpAttempt;
-    if (new Date(attempt.expires_at).getTime() <= Date.now()) {
-      return NextResponse.json({ message: "OTP expired. Please request a new code." }, { status: 400 });
+    const verification = (data?.[0] ?? null) as OtpVerificationResult | null;
+    if (!verification || verification.result !== "ok") {
+      const failure = verificationError(verification?.result ?? "invalid");
+      return NextResponse.json({ message: failure.message }, { status: failure.status });
+    }
+    if (!verification.user_id || !verification.user_email || !["admin", "member"].includes(verification.user_role || "")) {
+      throw new Error("Unable to verify user access.");
     }
 
-    if (attempt.attempt_count >= MAX_VERIFY_ATTEMPTS) {
-      return NextResponse.json({ message: "Too many attempts. Please request a new code." }, { status: 429 });
-    }
-
-    const nextAttempts = Number(attempt.attempt_count || 0) + 1;
-    if (!verifyOtpHash(email, otp, attempt.otp_hash)) {
-      await supabase.from("email_otp_attempts").update({ attempt_count: nextAttempts }).eq("id", attempt.id);
-      return NextResponse.json({ message: "Invalid OTP." }, { status: 400 });
-    }
-
-    await supabase
-      .from("email_otp_attempts")
-      .update({ attempt_count: nextAttempts, consumed_at: new Date().toISOString() })
-      .eq("id", attempt.id);
-
-    await supabase.from("app_users").update({ last_login_at: new Date().toISOString() }).eq("id", user.id);
-
-    const response = NextResponse.json({ ok: true, email, role: user.role, redirectTo: "/dashboard" });
-    return setSessionCookie(response, { id: user.id, email: user.email, role: user.role });
+    const role = verification.user_role as AppRole;
+    const response = NextResponse.json({ ok: true, email: verification.user_email, role, redirectTo: "/dashboard" });
+    return setSessionCookie(response, { id: verification.user_id, email: verification.user_email, role });
   } catch (error) {
     return NextResponse.json(
       { message: error instanceof Error ? error.message : "Unable to verify OTP." },
@@ -91,4 +63,3 @@ export async function POST(request: NextRequest) {
     );
   }
 }
-

@@ -1,5 +1,5 @@
 import { detectArtworkBounds, estimateArtworkBackground, type ArtworkDetectionResult } from "@/lib/canvas/artwork-detection";
-import { transformedImageSize } from "@/lib/canvas/crop";
+import { transformedImageSize } from "@/lib/canvas/crop-geometry";
 
 type CropDetectionRequest = {
   requestId: number;

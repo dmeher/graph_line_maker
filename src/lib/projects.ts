@@ -5,6 +5,7 @@ import { ORIGINAL_IMAGES_BUCKET, PROCESSED_IMAGES_BUCKET } from "@/lib/constants
 import { requireSession } from "@/lib/auth/session";
 import {
   DEFAULT_CELL_SIZE_CM,
+  DEFAULT_BACKGROUND_COLOR,
   DEFAULT_GRID_LINE_STYLE,
   DEFAULT_GRAPH_LINE_LAYER,
   DEFAULT_GRAPH_HEIGHT_CELLS,
@@ -42,7 +43,9 @@ import {
   isGraphImageEdgeDetection,
   isGraphVectorizerFidelity,
   isGraphLineLayer,
-  isFillColor,
+  normalizeCanvasColor,
+  normalizeCanvasFillColor,
+  normalizeGraphLineColor,
   isMajorGridEvery,
   isPrintHorizontalAlignment,
   isPrintOrientation,
@@ -93,7 +96,7 @@ export const defaultGraphSettings: GraphSettings = {
   gridCellSize: GRAPH_MAJOR_CELL_PIXELS,
   outputWidth: DEFAULT_GRAPH_WIDTH_CELLS * GRAPH_MAJOR_CELL_PIXELS,
   outputHeight: DEFAULT_GRAPH_HEIGHT_CELLS * GRAPH_MAJOR_CELL_PIXELS,
-  backgroundColor: "#ffffff",
+  backgroundColor: DEFAULT_BACKGROUND_COLOR,
   lineColor: DEFAULT_OUTLINE_COLOR,
   outlineColor: DEFAULT_OUTLINE_COLOR,
   fillColor: TRANSPARENT_FILL_COLOR,
@@ -136,9 +139,9 @@ export const defaultGraphSettings: GraphSettings = {
   spotPadding: 0,
   spotShape: "round",
   pageMargin: 24,
-  blackAndWhite: false,
+  blackAndWhite: true,
   limitedColorMode: true,
-  maxColors: 8,
+  maxColors: 4,
 };
 
 function dataSvgUrl(svg: string) {
@@ -260,7 +263,7 @@ function mapPalette(row: DbPalette): PaletteColor {
   return {
     id: row.id,
     name: row.color_name,
-    hex: row.hex_code,
+    hex: normalizeCanvasColor(row.hex_code),
     locked: Boolean(row.locked),
     cellCount: Number(row.cell_count ?? 0),
     sortOrder: Number(row.sort_order ?? 0),
@@ -316,7 +319,8 @@ function clampSourceSizeCells(value: unknown, fallback: number) {
 function normalizeFillRegions(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const entries = Object.entries(value)
-    .filter(([regionId, color]) => /^\d+$/.test(regionId) && isFillColor(color))
+    .filter(([regionId]) => /^\d+$/.test(regionId))
+    .map(([regionId, color]) => [regionId, normalizeCanvasFillColor(color)] as const)
     .slice(0, 500);
   return Object.fromEntries(entries);
 }
@@ -359,8 +363,8 @@ function normalizeCellPaints(value: unknown) {
       const sides = Array.isArray(record.sides)
         ? Array.from(new Set(record.sides.filter((side): side is (typeof GRAPH_CELL_LINE_SIDES)[number] => GRAPH_CELL_LINE_SIDES.includes(side as never))))
         : [];
-      const lineColor = isHexColor(record.lineColor) ? record.lineColor : DEFAULT_OUTLINE_COLOR;
-      const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
+      const lineColor = normalizeCanvasColor(record.lineColor);
+      const fillColor = normalizeCanvasFillColor(record.fillColor);
       const lineWidthValue = Number(record.lineWidth);
       const lineWidth = Math.max(1, Math.min(24, Number.isFinite(lineWidthValue) ? Math.round(lineWidthValue) : 3));
       if (!sides.length && fillColor === TRANSPARENT_FILL_COLOR) return [];
@@ -399,8 +403,8 @@ function normalizeGraphShapes(value: unknown) {
       const heightFallback = kind === "line" || kind === "arrow" ? 0 : 1;
       const width = clampFreeCellCoordinate(record.width, widthFallback);
       const height = clampFreeCellCoordinate(record.height, heightFallback);
-      const strokeColor = isHexColor(record.strokeColor) ? record.strokeColor : DEFAULT_OUTLINE_COLOR;
-      const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
+      const strokeColor = normalizeCanvasColor(record.strokeColor);
+      const fillColor = normalizeCanvasFillColor(record.fillColor);
       const strokeWidthValue = Number(record.strokeWidth);
       const strokeWidth = Math.max(1, Math.min(24, Number.isFinite(strokeWidthValue) ? Math.round(strokeWidthValue) : 3));
       const rawSides = Array.isArray(record.sides) ? record.sides : [...CELL_LINE_SIDE_KEYS];
@@ -481,8 +485,8 @@ function normalizeClipartImages(
       const record = image as Record<string, unknown>;
       const assetId = typeof record.assetId === "string" && record.assetId.trim() ? record.assetId.trim().slice(0, 80) : "";
       if (!assetId) return [];
-      const strokeColor = isHexColor(record.strokeColor) ? record.strokeColor : DEFAULT_OUTLINE_COLOR;
-      const fillColor = isFillColor(record.fillColor) ? record.fillColor : TRANSPARENT_FILL_COLOR;
+      const strokeColor = normalizeCanvasColor(record.strokeColor);
+      const fillColor = normalizeCanvasFillColor(record.fillColor);
       return [
         {
           id: typeof record.id === "string" && record.id.trim() ? record.id.trim().slice(0, 80) : `clipart-image-${index + 1}`,
@@ -650,8 +654,12 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const outputHeight = imageAreaHeight;
   const imageOffsetX = Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(merged.imageOffsetX ?? 0)));
   const imageOffsetY = Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(merged.imageOffsetY ?? 0)));
-  const outlineColor = isHexColor(cleanMerged.outlineColor) ? cleanMerged.outlineColor : isHexColor(cleanMerged.lineColor) ? cleanMerged.lineColor : DEFAULT_OUTLINE_COLOR;
-  const fillColor = isFillColor(cleanMerged.fillColor) ? cleanMerged.fillColor : TRANSPARENT_FILL_COLOR;
+  const backgroundColor = normalizeCanvasColor(cleanMerged.backgroundColor, DEFAULT_BACKGROUND_COLOR);
+  const outlineColor = normalizeCanvasColor(
+    isHexColor(cleanMerged.outlineColor) ? cleanMerged.outlineColor : cleanMerged.lineColor,
+    DEFAULT_OUTLINE_COLOR,
+  );
+  const fillColor = normalizeCanvasFillColor(cleanMerged.fillColor);
   const fillRegions = normalizeFillRegions(cleanMerged.fillRegions);
   const cellPaints = normalizeCellPaints(cleanMerged.cellPaints);
   const graphShapes = normalizeGraphShapes(cleanMerged.graphShapes);
@@ -665,7 +673,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const imageColorQuantization = normalizeImageColorQuantization(cleanMerged.imageColorQuantization);
   const imageTraceEngine = normalizeGraphImageTraceEngine(cleanMerged.imageTraceEngine);
   const vectorizerStrokeWidth = clampVectorizerStrokeWidth(cleanMerged.vectorizerStrokeWidth);
-  const vectorizerStrokeColor = isHexColor(cleanMerged.vectorizerStrokeColor) ? cleanMerged.vectorizerStrokeColor : outlineColor;
+  const vectorizerStrokeColor = normalizeCanvasColor(cleanMerged.vectorizerStrokeColor, outlineColor);
   const vectorizerLineAdjust = clampVectorizerLineAdjust(cleanMerged.vectorizerLineAdjust);
   const vectorizerInkThreshold = clampVectorizerInkThreshold(cleanMerged.vectorizerInkThreshold);
   const vectorizerFidelity = normalizeVectorizerFidelity(cleanMerged.vectorizerFidelity);
@@ -679,7 +687,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     vectorizerInkThreshold,
     vectorizerFidelity,
   }).filter((image) => clipartAssets.some((asset) => asset.id === image.assetId));
-  const gridLineColor = isHexColor(cleanMerged.gridLineColor) && cleanMerged.gridLineColor.toLowerCase() !== "#cbd5e1" ? cleanMerged.gridLineColor : DEFAULT_GRID_LINE_COLOR;
+  const gridLineColor = normalizeGraphLineColor(cleanMerged.gridLineColor, DEFAULT_GRID_LINE_COLOR);
   const gridLineLayer = hasBrokenLegacyArtworkWidth
     ? DEFAULT_GRAPH_LINE_LAYER
     : isGraphLineLayer(cleanMerged.gridLineLayer)
@@ -730,6 +738,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     gridCellSize: cellWidth,
     outputWidth,
     outputHeight,
+    backgroundColor,
     lineColor: outlineColor,
     outlineColor,
     fillColor,
@@ -768,6 +777,9 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     imageOffsetX,
     imageOffsetY,
     spotShape: "round",
+    blackAndWhite: true,
+    limitedColorMode: true,
+    maxColors: 4,
   };
 }
 

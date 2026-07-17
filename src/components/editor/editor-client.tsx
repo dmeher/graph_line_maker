@@ -49,8 +49,8 @@ import {
 import { saveProjectState } from "@/app/(app)/projects/actions";
 import { fullCrop, transformedImageSize, type CropPixels } from "@/lib/canvas/crop";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
-import { MAX_CANVAS_PIXELS, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
-import { detectPreviewPolicy } from "@/lib/canvas/preview-policy";
+import { MAX_WORKING_SOURCE_PIXELS, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
+import { detectPreviewPolicy, workingImagePixelCap } from "@/lib/canvas/preview-policy";
 import { disposeCanvasProcessingWorker, pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
 import { clearCanvasProcessingCaches, findContentBounds, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
 import { removeBackgroundImageData } from "@/lib/canvas/background-removal";
@@ -73,7 +73,9 @@ import {
   ROTATION_STEP_DEGREES,
   normalizeRotationDegrees,
   reorderSourceImages,
+  sourceAssetCacheKey,
   sourceLayouts,
+  sourceProcessingCacheKey,
   sourceRenderOrder,
   sourceVectorizerCacheKey,
   snapRectToLayerGuides,
@@ -97,6 +99,7 @@ import {
 } from "@/lib/editor/layer-extras";
 import {
   DEFAULT_CELL_SIZE_CM,
+  DEFAULT_BACKGROUND_COLOR,
   DEFAULT_GRID_LINE_STYLE,
   DEFAULT_GRAPH_LINE_LAYER,
   DEFAULT_GRAPH_HEIGHT_CELLS,
@@ -142,6 +145,9 @@ import {
   clampVectorizerLineAdjust,
   clampVectorizerStrokeWidth,
   normalizeGraphImageTraceEngine,
+  normalizeCanvasColor,
+  normalizeCanvasFillColor,
+  normalizeGraphLineColor,
   isGraphGridLineStyle,
   isGraphGridPattern,
   isGraphImageColorQuantization,
@@ -150,6 +156,7 @@ import {
   isGraphVectorizerFidelity,
   isGraphLineLayer,
   isFillColor,
+  isCanvasColor,
   isHexColor,
   isMajorGridEvery,
   isPrintHorizontalAlignment,
@@ -158,6 +165,7 @@ import {
   isPrintVerticalAlignment,
   isTransparentFillColor,
 } from "@/lib/graph-paper";
+import type { CanvasColor, CanvasFillColor } from "@/lib/graph-paper";
 import type { GraphBackgroundRemoval, GraphCellLineSide, GraphCellPaint, GraphClipartAsset, GraphClipartImage, GraphEraseStroke, GraphLayerGroup, GraphSettings, GraphShapeDrawing, GraphShapeKind, GraphSourceImage, PaletteColor, Project } from "@/lib/types";
 import { createDebouncedAction } from "@/lib/utils/debounce";
 import { bytesToSize } from "@/lib/utils/format";
@@ -235,7 +243,7 @@ const SOURCE_RESIZE_HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as co
 type SourceResizeHandle = (typeof SOURCE_RESIZE_HANDLES)[number];
 const SOURCE_CORNER_RESIZE_HANDLES: SourceResizeHandle[] = ["nw", "ne", "se", "sw"];
 const CANVAS_SELECTION_BOX_CLASS =
-  "pointer-events-none absolute rounded-[2px] border-2 border-cyan-300 bg-cyan-300/10 shadow-[0_0_0_1px_rgba(2,6,23,0.92),0_0_0_4px_rgba(255,255,255,0.92),0_0_18px_rgba(34,211,238,0.58)]";
+  "pointer-events-none absolute z-20 rounded-[2px] border-2 border-cyan-300 bg-cyan-300/10 shadow-[0_0_0_1px_rgba(2,6,23,0.92),0_0_0_4px_rgba(255,255,255,0.92),0_0_18px_rgba(34,211,238,0.58)]";
 const SELECT_POINTER_CURSOR =
   "url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='24'%20height='24'%20viewBox='0%200%2024%2024'%3E%3Cpath%20d='M5.5%204.8%2018.4%2010.3c.78.34.75%201.46-.04%201.77l-5.32%202.08a1.45%201.45%200%200%200-.81.81l-2.04%205.13c-.32.81-1.47.81-1.78-.01L5.5%204.8Z'%20fill='%23ffffff'%20stroke='%23000000'%20stroke-width='1.4'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E\") 6 5, default";
 type DragState = {
@@ -278,6 +286,9 @@ type DragState = {
   eraseBounds?: ContentBounds;
   erasePlacement?: PlacementTransform;
   eraseLastPoint?: { x: number; y: number };
+  eraseCanvasWidth?: number;
+  eraseCanvasHeight?: number;
+  eraseStartsNewStroke?: boolean;
 };
 type UploadedSourceImage = {
   id: string;
@@ -304,7 +315,7 @@ type ClipartUploadResponse = {
 const ManualCropper = dynamic(() => import("@/components/projects/manual-cropper").then((module) => module.ManualCropper), {
   ssr: false,
   loading: () => (
-    <div className="grid h-full min-h-64 place-items-center text-sm font-semibold text-[#8592a6]">
+    <div className="grid h-full min-h-64 place-items-center text-sm font-semibold text-[var(--editor-text-dim)]">
       Preparing crop
     </div>
   ),
@@ -454,12 +465,33 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, mapper: (item
 }
 
 function fitCanvasToWorkingPixelBudget(canvas: HTMLCanvasElement, itemCount: number) {
-  void itemCount;
+  // Split the active image-cache budget across all source-layer slots. The cap
+  // also leaves headroom for per-layer erase/background-removal derivatives.
+  const workingPixelCap = workingImagePixelCap(EDITOR_PREVIEW_POLICY, itemCount, MAX_WORKING_SOURCE_PIXELS);
   const pixels = canvas.width * canvas.height;
-  if (pixels > MAX_CANVAS_PIXELS) {
-    throw new Error(`Source image contains ${pixels.toLocaleString()} pixels; the safe native-resolution limit is ${MAX_CANVAS_PIXELS.toLocaleString()}.`);
+  if (pixels <= workingPixelCap) return canvas;
+  const scale = Math.sqrt(workingPixelCap / pixels);
+  return resizeImage(canvas, Math.max(1, Math.floor(canvas.width * scale)), Math.max(1, Math.floor(canvas.height * scale)));
+}
+
+type SourceAssetGroup = {
+  key: string;
+  sources: GraphSourceImage[];
+};
+
+function groupSourcesByAsset(sources: GraphSourceImage[]): SourceAssetGroup[] {
+  const groups = new Map<string, SourceAssetGroup>();
+  for (const source of sources) {
+    const key = sourceAssetCacheKey(source);
+    const group = groups.get(key);
+    if (group) group.sources.push(source);
+    else groups.set(key, { key, sources: [source] });
   }
-  return canvas;
+  return Array.from(groups.values());
+}
+
+function revokeObjectUrls(urls: Iterable<string>) {
+  for (const url of new Set(urls)) URL.revokeObjectURL(url);
 }
 
 function clampImageOffset(value: number) {
@@ -628,7 +660,11 @@ function normalizeSourceImagesForEditor(
 
 function normalizeFillRegions(value: GraphSettings["fillRegions"] | undefined) {
   if (!value || typeof value !== "object") return {};
-  return Object.fromEntries(Object.entries(value).filter(([regionId, color]) => /^\d+$/.test(regionId) && isFillColor(color)));
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([regionId]) => /^\d+$/.test(regionId))
+      .map(([regionId, color]) => [regionId, normalizeCanvasFillColor(color)]),
+  );
 }
 
 function normalizeImageAutoEnhance(value: unknown) {
@@ -663,8 +699,8 @@ function normalizeCellPaints(value: GraphSettings["cellPaints"] | undefined): Gr
       const width = Math.max(0.01, Math.min(1000, Number(paint.width) || 1));
       const height = Math.max(0.01, Math.min(1000, Number(paint.height) || 1));
       const sides = Array.from(new Set((Array.isArray(paint.sides) ? paint.sides : []).filter((side): side is GraphCellLineSide => CELL_LINE_SIDE_KEYS.includes(side as GraphCellLineSide))));
-      const lineColor = isHexColor(paint.lineColor) ? paint.lineColor : DEFAULT_OUTLINE_COLOR;
-      const fillColor = isFillColor(paint.fillColor) ? paint.fillColor : TRANSPARENT_FILL_COLOR;
+      const lineColor = normalizeCanvasColor(paint.lineColor);
+      const fillColor = normalizeCanvasFillColor(paint.fillColor);
       const lineWidth = Math.max(1, Math.min(24, Math.round(Number(paint.lineWidth) || 3)));
       if (!sides.length && fillColor === TRANSPARENT_FILL_COLOR) return [];
       return [{
@@ -705,8 +741,8 @@ function normalizeGraphShapes(value: GraphSettings["graphShapes"] | undefined): 
           y: clampFreeCellCoordinate(shape.y, 0),
           width: clampFreeCellCoordinate(shape.width, kind === "line" || kind === "arrow" ? 2 : 1),
           height: clampFreeCellCoordinate(shape.height, kind === "line" || kind === "arrow" ? 0 : 1),
-          strokeColor: isHexColor(shape.strokeColor) ? shape.strokeColor : DEFAULT_OUTLINE_COLOR,
-          fillColor: isFillColor(shape.fillColor) ? shape.fillColor : TRANSPARENT_FILL_COLOR,
+          strokeColor: normalizeCanvasColor(shape.strokeColor),
+          fillColor: normalizeCanvasFillColor(shape.fillColor),
           strokeWidth: Math.max(1, Math.min(24, Math.round(Number(shape.strokeWidth) || 3))),
           sides: sides.length ? sides : [...CELL_LINE_SIDE_KEYS],
           locked: Boolean(shape.locked),
@@ -777,8 +813,8 @@ function normalizeClipartImagesForEditor(
           y: clampFreeCellCoordinate(clipart.y, 0),
           width: clampSourceSizeCells(clipart.width, 4),
           height: clampSourceSizeCells(clipart.height, 4),
-          strokeColor: isHexColor(clipart.strokeColor) ? clipart.strokeColor : DEFAULT_OUTLINE_COLOR,
-          fillColor: isFillColor(clipart.fillColor) ? clipart.fillColor : TRANSPARENT_FILL_COLOR,
+          strokeColor: normalizeCanvasColor(clipart.strokeColor),
+          fillColor: normalizeCanvasFillColor(clipart.fillColor),
           imageLineThickness: clampImageLineThickness(clipart.imageLineThickness ?? defaults.imageLineThickness),
           sourceFillThreshold: clampSourceFillThreshold(clipart.sourceFillThreshold ?? defaults.sourceFillThreshold),
           sourceFillMinStrokePixels: clampSourceFillMinStrokePixels(clipart.sourceFillMinStrokePixels ?? defaults.sourceFillMinStrokePixels),
@@ -805,10 +841,10 @@ function normalizeClipartImagesForEditor(
 }
 
 function sourceResizeHandleClass(handle: SourceResizeHandle, locked: boolean | undefined, visible: boolean) {
-  const base = `absolute grid place-items-center text-[#c3cdda] transition-[opacity,color] duration-150 ${
+  const base = `absolute grid place-items-center text-[var(--editor-text-dim)] transition-[opacity,color] duration-150 ${
     visible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"
   } ${
-    locked ? "opacity-40" : "hover:text-[#e7edf5]"
+    locked ? "opacity-40" : "hover:text-[var(--editor-text)]"
   }`;
   switch (handle) {
     case "n":
@@ -832,7 +868,7 @@ function sourceResizeHandleClass(handle: SourceResizeHandle, locked: boolean | u
 }
 
 function sourceResizeHandleIconClass(handle: SourceResizeHandle) {
-  const base = "grid h-5 w-5 place-items-center rounded-md border border-[#2a3344] bg-slate-50/95 shadow-[0_2px_5px_rgba(15,23,42,0.18)] transition-transform hover:scale-110";
+  const base = "grid h-5 w-5 place-items-center rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] shadow-[0_2px_5px_var(--editor-shadow)] transition-transform hover:scale-110";
   if (handle === "n" || handle === "s") return `${base} h-5 w-7`;
   if (handle === "e" || handle === "w") return `${base} h-7 w-5`;
   return base;
@@ -861,8 +897,12 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const safeGraphDimensions = clampGraphCellDimensions(settings.graphWidth, settings.graphHeight, GRAPH_MAJOR_CELL_PIXELS);
   const graphWidth = safeGraphDimensions.width;
   const graphHeight = safeGraphDimensions.height;
-  const outlineColor = isHexColor(settings.outlineColor) ? settings.outlineColor : isHexColor(settings.lineColor) ? settings.lineColor : DEFAULT_OUTLINE_COLOR;
-  const fillColor = isFillColor(settings.fillColor) ? settings.fillColor : TRANSPARENT_FILL_COLOR;
+  const backgroundColor = normalizeCanvasColor(settings.backgroundColor, DEFAULT_BACKGROUND_COLOR);
+  const outlineColor = normalizeCanvasColor(
+    isHexColor(settings.outlineColor) ? settings.outlineColor : settings.lineColor,
+    DEFAULT_OUTLINE_COLOR,
+  );
+  const fillColor = normalizeCanvasFillColor(settings.fillColor);
   const imageLineThickness = clampImageLineThickness(settings.imageLineThickness ?? DEFAULT_IMAGE_LINE_THICKNESS);
   const sourceFillThreshold = clampSourceFillThreshold(settings.sourceFillThreshold ?? DEFAULT_SOURCE_FILL_THRESHOLD);
   const sourceFillMinStrokePixels = clampSourceFillMinStrokePixels(settings.sourceFillMinStrokePixels ?? DEFAULT_SOURCE_FILL_MIN_STROKE_PIXELS);
@@ -873,11 +913,11 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const imageColorQuantization = normalizeImageColorQuantization(settings.imageColorQuantization);
   const imageTraceEngine = normalizeGraphImageTraceEngine(settings.imageTraceEngine);
   const vectorizerStrokeWidth = clampVectorizerStrokeWidth(settings.vectorizerStrokeWidth);
-  const vectorizerStrokeColor = isHexColor(settings.vectorizerStrokeColor) ? settings.vectorizerStrokeColor : outlineColor;
+  const vectorizerStrokeColor = normalizeCanvasColor(settings.vectorizerStrokeColor, outlineColor);
   const vectorizerLineAdjust = clampVectorizerLineAdjust(settings.vectorizerLineAdjust);
   const vectorizerInkThreshold = clampVectorizerInkThreshold(settings.vectorizerInkThreshold);
   const vectorizerFidelity = normalizeVectorizerFidelity(settings.vectorizerFidelity);
-  const gridLineColor = isHexColor(settings.gridLineColor) && settings.gridLineColor.toLowerCase() !== "#cbd5e1" ? settings.gridLineColor : DEFAULT_GRID_LINE_COLOR;
+  const gridLineColor = normalizeGraphLineColor(settings.gridLineColor, DEFAULT_GRID_LINE_COLOR);
   const gridLineLayer = isGraphLineLayer(settings.gridLineLayer) ? settings.gridLineLayer : DEFAULT_GRAPH_LINE_LAYER;
   const gridLineStyle = isGraphGridLineStyle(settings.gridLineStyle) ? settings.gridLineStyle : DEFAULT_GRID_LINE_STYLE;
   const gridPattern = isGraphGridPattern(settings.gridPattern) ? settings.gridPattern : DEFAULT_GRID_PATTERN;
@@ -940,6 +980,7 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
     gridCellSize: GRAPH_MAJOR_CELL_PIXELS,
     outputWidth,
     outputHeight,
+    backgroundColor,
     lineColor: outlineColor,
     outlineColor,
     fillColor,
@@ -979,8 +1020,9 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
     imageOffsetY: clampImageOffset(settings.imageOffsetY ?? 0),
     spotPadding: 0,
     spotShape: "round",
-    blackAndWhite: false,
-    limitedColorMode: false,
+    blackAndWhite: true,
+    limitedColorMode: true,
+    maxColors: 4,
   };
 }
 
@@ -995,6 +1037,7 @@ function editorDefaultGraphSettings(current: GraphSettings): GraphSettings {
     printOrientation: DEFAULT_PRINT_ORIENTATION,
     printHorizontalAlignment: DEFAULT_PRINT_HORIZONTAL_ALIGNMENT,
     printVerticalAlignment: DEFAULT_PRINT_VERTICAL_ALIGNMENT,
+    backgroundColor: DEFAULT_BACKGROUND_COLOR,
     lineColor: DEFAULT_OUTLINE_COLOR,
     outlineColor: DEFAULT_OUTLINE_COLOR,
     fillColor: TRANSPARENT_FILL_COLOR,
@@ -1168,6 +1211,7 @@ export function EditorClient({ project }: { project: Project }) {
   const [zoom, setZoom] = useState(1);
   const [showOriginal, setShowOriginal] = useState(false);
   const [isDraggingGraph, setIsDraggingGraph] = useState(false);
+  const [dragPreviewSourceId, setDragPreviewSourceId] = useState<string | null>(null);
   const [resizeHandleTarget, setResizeHandleTarget] = useState<ResizeHandleTarget>(null);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [selectedDrawingLayerId, setSelectedDrawingLayerId] = useState<DrawingLayerKey | null>(null);
@@ -1196,15 +1240,15 @@ export function EditorClient({ project }: { project: Project }) {
   const [draftShapeSides, setDraftShapeSides] = useState<GraphCellLineSide[]>(CELL_LINE_SIDE_KEYS);
   const [draftShapeStrokeWidth, setDraftShapeStrokeWidth] = useState(3);
   const [draftShapeStrokeColor, setDraftShapeStrokeColor] = useState(DEFAULT_OUTLINE_COLOR);
-  const [draftShapeFillColor, setDraftShapeFillColor] = useState("#ccfbf1");
+  const [draftShapeFillColor, setDraftShapeFillColor] = useState<CanvasFillColor>(DEFAULT_BACKGROUND_COLOR);
   const [placingGeneratedShape, setPlacingGeneratedShape] = useState(false);
   const [selectedClipartAssetId, setSelectedClipartAssetId] = useState<string | null>(null);
   const [placingClipartAssetId, setPlacingClipartAssetId] = useState<string | null>(null);
   const [uploadingCliparts, setUploadingCliparts] = useState(false);
   const [draftClipartWidthCm, setDraftClipartWidthCm] = useState(4);
   const [draftClipartHeightCm, setDraftClipartHeightCm] = useState(4);
-  const [draftClipartStrokeColor, setDraftClipartStrokeColor] = useState(DEFAULT_OUTLINE_COLOR);
-  const [draftClipartFillColor, setDraftClipartFillColor] = useState(TRANSPARENT_FILL_COLOR);
+  const [draftClipartStrokeColor, setDraftClipartStrokeColor] = useState<CanvasColor>(DEFAULT_OUTLINE_COLOR);
+  const [draftClipartFillColor, setDraftClipartFillColor] = useState<CanvasFillColor>(TRANSPARENT_FILL_COLOR);
   const [generatedImagesCollapsed, setGeneratedImagesCollapsed] = useState(true);
   const [layerChooser, setLayerChooser] = useState<LayerChooser>(null);
   const [canvasViewportGuide, setCanvasViewportGuide] = useState({ left: 0, top: 0, width: 1, height: 1 });
@@ -1247,6 +1291,7 @@ export function EditorClient({ project }: { project: Project }) {
   const clipartCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const processedCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const dragPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const canvasScrollRef = useRef<HTMLDivElement | null>(null);
   const graphStageRef = useRef<HTMLDivElement | null>(null);
   const uploadedSourceObjectUrlsRef = useRef<string[]>([]);
@@ -1569,6 +1614,7 @@ export function EditorClient({ project }: { project: Project }) {
   const selectedFillRegionColor = selectedFillRegion ? currentFillRegionColor(selectedFillRegion) : settings.fillColor;
 
   function updateOutlineColor(color: string) {
+    if (!isCanvasColor(color)) return;
     setSettingsWithHistory((current) => ({
       ...current,
       outlineColor: color,
@@ -1852,7 +1898,7 @@ export function EditorClient({ project }: { project: Project }) {
           width,
           height,
           sides: patch.sides === undefined ? cell.sides : Array.from(new Set(patch.sides.filter((side) => CELL_LINE_SIDE_KEYS.includes(side)))),
-          lineColor: patch.lineColor && isHexColor(patch.lineColor) ? patch.lineColor : cell.lineColor,
+          lineColor: patch.lineColor && isCanvasColor(patch.lineColor) ? patch.lineColor : cell.lineColor,
           fillColor: patch.fillColor && isFillColor(patch.fillColor) ? patch.fillColor : cell.fillColor,
           lineWidth: patch.lineWidth === undefined ? cell.lineWidth : Math.max(1, Math.min(24, Math.round(patch.lineWidth))),
           rotationDegrees: patch.rotationDegrees === undefined ? cell.rotationDegrees : normalizeRotationDegrees(patch.rotationDegrees),
@@ -1876,7 +1922,7 @@ export function EditorClient({ project }: { project: Project }) {
           y: patch.y === undefined ? shape.y : clampFreeCellCoordinate(patch.y, shape.y),
           width: patch.width === undefined ? shape.width : clampSourceSizeCells(patch.width, shape.width),
           height: patch.height === undefined ? shape.height : clampSourceSizeCells(patch.height, shape.height),
-          strokeColor: patch.strokeColor && isHexColor(patch.strokeColor) ? patch.strokeColor : shape.strokeColor,
+          strokeColor: patch.strokeColor && isCanvasColor(patch.strokeColor) ? patch.strokeColor : shape.strokeColor,
           fillColor: patch.fillColor && isFillColor(patch.fillColor) ? patch.fillColor : shape.fillColor,
           strokeWidth: patch.strokeWidth === undefined ? shape.strokeWidth : Math.max(1, Math.min(24, Math.round(patch.strokeWidth))),
           sides: sides.length ? sides : shape.sides,
@@ -1899,7 +1945,7 @@ export function EditorClient({ project }: { project: Project }) {
           y: patch.y === undefined ? clipart.y : clampFreeCellCoordinate(patch.y, clipart.y),
           width: patch.width === undefined ? clipart.width : clampSourceSizeCells(patch.width, clipart.width),
           height: patch.height === undefined ? clipart.height : clampSourceSizeCells(patch.height, clipart.height),
-          strokeColor: patch.strokeColor && isHexColor(patch.strokeColor) ? patch.strokeColor : clipart.strokeColor,
+          strokeColor: patch.strokeColor && isCanvasColor(patch.strokeColor) ? patch.strokeColor : clipart.strokeColor,
           fillColor: patch.fillColor && isFillColor(patch.fillColor) ? patch.fillColor : clipart.fillColor,
           imageLineThickness: patch.imageLineThickness === undefined ? clipart.imageLineThickness : clampImageLineThickness(patch.imageLineThickness),
           sourceFillThreshold: patch.sourceFillThreshold === undefined ? clipart.sourceFillThreshold : clampSourceFillThreshold(patch.sourceFillThreshold),
@@ -2764,16 +2810,23 @@ export function EditorClient({ project }: { project: Project }) {
     }
     const placement = placementForSource(target);
     if (!placement) return;
+    const pristine = sourceCanvasesRef.current.get(target.id);
+    if (!pristine || !pristine.width || !pristine.height) return;
     dragState.eraseTargetSourceId = target.id;
     dragState.eraseBounds = placement.bounds;
     dragState.erasePlacement = placement.placement;
     dragState.eraseLastPoint = undefined;
+    dragState.eraseCanvasWidth = pristine.width;
+    dragState.eraseCanvasHeight = pristine.height;
     if (selectedSourceId !== target.id) selectSourceLayer(target.id);
     eraseImageAtPointer(event, dragState);
   }
 
   function eraseImageAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
     if (!dragState.eraseTargetSourceId || !dragState.eraseBounds || !dragState.erasePlacement) return;
+    const canvasWidth = dragState.eraseCanvasWidth ?? 0;
+    const canvasHeight = dragState.eraseCanvasHeight ?? 0;
+    if (!canvasWidth || !canvasHeight) return;
     const point = graphPointAtPointer(event);
     if (!point) return;
     const sourcePoint = graphPixelToSourcePixel(
@@ -2782,12 +2835,23 @@ export function EditorClient({ project }: { project: Project }) {
       dragState.erasePlacement,
       dragState.eraseBounds,
     );
-    const radius = imageEraserRadiusRef.current;
-    const minStep = Math.max(1, radius * 0.6);
+    const radiusPx = imageEraserRadiusRef.current;
+    const minStep = Math.max(1, radiusPx * 0.6);
     const last = dragState.eraseLastPoint;
     if (last && Math.hypot(sourcePoint.x - last.x, sourcePoint.y - last.y) < minStep) return;
     dragState.eraseLastPoint = sourcePoint;
-    const rounded = { x: Math.round(sourcePoint.x), y: Math.round(sourcePoint.y) };
+    // Persist strokes in resolution-independent UV space so downscaled reloads stay aligned.
+    const u = sourcePoint.x / canvasWidth;
+    const v = sourcePoint.y / canvasHeight;
+    if (u < 0 || u > 1 || v < 0 || v > 1) {
+      // Pointer left the image: end the active stroke so re-entry does not cut a line across it.
+      dragState.eraseStartsNewStroke = true;
+      return;
+    }
+    const startNewStroke = dragState.eraseStartsNewStroke === true;
+    dragState.eraseStartsNewStroke = false;
+    const radius = Math.max(0.001, Math.min(0.5, radiusPx / canvasWidth));
+    const rounded = { x: u, y: v };
     const targetId = dragState.eraseTargetSourceId;
 
     setSettings((current) => {
@@ -2799,7 +2863,7 @@ export function EditorClient({ project }: { project: Project }) {
         pushUndoSettings(current);
         dragState.historyRecorded = true;
         strokes.push({ points: [rounded], radius });
-      } else if (strokes.length) {
+      } else if (strokes.length && !startNewStroke) {
         const activeStroke = strokes[strokes.length - 1];
         strokes[strokes.length - 1] = { ...activeStroke, points: [...activeStroke.points, rounded] };
       } else {
@@ -2922,6 +2986,7 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   function selectFillRegionFromPointer(event: FillRegionPointerEvent, showPalette = false) {
+    if (dragPreviewSourceId) return false;
     const regionId = fillRegionIdAtPointer(event);
     if (!regionId) {
       if (showPalette) setFloatingPalette(null);
@@ -3212,6 +3277,12 @@ export function EditorClient({ project }: { project: Project }) {
     const imageOffsetX = clampImageOffset(dragState.startOffsetX + deltaX);
     const imageOffsetY = clampImageOffset(dragState.startOffsetY + deltaY);
     dragState.moved = dragState.moved || Math.abs(event.clientX - dragState.startClientX) > 3 || Math.abs(event.clientY - dragState.startClientY) > 3;
+    if (dragState.kind === "source" && dragState.sourceId && dragState.moved) {
+      const sourceId = dragState.sourceId;
+      setDragPreviewSourceId((current) => (current === sourceId ? current : sourceId));
+      setSelectedFillRegionId(null);
+      setFloatingPalette(null);
+    }
 
     if (dragState.kind === "viewport") {
       const scroller = canvasScrollRef.current;
@@ -3594,6 +3665,22 @@ export function EditorClient({ project }: { project: Project }) {
   }, []);
 
   useEffect(() => {
+    if (!dragPreviewSourceId) return;
+    const source = settingsRef.current.sourceImages.find((item) => item.id === dragPreviewSourceId);
+    const sourceCanvas = sourceWorkingCanvasesRef.current.get(dragPreviewSourceId) ?? sourceCanvasesRef.current.get(dragPreviewSourceId);
+    const preview = dragPreviewCanvasRef.current;
+    if (!source || !sourceCanvas || !preview) return;
+
+    const bounds = findContentBounds(sourceCanvas);
+    preview.width = Math.max(1, Math.round(bounds.width));
+    preview.height = Math.max(1, Math.round(bounds.height));
+    const context = preview.getContext("2d");
+    if (!context) return;
+    context.clearRect(0, 0, preview.width, preview.height);
+    context.drawImage(sourceCanvas, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, preview.width, preview.height);
+  }, [dragPreviewSourceId]);
+
+  useEffect(() => {
     if (!draftChecked) return;
     const sources = settingsRef.current.sourceImages;
     let cancelled = false;
@@ -3611,7 +3698,7 @@ export function EditorClient({ project }: { project: Project }) {
     sourceWorkingSigRef.current = new Map();
     processedCanvasRef.current = null;
     setProcessing(false);
-    sourcePreviewObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    revokeObjectUrls(sourcePreviewObjectUrlsRef.current.values());
     sourcePreviewObjectUrlsRef.current = new Map();
     setSourceStatus({});
 
@@ -3627,19 +3714,21 @@ export function EditorClient({ project }: { project: Project }) {
 
     const hasPdf = sources.some((source) => isPdfFile({ name: source.name }));
     setNotice({ tone: "info", text: hasPdf ? "Rendering source files..." : "Loading source files..." });
+    const sourceAssets = groupSourcesByAsset(sources);
 
     void mapWithConcurrency(
-      sources,
+      sourceAssets,
       EDITOR_PREVIEW_POLICY.taskConcurrency,
-      async (source) => {
+      async (asset) => {
+        const source = asset.sources.find((candidate) => candidate.url) ?? asset.sources[0];
         try {
           if (!source.url) throw new Error(`${source.name} is not available. Save and reopen the project, then try again.`);
           const canvas = fitCanvasToWorkingPixelBudget(await loadImageToCanvas(source.url, source.name), sources.length);
           const previewUrl = await canvasToObjectUrl(canvas);
-          return { source, canvas, previewUrl, error: null };
+          return { asset, canvas, previewUrl, error: null };
         } catch (error) {
           return {
-            source,
+            asset,
             canvas: null,
             previewUrl: null,
             error: error instanceof Error ? error.message : "Unable to load this source image.",
@@ -3647,11 +3736,9 @@ export function EditorClient({ project }: { project: Project }) {
         }
       },
     )
-      .then((loadedSources) => {
+      .then((loadedAssets) => {
         if (cancelled) {
-          for (const loaded of loadedSources) {
-            if (loaded.previewUrl) URL.revokeObjectURL(loaded.previewUrl);
-          }
+          revokeObjectUrls(loadedAssets.flatMap((loaded) => (loaded.previewUrl ? [loaded.previewUrl] : [])));
           return;
         }
 
@@ -3660,19 +3747,19 @@ export function EditorClient({ project }: { project: Project }) {
         const nextStatus: Record<string, SourceStatus> = {};
         const previousPreviewUrls = sourcePreviewObjectUrlsRef.current;
         let readyCount = 0;
-        for (const { source, canvas, previewUrl, error } of loadedSources) {
+        for (const { asset, canvas, previewUrl, error } of loadedAssets) {
           if (!canvas || !previewUrl) {
-            nextStatus[source.id] = { ready: false, previewUrl: null, error };
+            for (const source of asset.sources) nextStatus[source.id] = { ready: false, previewUrl: null, error };
             continue;
           }
-          canvases.set(source.id, canvas);
-          previewUrls.set(source.id, previewUrl);
-          nextStatus[source.id] = { ready: true, previewUrl, error: null };
-          readyCount += 1;
+          for (const source of asset.sources) {
+            canvases.set(source.id, canvas);
+            previewUrls.set(source.id, previewUrl);
+            nextStatus[source.id] = { ready: true, previewUrl, error: null };
+            readyCount += 1;
+          }
         }
-        for (const [id, url] of previousPreviewUrls.entries()) {
-          if (!previewUrls.has(id)) URL.revokeObjectURL(url);
-        }
+        revokeObjectUrls(Array.from(previousPreviewUrls.entries()).filter(([id]) => !previewUrls.has(id)).map(([, url]) => url));
         sourceCanvasesRef.current = canvases;
         sourceWorkingCanvasesRef.current = new Map();
         sourceWorkingSigRef.current = new Map();
@@ -3706,6 +3793,9 @@ export function EditorClient({ project }: { project: Project }) {
     }
     const strokes = source.eraseStrokes ?? [];
     if (strokes.length) {
+      // Strokes are stored as normalized UV coordinates; scale to this canvas's resolution.
+      const scaleX = canvas.width;
+      const scaleY = canvas.height;
       context.save();
       context.globalCompositeOperation = "destination-out";
       context.lineCap = "round";
@@ -3714,16 +3804,17 @@ export function EditorClient({ project }: { project: Project }) {
       context.fillStyle = "rgba(0,0,0,1)";
       for (const stroke of strokes) {
         if (!stroke.points.length) continue;
+        const radiusPx = Math.max(0.5, stroke.radius * scaleX);
         if (stroke.points.length === 1) {
           context.beginPath();
-          context.arc(stroke.points[0].x, stroke.points[0].y, stroke.radius, 0, Math.PI * 2);
+          context.arc(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY, radiusPx, 0, Math.PI * 2);
           context.fill();
         } else {
-          context.lineWidth = stroke.radius * 2;
+          context.lineWidth = radiusPx * 2;
           context.beginPath();
-          context.moveTo(stroke.points[0].x, stroke.points[0].y);
+          context.moveTo(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY);
           for (let index = 1; index < stroke.points.length; index += 1) {
-            context.lineTo(stroke.points[index].x, stroke.points[index].y);
+            context.lineTo(stroke.points[index].x * scaleX, stroke.points[index].y * scaleY);
           }
           context.stroke();
         }
@@ -3828,8 +3919,20 @@ export function EditorClient({ project }: { project: Project }) {
     if (settings.clipartImages.length && !clipartReady) return;
     let cancelled = false;
     const controller = new AbortController();
-    const processingSignature = buildProcessingSignature(settings);
     const dragActive = isDraggingGraph && dragStateRef.current !== null;
+    const sourcePositionDragActive = dragActive && dragStateRef.current?.kind === "source";
+
+    // A selected source gets a lightweight DOM preview while it is moved. The
+    // authoritative masks are rebuilt once on pointer-up instead of on every move.
+    if (sourcePositionDragActive) {
+      setProcessing(false);
+      return () => {
+        cancelled = true;
+        controller.abort();
+      };
+    }
+
+    const processingSignature = buildProcessingSignature(settings);
 
     if (lastProcessedSignatureRef.current === processingSignature && processedCanvasRef.current) {
       if (!dragActive) forceNextProcessingRef.current = false;
@@ -3886,6 +3989,13 @@ export function EditorClient({ project }: { project: Project }) {
               },
             },
             vectorizerCacheKey: sourceVectorizerCacheKey(layout.source),
+            processingCacheKey: [
+              sourceProcessingCacheKey(layout.source, layout),
+              settings.imageOffsetX,
+              settings.imageOffsetY,
+              settings.graphWidth,
+              settings.graphHeight,
+            ].join("|"),
           };
         });
       const clipartLayers = settings.clipartImages
@@ -3940,6 +4050,7 @@ export function EditorClient({ project }: { project: Project }) {
           setFloatingPalette((current) => (current && result.fillRegions.some((region) => region.id === current.regionId) ? current : null));
           setPalette(result.palette);
           setProcessing(false);
+          setDragPreviewSourceId(null);
           finishComposition({
             retainedBytes: estimateCanvasBytes([
               ...sourceCanvasesRef.current.values(),
@@ -3953,6 +4064,7 @@ export function EditorClient({ project }: { project: Project }) {
           if (controller.signal.aborted) return;
           if (!cancelled) {
             setProcessing(false);
+            setDragPreviewSourceId(null);
             finishComposition();
             setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to process image." });
           }
@@ -4696,6 +4808,10 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   function saveProject(options: { uploadProcessedImage?: boolean } = {}) {
+    if (processing || dragPreviewSourceId) {
+      setNotice({ tone: "info", text: "Finishing the canvas update before saving." });
+      return;
+    }
     const online = typeof navigator === "undefined" ? true : navigator.onLine;
     if (!online) {
       setIsOnline(false);
@@ -4799,7 +4915,7 @@ export function EditorClient({ project }: { project: Project }) {
   useEffect(() => {
     if (!draftChecked || autoSaveIntervalMs <= 0) return;
     const timer = window.setInterval(() => {
-      if (processing || isPending || !title.trim()) return;
+      if (processing || dragPreviewSourceId || isPending || !title.trim()) return;
       const currentSettings = settingsRef.current;
       const signature = [
         title.trim(),
@@ -4817,9 +4933,13 @@ export function EditorClient({ project }: { project: Project }) {
       saveProject({ uploadProcessedImage: false });
     }, autoSaveIntervalMs);
     return () => window.clearInterval(timer);
-  }, [autoSaveIntervalMs, description, draftChecked, isPending, palette, processing, title]);
+  }, [autoSaveIntervalMs, description, draftChecked, dragPreviewSourceId, isPending, palette, processing, title]);
 
   function exportPNG() {
+    if (processing || dragPreviewSourceId) {
+      setNotice({ tone: "info", text: "Finishing the canvas update before exporting." });
+      return;
+    }
     const canvas = processedCanvasRef.current;
     if (!canvas) return;
     const finishExport = startGraphPerformanceStage("export", { format: "png", width: canvas.width, height: canvas.height });
@@ -4833,6 +4953,10 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   function exportPDF() {
+    if (processing || dragPreviewSourceId) {
+      setNotice({ tone: "info", text: "Finishing the canvas update before exporting." });
+      return;
+    }
     const canvas = processedCanvasRef.current;
     if (!canvas) return;
     const finishExport = startGraphPerformanceStage("export", { format: "pdf", width: canvas.width, height: canvas.height });
@@ -4846,6 +4970,10 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   function printGraph() {
+    if (processing || dragPreviewSourceId) {
+      setNotice({ tone: "info", text: "Finishing the canvas update before printing." });
+      return;
+    }
     const canvas = processedCanvasRef.current;
     if (!canvas) return;
     const finishExport = startGraphPerformanceStage("export", { format: "print", width: canvas.width, height: canvas.height });
@@ -4859,6 +4987,10 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   function exportJSON() {
+    if (processing || dragPreviewSourceId) {
+      setNotice({ tone: "info", text: "Finishing the canvas update before exporting." });
+      return;
+    }
     const finishExport = startGraphPerformanceStage("export", { format: "json" });
     void import("@/lib/canvas/exports")
       .then(({ exportSettingsAsJSON }) => {
@@ -4920,8 +5052,10 @@ export function EditorClient({ project }: { project: Project }) {
   const totalCells = Math.round(settings.graphWidth * settings.graphHeight);
   const visibleLayerCount = settings.sourceImages.length + settings.cellPaints.length + settings.graphShapes.length + settings.clipartImages.length;
   const generatedLayerCount = settings.graphShapes.length + settings.clipartImages.length;
-  const statusLabel = sourceErrorCount ? "Source needs attention" : processing ? "Processing graph" : sourceReady || !settings.sourceImages.length ? "Processing complete" : "Loading source files";
-  const statusMeta = sourceErrorCount ? `${sourceErrorCount} issue${sourceErrorCount === 1 ? "" : "s"}` : processing ? "Working" : sourceReady || !settings.sourceImages.length ? "Ready" : "Loading";
+  const canvasUpdatePending = processing || Boolean(dragPreviewSourceId);
+  const canvasUpdateLabel = dragPreviewSourceId ? (isDraggingGraph ? "Positioning layer" : "Finalizing layer") : "Processing graph";
+  const statusLabel = sourceErrorCount ? "Source needs attention" : canvasUpdatePending ? canvasUpdateLabel : sourceReady || !settings.sourceImages.length ? "Processing complete" : "Loading source files";
+  const statusMeta = sourceErrorCount ? `${sourceErrorCount} issue${sourceErrorCount === 1 ? "" : "s"}` : canvasUpdatePending ? "Working" : sourceReady || !settings.sourceImages.length ? "Ready" : "Loading";
   const draftShapePreviewDimensions = draftShapeDimensionsCells();
   const draftClipartPreviewDimensions = draftClipartDimensionsCells(selectedClipartAsset);
   const filteredClipartAssets = useMemo(() => {
@@ -5323,24 +5457,24 @@ export function EditorClient({ project }: { project: Project }) {
 
   function renderLayerActionToolbar() {
     return (
-      <div className="border-b border-[#232c3c] bg-[#131a27]">
-      <div className="flex flex-wrap items-center gap-1 border-b border-[#232c3c] px-2 py-1.5 text-[11px] font-semibold text-[#c3cdda]">
-        <button type="button" onClick={groupSelectedLayers} disabled={!canGroupSelection} className="inline-flex items-center gap-1 rounded border border-[#2a3344] bg-[#141b28] px-2 py-1 disabled:opacity-40" title="Group selected layers (Ctrl/Cmd+G)">
+      <div className="border-b border-[var(--editor-line-soft)] bg-[var(--editor-panel-2)]">
+      <div className="flex flex-wrap items-center gap-1 border-b border-[var(--editor-line-soft)] px-2 py-1.5 text-[11px] font-semibold text-[var(--editor-text-dim)]">
+        <button type="button" onClick={groupSelectedLayers} disabled={!canGroupSelection} className="inline-flex items-center gap-1 rounded border border-[var(--editor-line)] bg-[var(--editor-panel)] px-2 py-1 disabled:opacity-40" title="Group selected layers (Ctrl/Cmd+G)">
           <Group size={14} aria-hidden="true" />Group
         </button>
-        <button type="button" onClick={ungroupSelectedLayers} disabled={!selectionHasGroup} className="inline-flex items-center gap-1 rounded border border-[#2a3344] bg-[#141b28] px-2 py-1 disabled:opacity-40" title="Ungroup selected layers (Ctrl/Cmd+Shift+G)">
+        <button type="button" onClick={ungroupSelectedLayers} disabled={!selectionHasGroup} className="inline-flex items-center gap-1 rounded border border-[var(--editor-line)] bg-[var(--editor-panel)] px-2 py-1 disabled:opacity-40" title="Ungroup selected layers (Ctrl/Cmd+Shift+G)">
           <Ungroup size={14} aria-hidden="true" />Ungroup
         </button>
-        <span className="mx-1 h-5 w-px bg-[#232c3c]" aria-hidden="true" />
-        <button type="button" onClick={copySelectedLayers} disabled={!hasSelectedLayer} className="inline-flex items-center gap-1 rounded border border-[#2a3344] bg-[#141b28] px-2 py-1 disabled:opacity-40" title="Copy selected layers (Ctrl/Cmd+C)">
+        <span className="mx-1 h-5 w-px bg-[var(--editor-line-soft)]" aria-hidden="true" />
+        <button type="button" onClick={copySelectedLayers} disabled={!hasSelectedLayer} className="inline-flex items-center gap-1 rounded border border-[var(--editor-line)] bg-[var(--editor-panel)] px-2 py-1 disabled:opacity-40" title="Copy selected layers (Ctrl/Cmd+C)">
           <Copy size={14} aria-hidden="true" />Copy
         </button>
-        <button type="button" onClick={pasteLayers} disabled={!clipboardCount} className="inline-flex items-center gap-1 rounded border border-[#2a3344] bg-[#141b28] px-2 py-1 disabled:opacity-40" title="Paste layers (Ctrl/Cmd+V)">
+        <button type="button" onClick={pasteLayers} disabled={!clipboardCount} className="inline-flex items-center gap-1 rounded border border-[var(--editor-line)] bg-[var(--editor-panel)] px-2 py-1 disabled:opacity-40" title="Paste layers (Ctrl/Cmd+V)">
           <Copy size={14} aria-hidden="true" />Paste{clipboardCount ? ` (${clipboardCount})` : ""}
         </button>
       </div>
-      <div className="grid grid-cols-9 text-[11px] font-semibold text-[#c3cdda]">
-        <label className={`flex h-14 cursor-pointer flex-col items-center justify-center gap-1 border-r border-[#232c3c] ${uploadingSources ? "opacity-50" : ""}`} title="Add images">
+      <div className="grid grid-cols-9 text-[11px] font-semibold text-[var(--editor-text-dim)]">
+        <label className={`flex h-14 cursor-pointer flex-col items-center justify-center gap-1 border-r border-[var(--editor-line-soft)] ${uploadingSources ? "opacity-50" : ""}`} title="Add images">
           <Plus size={16} aria-hidden="true" />
           <span>Add</span>
           <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
@@ -5349,7 +5483,7 @@ export function EditorClient({ project }: { project: Project }) {
             if (files.length) void uploadSourceImages(files, "Images added to the end.");
           }} />
         </label>
-        <label className={`flex h-14 flex-col items-center justify-center gap-1 border-r border-[#232c3c] ${!selectedSource || selectedSource.locked || uploadingSources ? "cursor-not-allowed opacity-40" : "cursor-pointer"}`} title="Replace selected source">
+        <label className={`flex h-14 flex-col items-center justify-center gap-1 border-r border-[var(--editor-line-soft)] ${!selectedSource || selectedSource.locked || uploadingSources ? "cursor-not-allowed opacity-40" : "cursor-pointer"}`} title="Replace selected source">
           {replacingSourceId ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
           <span>Replace</span>
           <input type="file" accept={IMAGE_ACCEPT} disabled={!selectedSource || selectedSource.locked || uploadingSources} className="sr-only" onChange={(event) => {
@@ -5358,34 +5492,34 @@ export function EditorClient({ project }: { project: Project }) {
             if (file && selectedSource) void uploadSourceImages([file], `"${selectedSource.name}" replaced.`, selectedSource.id);
           }} />
         </label>
-        <button type="button" onClick={() => deleteSelectedLayer()} disabled={!hasSelectedLayer || selectedLayerLocked} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#232c3c] text-red-500 disabled:text-[#6b7688]" title={selectedLayerTitle("Delete")}>
+        <button type="button" onClick={() => deleteSelectedLayer()} disabled={!hasSelectedLayer || selectedLayerLocked} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[var(--editor-line-soft)] text-[var(--red)] disabled:text-[var(--editor-muted)]" title={selectedLayerTitle("Delete")}>
           <Trash2 size={16} aria-hidden="true" />
           <span>Delete</span>
         </button>
-        <button type="button" onClick={toggleSelectedLayerLock} disabled={!hasSelectedLayer} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#232c3c] disabled:text-[#6b7688]" title={selectedLayerTitle(selectedLayerLocked ? "Unlock" : "Lock")}>
+        <button type="button" onClick={toggleSelectedLayerLock} disabled={!hasSelectedLayer} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[var(--editor-line-soft)] disabled:text-[var(--editor-muted)]" title={selectedLayerTitle(selectedLayerLocked ? "Unlock" : "Lock")}>
           {selectedLayerLocked ? <Unlock size={16} aria-hidden="true" /> : <Lock size={16} aria-hidden="true" />}
           <span>{selectedLayerLocked ? "Unlock" : "Lock"}</span>
         </button>
-        <button type="button" onClick={toggleSelectedLayerVisibility} disabled={!hasSelectedLayer} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#232c3c] disabled:text-[#6b7688]" title={selectedLayerTitle(selectedLayerHidden ? "Show" : "Hide")}>
+        <button type="button" onClick={toggleSelectedLayerVisibility} disabled={!hasSelectedLayer} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[var(--editor-line-soft)] disabled:text-[var(--editor-muted)]" title={selectedLayerTitle(selectedLayerHidden ? "Show" : "Hide")}>
           {selectedLayerHidden ? <Eye size={16} aria-hidden="true" /> : <EyeOff size={16} aria-hidden="true" />}
           <span>{selectedLayerHidden ? "Show" : "Hide"}</span>
         </button>
-        <button type="button" onClick={duplicateSelectedLayers} disabled={!hasSelectedLayer || selectedLayerLocked} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#232c3c] disabled:text-[#6b7688]" title={selectedLayerTitle("Duplicate")}>
+        <button type="button" onClick={duplicateSelectedLayers} disabled={!hasSelectedLayer || selectedLayerLocked} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[var(--editor-line-soft)] disabled:text-[var(--editor-muted)]" title={selectedLayerTitle("Duplicate")}>
           <Copy size={16} aria-hidden="true" />
           <span>Duplicate</span>
         </button>
-        <div className="grid h-14 grid-cols-4 grid-rows-2 border-r border-[#232c3c] px-1 py-1 text-[#9aa7ba]" title={selectedLayerTitle("Nudge")}>
+        <div className="grid h-14 grid-cols-4 grid-rows-2 border-r border-[var(--editor-line-soft)] px-1 py-1 text-[var(--editor-text-dim)]" title={selectedLayerTitle("Nudge")}>
           <span className="col-span-4 text-center text-[10px] leading-4">Nudge</span>
-          <button type="button" onClick={() => nudgeSelectedSource(-1, 0)} disabled={!hasSelectedLayer} className="grid place-items-center rounded hover:bg-[#1b2433] disabled:opacity-30" aria-label="Nudge left">←</button>
-          <button type="button" onClick={() => nudgeSelectedSource(0, -1)} disabled={!hasSelectedLayer} className="grid place-items-center rounded hover:bg-[#1b2433] disabled:opacity-30" aria-label="Nudge up">↑</button>
-          <button type="button" onClick={() => nudgeSelectedSource(0, 1)} disabled={!hasSelectedLayer} className="grid place-items-center rounded hover:bg-[#1b2433] disabled:opacity-30" aria-label="Nudge down">↓</button>
-          <button type="button" onClick={() => nudgeSelectedSource(1, 0)} disabled={!hasSelectedLayer} className="grid place-items-center rounded hover:bg-[#1b2433] disabled:opacity-30" aria-label="Nudge right">→</button>
+          <button type="button" onClick={() => nudgeSelectedSource(-1, 0)} disabled={!hasSelectedLayer} className="grid place-items-center rounded hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-30" aria-label="Nudge left">←</button>
+          <button type="button" onClick={() => nudgeSelectedSource(0, -1)} disabled={!hasSelectedLayer} className="grid place-items-center rounded hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-30" aria-label="Nudge up">↑</button>
+          <button type="button" onClick={() => nudgeSelectedSource(0, 1)} disabled={!hasSelectedLayer} className="grid place-items-center rounded hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-30" aria-label="Nudge down">↓</button>
+          <button type="button" onClick={() => nudgeSelectedSource(1, 0)} disabled={!hasSelectedLayer} className="grid place-items-center rounded hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-30" aria-label="Nudge right">→</button>
         </div>
-        <button type="button" onClick={() => moveSelectedLayer(-1)} disabled={!selectedLayerCanMove(-1)} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[#232c3c] disabled:text-[#6b7688]" title="Move selected layer up">
+        <button type="button" onClick={() => moveSelectedLayer(-1)} disabled={!selectedLayerCanMove(-1)} className="flex h-14 flex-col items-center justify-center gap-1 border-r border-[var(--editor-line-soft)] disabled:text-[var(--editor-muted)]" title="Move selected layer up">
           <ArrowUp size={16} aria-hidden="true" />
           <span>Up</span>
         </button>
-        <button type="button" onClick={() => moveSelectedLayer(1)} disabled={!selectedLayerCanMove(1)} className="flex h-14 flex-col items-center justify-center gap-1 disabled:text-[#6b7688]" title="Move selected layer down">
+        <button type="button" onClick={() => moveSelectedLayer(1)} disabled={!selectedLayerCanMove(1)} className="flex h-14 flex-col items-center justify-center gap-1 disabled:text-[var(--editor-muted)]" title="Move selected layer down">
           <ArrowDown size={16} aria-hidden="true" />
           <span>Down</span>
         </button>
@@ -5397,9 +5531,9 @@ export function EditorClient({ project }: { project: Project }) {
   function renderSourceThumbnail(source: GraphSourceImage, className = "h-12 w-12") {
     const previewUrl = sourceStatus[source.id]?.previewUrl;
     return previewUrl ? (
-      <img src={previewUrl} alt="" className={`${className} shrink-0 rounded border border-[#2a3344] bg-[#eef2f7] object-contain p-1`} />
+      <img src={previewUrl} alt="" className={`${className} shrink-0 rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] object-contain p-1`} />
     ) : (
-      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#2a3344] bg-[#eef2f7] text-[#6b7688]`}>
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] text-[var(--editor-muted)]`}>
         <ImageIcon size={16} aria-hidden="true" />
       </span>
     );
@@ -5407,7 +5541,7 @@ export function EditorClient({ project }: { project: Project }) {
 
   function renderCellThumbnail(cell: GraphCellPaint, className = "h-12 w-12") {
     return (
-      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#2a3344] bg-[#eef2f7] p-1`}>
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] p-1`}>
         <span className="h-[70%] w-[70%] border-2" style={{ borderColor: cell.lineColor, backgroundColor: isTransparentFillColor(cell.fillColor) ? "transparent" : cell.fillColor }} />
       </span>
     );
@@ -5415,7 +5549,7 @@ export function EditorClient({ project }: { project: Project }) {
 
   function renderShapeThumbnail(shape: GraphShapeDrawing, className = "h-12 w-12") {
     return (
-      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#2a3344] bg-[#eef2f7] p-1`}>
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] p-1`}>
         <ShapePreviewSvg kind={shape.kind} sides={shape.sides} fillColor={shape.fillColor} strokeColor={shape.strokeColor} strokeWidth={shape.strokeWidth} widthCells={shape.width} heightCells={shape.height} />
         <span className="sr-only">{GRAPH_SHAPE_KIND_LABELS[shape.kind]}</span>
       </span>
@@ -5426,9 +5560,9 @@ export function EditorClient({ project }: { project: Project }) {
     const asset = settings.clipartAssets.find((item) => item.id === clipart.assetId);
     const previewUrl = asset?.url ?? asset?.dataUrl ?? null;
     return previewUrl ? (
-      <img src={previewUrl} alt="" className={`${className} shrink-0 rounded border border-[#2a3344] bg-[#eef2f7] object-contain p-1`} />
+      <img src={previewUrl} alt="" className={`${className} shrink-0 rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] object-contain p-1`} />
     ) : (
-      <span className={`${className} grid shrink-0 place-items-center rounded border border-[#2a3344] bg-[#eef2f7] text-[#6b7688]`}>
+      <span className={`${className} grid shrink-0 place-items-center rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] text-[var(--editor-muted)]`}>
         <ImageIcon size={16} aria-hidden="true" />
       </span>
     );
@@ -5436,14 +5570,14 @@ export function EditorClient({ project }: { project: Project }) {
 
   function renderClipartAdvanced(clipart: GraphClipartImage) {
     return (
-      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[#232c3c] bg-[#161f2e] p-3">
+      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[var(--editor-line)] bg-[var(--editor-panel-2)] p-3">
         <NumberField label="Width (CM)" value={roundMeasure(clipart.width * settings.cellSizeCm)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={clipart.locked} onChange={(value) => updateClipartPhysicalWidthCm(clipart.id, value)} />
         <NumberField label="Height (CM)" value={roundMeasure(clipart.height * settings.cellSizeCm)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={clipart.locked} onChange={(value) => updateClipartPhysicalHeightCm(clipart.id, value)} />
         <NumberField label="Line adjustment" value={clipart.vectorizerLineAdjust} min={MIN_VECTORIZER_LINE_ADJUST} max={MAX_VECTORIZER_LINE_ADJUST} step={0.5} allowDecimalInput disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { vectorizerLineAdjust: value })} />
         <NumberField label="Ink threshold" value={clipart.vectorizerInkThreshold} min={MIN_VECTORIZER_INK_THRESHOLD} max={MAX_VECTORIZER_INK_THRESHOLD} step={1} disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { vectorizerInkThreshold: Math.round(value) })} />
         <label className="grid min-w-0 gap-1.5">
-          <span className="text-xs font-semibold text-[#8592a6]">Fidelity</span>
-          <select value={clipart.vectorizerFidelity} disabled={clipart.locked} onChange={(event) => updateClipartImage(clipart.id, { vectorizerFidelity: event.target.value as GraphClipartImage["vectorizerFidelity"] })} className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-[#141b28] px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60">
+          <span className="text-xs font-semibold text-[var(--editor-text-dim)]">Fidelity</span>
+          <select value={clipart.vectorizerFidelity} disabled={clipart.locked} onChange={(event) => updateClipartImage(clipart.id, { vectorizerFidelity: event.target.value as GraphClipartImage["vectorizerFidelity"] })} className="h-10 w-full min-w-0 rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] px-3 text-sm outline-none focus:border-[var(--editor-accent)] focus:ring-2 focus:ring-[var(--editor-accent-soft)] disabled:opacity-60">
             {GRAPH_VECTORIZER_FIDELITY_KEYS.map((key) => (
               <option key={key} value={key}>{key === "exact" ? "Exact" : "Smooth"}</option>
             ))}
@@ -5454,10 +5588,10 @@ export function EditorClient({ project }: { project: Project }) {
         <ColorPresetField label="Stroke" value={clipart.strokeColor} onChange={(value) => updateClipartImage(clipart.id, { strokeColor: value })} />
         <ColorPresetField label="Fill" value={clipart.fillColor} onChange={(value) => updateClipartImage(clipart.id, { fillColor: value })} allowTransparent />
         <div className="grid grid-cols-4 gap-1 col-span-2">
-          <button type="button" onClick={() => rotateDrawingLayer("clipart", clipart.id, -1)} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => rotateDrawingLayer("clipart", clipart.id, 1)} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => flipDrawingLayer("clipart", clipart.id, "x")} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => flipDrawingLayer("clipart", clipart.id, "y")} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("clipart", clipart.id, -1)} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("clipart", clipart.id, 1)} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("clipart", clipart.id, "x")} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("clipart", clipart.id, "y")} disabled={clipart.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
         </div>
       </div>
     );
@@ -5467,16 +5601,16 @@ export function EditorClient({ project }: { project: Project }) {
     const fillMode = shapeFillMode(shape);
     const supportsSides = shapeSupportsSides(shape.kind);
     return (
-      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[#232c3c] bg-[#161f2e] p-3">
+      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[var(--editor-line)] bg-[var(--editor-panel-2)] p-3">
         <label className="grid min-w-0 gap-1.5">
-          <span className="text-xs font-semibold text-[#8592a6]">Shape</span>
-          <select value={shape.kind} disabled={shape.locked} onChange={(event) => updateGraphShape(shape.id, { kind: event.target.value as GraphShapeKind })} className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-[#141b28] px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60">
+          <span className="text-xs font-semibold text-[var(--editor-text-dim)]">Shape</span>
+          <select value={shape.kind} disabled={shape.locked} onChange={(event) => updateGraphShape(shape.id, { kind: event.target.value as GraphShapeKind })} className="h-10 w-full min-w-0 rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] px-3 text-sm outline-none focus:border-[var(--editor-accent)] focus:ring-2 focus:ring-[var(--editor-accent-soft)] disabled:opacity-60">
             {GENERATED_SHAPE_KIND_KEYS.includes(shape.kind as GeneratedShapeKind) ? null : <option value={shape.kind}>Legacy {GRAPH_SHAPE_KIND_LABELS[shape.kind]}</option>}
             {GENERATED_SHAPE_KIND_KEYS.map((kind) => <option key={kind} value={kind}>{GRAPH_SHAPE_KIND_LABELS[kind]}</option>)}
           </select>
         </label>
         <label className="grid min-w-0 gap-1.5">
-          <span className="text-xs font-semibold text-[#8592a6]">Type</span>
+          <span className="text-xs font-semibold text-[var(--editor-text-dim)]">Type</span>
           <select
             value={fillMode}
             disabled={shape.locked}
@@ -5488,7 +5622,7 @@ export function EditorClient({ project }: { project: Project }) {
                   : { fillColor: TRANSPARENT_FILL_COLOR },
               )
             }
-            className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-[#141b28] px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:opacity-60"
+            className="h-10 w-full min-w-0 rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] px-3 text-sm outline-none focus:border-[var(--editor-accent)] focus:ring-2 focus:ring-[var(--editor-accent-soft)] disabled:opacity-60"
           >
             <option value="outline">Outline</option>
             <option value="filled">Filled</option>
@@ -5506,7 +5640,7 @@ export function EditorClient({ project }: { project: Project }) {
         {supportsSides ? (
           <div className="col-span-2 grid grid-cols-4 gap-1">
             {CELL_LINE_SIDE_KEYS.map((side) => (
-              <label key={`shape-${shape.id}-${side}`} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] bg-[#141b28] px-2 text-xs font-semibold text-[#9aa7ba]">
+              <label key={`shape-${shape.id}-${side}`} className="flex h-9 items-center gap-2 rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] px-2 text-xs font-semibold text-[var(--editor-text-dim)]">
                 <input
                   type="checkbox"
                   checked={shape.sides.includes(side)}
@@ -5523,10 +5657,10 @@ export function EditorClient({ project }: { project: Project }) {
           </div>
         ) : null}
         <div className="grid grid-cols-4 gap-1 col-span-2">
-          <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, -1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, 1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "x")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "y")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, -1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("shape", shape.id, 1)} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "x")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("shape", shape.id, "y")} disabled={shape.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
         </div>
       </div>
     );
@@ -5534,7 +5668,7 @@ export function EditorClient({ project }: { project: Project }) {
 
   function renderCellAdvanced(cell: GraphCellPaint) {
     return (
-      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[#232c3c] bg-[#161f2e] p-3">
+      <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[var(--editor-line)] bg-[var(--editor-panel-2)] p-3">
         <NumberField label="Width (cells)" value={cell.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { width: value })} />
         <NumberField label="Height (cells)" value={cell.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { height: value })} />
         <NumberField label="Left padding (cells)" value={cell.x} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: value })} />
@@ -5546,17 +5680,17 @@ export function EditorClient({ project }: { project: Project }) {
         <ColorPresetField label="Fill" value={cell.fillColor} onChange={(value) => updateCellPaint(cell.id, { fillColor: value })} allowTransparent />
         <div className="grid grid-cols-2 gap-1">
           {CELL_LINE_SIDE_KEYS.map((side) => (
-            <label key={side} className="flex h-9 items-center gap-2 rounded-md border border-[var(--line)] px-2 text-xs font-semibold text-[#9aa7ba]">
+            <label key={side} className="flex h-9 items-center gap-2 rounded-md border border-[var(--editor-line)] px-2 text-xs font-semibold text-[var(--editor-text-dim)]">
               <input type="checkbox" checked={cell.sides.includes(side)} disabled={cell.locked} onChange={() => updateCellPaint(cell.id, { sides: cell.sides.includes(side) ? cell.sides.filter((item) => item !== side) : [...cell.sides, side] })} className="h-4 w-4 accent-[var(--teal)]" />
               {CELL_LINE_SIDE_LABELS[side]}
             </label>
           ))}
         </div>
         <div className="grid grid-cols-4 gap-1 col-span-2">
-          <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, -1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, 1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "x")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "y")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50 disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, -1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Rotate left"><RotateCcw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => rotateDrawingLayer("cell", cell.id, 1)} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Rotate right"><RotateCw size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "x")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Flip horizontal"><FlipHorizontal size={15} aria-hidden="true" /></button>
+          <button type="button" onClick={() => flipDrawingLayer("cell", cell.id, "y")} disabled={cell.locked} className="grid h-10 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-40" title="Flip vertical"><FlipVertical size={15} aria-hidden="true" /></button>
         </div>
       </div>
     );
@@ -5569,13 +5703,13 @@ export function EditorClient({ project }: { project: Project }) {
 
   const sourcePanel = (
     <aside className="editor-panel editor-assets-panel relative flex min-h-0 flex-col">
-      <div className="border-b border-[#2a3344] bg-[#141b28] p-3">
+      <div className="border-b border-[var(--editor-line)] bg-[var(--editor-panel)] p-3">
         <div className="mb-3 flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <p className="truncate text-[13px] font-bold uppercase tracking-wide text-[#e7edf5]">Layers &amp; Library</p>
-            <p className="mt-1 truncate text-xs text-[#9aa7ba]">{visibleLayerCount} layer{visibleLayerCount === 1 ? "" : "s"}</p>
+            <p className="truncate text-[13px] font-bold uppercase tracking-wide text-[var(--editor-text)]">Layers &amp; Library</p>
+            <p className="mt-1 truncate text-xs text-[var(--editor-text-dim)]">{visibleLayerCount} layer{visibleLayerCount === 1 ? "" : "s"}</p>
           </div>
-          <label className={`grid h-8 w-8 shrink-0 place-items-center rounded-md border border-[#2a3344] bg-[#141b28] text-[#c3cdda] hover:border-[#00a3a7] hover:text-[#007174] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add images">
+          <label className={`grid h-8 w-8 shrink-0 place-items-center rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel-2)] text-[var(--editor-text-dim)] hover:border-[var(--editor-accent)] hover:text-[var(--editor-accent)] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add images">
             {uploadingSources ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Plus size={17} aria-hidden="true" />}
             <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
               const files = Array.from(event.target.files ?? []);
@@ -5584,7 +5718,7 @@ export function EditorClient({ project }: { project: Project }) {
             }} />
           </label>
         </div>
-        <div className="grid grid-cols-2 gap-1 rounded-xl border border-[#2a3344] bg-[#161f2e] p-1" role="tablist" aria-label="Layers and library">
+        <div className="grid grid-cols-2 gap-1 rounded-xl border border-[var(--editor-line)] bg-[var(--editor-panel-2)] p-1" role="tablist" aria-label="Layers and library">
           {leftPanelTabs.map((tab) => {
             const Icon = tab.icon;
             const active = leftPanelTab === tab.id;
@@ -5597,23 +5731,24 @@ export function EditorClient({ project }: { project: Project }) {
                 onClick={() => setLeftPanelTab(tab.id)}
                 className={`grid min-h-12 place-items-center rounded-lg border px-1 text-[11px] font-bold transition-colors ${
                   active
-                    ? "border-[#008c8f] bg-[#141b28] text-[#006f72] shadow-sm"
-                    : "border-transparent text-[#9aa7ba] hover:bg-[#1b2433] hover:text-[#e7edf5]"
+                    ? "border-[var(--editor-accent)] bg-[var(--editor-accent-soft)] text-[var(--editor-accent)] shadow-sm"
+                    : "border-transparent text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] hover:text-[var(--editor-text)]"
                 }`}
               >
                 <Icon size={17} strokeWidth={2.1} aria-hidden="true" />
                 <span className="mt-0.5 inline-flex items-center gap-1">
                   {tab.label}
-                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${active ? "bg-teal-50 text-[#007174]" : "bg-[#141b28] text-[#9aa7ba]"}`}>{tab.count}</span>
+                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${active ? "bg-[var(--editor-accent-soft)] text-[var(--editor-accent)]" : "bg-[var(--editor-panel)] text-[var(--editor-text-dim)]"}`}>{tab.count}</span>
                 </span>
               </button>
             );
           })}
         </div>
       </div>
-      <div className="min-h-0 flex-1">
-        <section className={`${leftPanelTab === "library" ? "" : "hidden"} border-b border-[#2a3344] bg-[#141b28]`}>
-          <div className="flex h-10 items-center justify-between border-b border-[#2a3344] px-3">
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className={`${leftPanelTab === "library" ? "flex min-h-0 flex-1 flex-col" : "hidden"}`}>
+        <section className="flex min-h-0 flex-1 flex-col border-b border-[var(--editor-line)] bg-[var(--editor-panel)]">
+          <div className="flex h-10 items-center justify-between border-b border-[var(--editor-line)] px-3">
             <button
               type="button"
               onClick={() => {
@@ -5626,12 +5761,12 @@ export function EditorClient({ project }: { project: Project }) {
               className="inline-flex min-w-0 items-center gap-2 text-left"
               aria-expanded={!sourceCropMode}
             >
-              {sourceCropMode ? <ChevronRight size={15} className="shrink-0 text-[#9aa7ba]" aria-hidden="true" /> : <ChevronDown size={15} className="shrink-0 text-[#9aa7ba]" aria-hidden="true" />}
-              <span className="text-[13px] font-bold uppercase tracking-wide text-[#e7edf5]">Sources</span>
-              <span className="rounded bg-[#1b2433] px-1.5 py-0.5 text-[11px] font-semibold text-[#9aa7ba]">{settings.sourceImages.length}</span>
+              {sourceCropMode ? <ChevronRight size={15} className="shrink-0 text-[var(--editor-text-dim)]" aria-hidden="true" /> : <ChevronDown size={15} className="shrink-0 text-[var(--editor-text-dim)]" aria-hidden="true" />}
+              <span className="text-[13px] font-bold uppercase tracking-wide text-[var(--editor-text)]">Sources</span>
+              <span className="rounded bg-[var(--editor-panel-2)] px-1.5 py-0.5 text-[11px] font-semibold text-[var(--editor-text-dim)]">{settings.sourceImages.length}</span>
             </button>
             <div className="flex items-center gap-1">
-              <label className={`grid h-8 w-8 place-items-center rounded text-[#c3cdda] hover:bg-[#1b2433] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add images">
+              <label className={`grid h-8 w-8 place-items-center rounded text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add images">
                 {uploadingSources ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}
                 <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
                   const files = Array.from(event.target.files ?? []);
@@ -5651,7 +5786,7 @@ export function EditorClient({ project }: { project: Project }) {
                   }
                 }}
                 disabled={!cropSourcePreviewUrl || !cropSource}
-                className="grid h-8 w-8 place-items-center rounded text-[#c3cdda] hover:bg-[#1b2433] disabled:opacity-35"
+                className="grid h-8 w-8 place-items-center rounded text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] disabled:opacity-35"
                 title={sourceCropMode ? "Close source crop tools" : "Crop source images"}
               >
                 <Crop size={17} aria-hidden="true" />
@@ -5659,7 +5794,7 @@ export function EditorClient({ project }: { project: Project }) {
             </div>
           </div>
           {settings.sourceImages.length ? (
-            <div className="divide-y divide-[#232c3c]">
+            <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin divide-y divide-[var(--editor-line-soft)]">
               {settings.sourceImages.map((source) => {
                 const status = sourceStatus[source.id];
                 const key = sourceLayerKey(source.id);
@@ -5671,14 +5806,14 @@ export function EditorClient({ project }: { project: Project }) {
                     key={`source-list-${source.id}`}
                     type="button"
                     onClick={(event) => selectSourceLayer(source.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })}
-                    className={`grid w-full grid-cols-[64px_minmax(0,1fr)_32px] items-center gap-3 px-3 py-2 text-left ${selected ? "bg-[#0f2f30]" : "bg-[#141b28] hover:bg-[#161f2e]"}`}
+                    className={`grid w-full grid-cols-[64px_minmax(0,1fr)_32px] items-center gap-3 px-3 py-2 text-left ${selected ? "bg-[var(--editor-accent-soft)]" : "bg-[var(--editor-panel)] hover:bg-[var(--editor-panel-2)]"}`}
                   >
                     {renderSourceThumbnail(source, "h-16 w-16")}
                     <span className="min-w-0">
-                      <span className="block truncate text-[13px] font-semibold text-[#e7edf5]">{source.name}</span>
-                      <span className="mt-1 block text-[12px] text-[#9aa7ba]">{roundCells(source.width)} x {roundCells(source.height)}</span>
+                      <span className="block truncate text-[13px] font-semibold text-[var(--editor-text)]">{source.name}</span>
+                      <span className="mt-1 block text-[12px] text-[var(--editor-text-dim)]">{roundCells(source.width)} x {roundCells(source.height)}</span>
                     </span>
-                    <span className={`grid h-6 w-6 place-items-center rounded-full border ${status?.error ? "border-red-300 text-red-600" : selected && ready ? "border-[#22c55e] text-[#16a34a]" : "border-[#2a3344] text-[#6b7688]"}`}>
+                    <span className={`grid h-6 w-6 place-items-center rounded-full border ${status?.error ? "border-[var(--danger)] text-[var(--danger)]" : selected && ready ? "border-[var(--green)] text-[var(--green)]" : "border-[var(--editor-line)] text-[var(--editor-muted)]"}`}>
                       {status?.error ? <X size={14} aria-hidden="true" /> : pending ? <Loader2 size={14} className="animate-spin" aria-hidden="true" /> : selected ? <Check size={15} aria-hidden="true" /> : null}
                     </span>
                   </button>
@@ -5686,14 +5821,15 @@ export function EditorClient({ project }: { project: Project }) {
               })}
             </div>
           ) : (
-            <div className="grid min-h-28 place-items-center px-4 py-6 text-center text-sm text-[#9aa7ba]">Upload source files</div>
+            <div className="grid min-h-28 place-items-center px-4 py-6 text-center text-sm text-[var(--editor-text-dim)]">Upload source files</div>
           )}
         </section>
+        </div>
 
-        <section className={`${leftPanelTab === "layers" ? "" : "hidden"} border-b border-[#2a3344] bg-[#141b28]`}>
-          <div className="flex h-10 items-center justify-between border-b border-[#2a3344] px-3">
-            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#e7edf5]">Layers</h2>
-            <label className={`grid h-8 w-8 place-items-center rounded text-[#c3cdda] hover:bg-[#1b2433] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add layer image">
+        <section className={`${leftPanelTab === "layers" ? "" : "hidden"} border-b border-[var(--editor-line)] bg-[var(--editor-panel)]`}>
+          <div className="flex h-10 items-center justify-between border-b border-[var(--editor-line)] px-3">
+            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[var(--editor-text)]">Layers</h2>
+            <label className={`grid h-8 w-8 place-items-center rounded text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add layer image">
               {uploadingSources ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}
               <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
                 const files = Array.from(event.target.files ?? []);
@@ -5704,9 +5840,9 @@ export function EditorClient({ project }: { project: Project }) {
           </div>
           {selectedLayerCount > 1 ? renderLayerActionToolbar() : null}
           {visibleLayerCount ? (
-            <div className="divide-y divide-[#232c3c]">
+            <div className="divide-y divide-[var(--editor-line-soft)]">
               {settings.sourceImages.length > 0 ? (
-                <div className="max-h-[504px] overflow-y-auto scrollbar-thin divide-y divide-[#232c3c]">
+                <div className="max-h-[504px] overflow-y-auto scrollbar-thin divide-y divide-[var(--editor-line-soft)]">
                   {settings.sourceImages.map((source) => {
                     const key = sourceLayerKey(source.id);
                     const selected = selectedSourceId === source.id || selectedLayerKeys.includes(key);
@@ -5716,20 +5852,20 @@ export function EditorClient({ project }: { project: Project }) {
                         key={`layer-source-${source.id}`}
                         onDragOver={handleLayerDragOver("source")}
                         onDrop={handleLayerDrop("source", source.id)}
-                        className={`editor-layer-virtual-row ${selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-[#141b28] text-[#e7edf5] opacity-60" : "bg-[#141b28] text-[#e7edf5]"}`}
+                        className={`editor-layer-virtual-row ${selected ? "bg-[var(--editor-accent)] text-[var(--on-brand)]" : hidden ? "bg-[var(--editor-panel)] text-[var(--editor-text)] opacity-60" : "bg-[var(--editor-panel)] text-[var(--editor-text)]"}`}
                       >
                         <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
-                          <button type="button" onClick={() => toggleSourceVisibility(source.id)} className={selected ? "text-white/90" : "text-[#9aa7ba]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
+                          <button type="button" onClick={() => toggleSourceVisibility(source.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
                           <button type="button" onClick={(event) => selectSourceLayer(source.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="h-11 w-11">
                             {renderSourceThumbnail(source, "h-full w-full")}
                           </button>
                           <button type="button" onClick={(event) => selectSourceLayer(source.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="min-w-0 text-left">
                             <span className="block truncate text-[13px] font-semibold">{source.name}</span>
-                            <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#9aa7ba]"}`}>{hidden ? "Hidden" : "Visible"}</span>
+                            <span className={`mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"}</span>
                           </button>
-                          <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#9aa7ba]"}`}>100%</span>
-                          <button type="button" onClick={() => toggleSourceLock(source.id)} className={selected ? "text-white" : "text-[#9aa7ba]"} title={source.locked ? "Unlock layer" : "Lock layer"}>{source.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
-                          <button type="button" draggable onDragStart={handleLayerDragStart("source", source.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-white/90" : "text-[#9aa7ba]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
+                          <span className={`text-[12px] font-medium ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>100%</span>
+                          <button type="button" onClick={() => toggleSourceLock(source.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={source.locked ? "Unlock layer" : "Lock layer"}>{source.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                          <button type="button" draggable onDragStart={handleLayerDragStart("source", source.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
                         </div>
                       </div>
                     );
@@ -5737,22 +5873,22 @@ export function EditorClient({ project }: { project: Project }) {
                 </div>
               ) : null}
               {generatedLayerCount ? (
-                <div className="bg-[#141b28] text-[#e7edf5]">
+                <div className="bg-[var(--editor-panel)] text-[var(--editor-text)]">
                   <button
                     type="button"
                     onClick={() => setGeneratedImagesCollapsed((value) => !value)}
-                    className="flex h-10 w-full items-center justify-between gap-3 border-y border-[#232c3c] bg-[#131a27] px-3 text-left"
+                    className="flex h-10 w-full items-center justify-between gap-3 border-y border-[var(--editor-line-soft)] bg-[var(--editor-panel-2)] px-3 text-left"
                     aria-expanded={!generatedImagesCollapsed}
                   >
                     <span className="inline-flex min-w-0 items-center gap-2">
-                      {generatedImagesCollapsed ? <ChevronRight size={15} className="shrink-0 text-[#9aa7ba]" aria-hidden="true" /> : <ChevronDown size={15} className="shrink-0 text-[#9aa7ba]" aria-hidden="true" />}
-                      <span className="truncate text-[12px] font-bold uppercase tracking-wide text-[#c3cdda]">Generated images</span>
+                      {generatedImagesCollapsed ? <ChevronRight size={15} className="shrink-0 text-[var(--editor-text-dim)]" aria-hidden="true" /> : <ChevronDown size={15} className="shrink-0 text-[var(--editor-text-dim)]" aria-hidden="true" />}
+                      <span className="truncate text-[12px] font-bold uppercase tracking-wide text-[var(--editor-text-dim)]">Generated images</span>
                     </span>
-                    <span className="rounded bg-[#eef4ff] px-1.5 py-0.5 text-[11px] font-semibold text-[#c3cdda]">{generatedLayerCount}</span>
+                    <span className="rounded bg-[var(--editor-panel)] px-1.5 py-0.5 text-[11px] font-semibold text-[var(--editor-text-dim)]">{generatedLayerCount}</span>
                   </button>
                   {!generatedImagesCollapsed ? (
                     <>
-                      <div className="max-h-[504px] overflow-y-auto scrollbar-thin divide-y divide-[#232c3c]">
+                      <div className="max-h-[504px] overflow-y-auto scrollbar-thin divide-y divide-[var(--editor-line-soft)]">
                         {settings.clipartImages.map((clipart) => {
                         const key = drawingLayerKey("clipart", clipart.id);
                         const selected = selectedDrawingLayerId === key || selectedLayerKeys.includes(key);
@@ -5762,20 +5898,20 @@ export function EditorClient({ project }: { project: Project }) {
                             key={`layer-clipart-${clipart.id}`}
                             onDragOver={handleLayerDragOver("clipart")}
                             onDrop={handleLayerDrop("clipart", clipart.id)}
-                            className={`editor-layer-virtual-row ${selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-[#141b28] text-[#e7edf5] opacity-60" : "bg-[#141b28] text-[#e7edf5]"}`}
+                            className={`editor-layer-virtual-row ${selected ? "bg-[var(--editor-accent)] text-[var(--on-brand)]" : hidden ? "bg-[var(--editor-panel)] text-[var(--editor-text)] opacity-60" : "bg-[var(--editor-panel)] text-[var(--editor-text)]"}`}
                           >
                             <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
-                              <button type="button" onClick={() => toggleDrawingVisibility("clipart", clipart.id)} className={selected ? "text-white/90" : "text-[#9aa7ba]"} title={hidden ? "Show clipart" : "Hide clipart"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
+                              <button type="button" onClick={() => toggleDrawingVisibility("clipart", clipart.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={hidden ? "Show clipart" : "Hide clipart"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
                               <button type="button" onClick={(event) => selectClipartLayer(clipart.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="h-11 w-11">
                                 {renderClipartThumbnail(clipart, "h-full w-full")}
                               </button>
                               <button type="button" onClick={(event) => selectClipartLayer(clipart.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="min-w-0 text-left">
                                 <span className="block truncate text-[13px] font-semibold">{clipart.name}</span>
-                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#9aa7ba]"}`}>{hidden ? "Hidden" : "Visible"}</span>
+                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"}</span>
                               </button>
-                              <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#9aa7ba]"}`}>100%</span>
-                              <button type="button" onClick={() => toggleDrawingLock("clipart", clipart.id)} className={selected ? "text-white" : "text-[#9aa7ba]"} title={clipart.locked ? "Unlock clipart" : "Lock clipart"}>{clipart.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
-                              <button type="button" draggable onDragStart={handleLayerDragStart("clipart", clipart.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-white/90" : "text-[#9aa7ba]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
+                              <span className={`text-[12px] font-medium ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>100%</span>
+                              <button type="button" onClick={() => toggleDrawingLock("clipart", clipart.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={clipart.locked ? "Unlock clipart" : "Lock clipart"}>{clipart.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                              <button type="button" draggable onDragStart={handleLayerDragStart("clipart", clipart.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
                             </div>
                           </div>
                         );
@@ -5789,20 +5925,20 @@ export function EditorClient({ project }: { project: Project }) {
                             key={`layer-shape-${shape.id}`}
                             onDragOver={handleLayerDragOver("shape")}
                             onDrop={handleLayerDrop("shape", shape.id)}
-                            className={`editor-layer-virtual-row ${selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-[#141b28] text-[#e7edf5] opacity-60" : "bg-[#141b28] text-[#e7edf5]"}`}
+                            className={`editor-layer-virtual-row ${selected ? "bg-[var(--editor-accent)] text-[var(--on-brand)]" : hidden ? "bg-[var(--editor-panel)] text-[var(--editor-text)] opacity-60" : "bg-[var(--editor-panel)] text-[var(--editor-text)]"}`}
                           >
                             <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
-                              <button type="button" onClick={() => toggleDrawingVisibility("shape", shape.id)} className={selected ? "text-white/90" : "text-[#9aa7ba]"} title={hidden ? "Show generated image" : "Hide generated image"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
+                              <button type="button" onClick={() => toggleDrawingVisibility("shape", shape.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={hidden ? "Show generated image" : "Hide generated image"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
                               <button type="button" onClick={(event) => selectGeneratedShape(shape.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="h-11 w-11">
                                 {renderShapeThumbnail(shape, "h-full w-full")}
                               </button>
                               <button type="button" onClick={(event) => selectGeneratedShape(shape.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="min-w-0 text-left">
                                 <span className="block truncate text-[13px] font-semibold">{shape.name}</span>
-                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#9aa7ba]"}`}>{hidden ? "Hidden" : "Visible"}</span>
+                                <span className={`mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"}</span>
                               </button>
-                              <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#9aa7ba]"}`}>100%</span>
-                              <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className={selected ? "text-white" : "text-[#9aa7ba]"} title={shape.locked ? "Unlock generated image" : "Lock generated image"}>{shape.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
-                              <button type="button" draggable onDragStart={handleLayerDragStart("shape", shape.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-white/90" : "text-[#9aa7ba]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
+                              <span className={`text-[12px] font-medium ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>100%</span>
+                              <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={shape.locked ? "Unlock generated image" : "Lock generated image"}>{shape.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                              <button type="button" draggable onDragStart={handleLayerDragStart("shape", shape.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
                             </div>
                           </div>
                         );
@@ -5821,42 +5957,42 @@ export function EditorClient({ project }: { project: Project }) {
                     key={`layer-cell-${cell.id}`}
                     onDragOver={handleLayerDragOver("cell")}
                     onDrop={handleLayerDrop("cell", cell.id)}
-                    className={`editor-layer-virtual-row ${selected ? "bg-[#16a6aa] text-white" : hidden ? "bg-[#141b28] text-[#e7edf5] opacity-60" : "bg-[#141b28] text-[#e7edf5]"}`}
+                    className={`editor-layer-virtual-row ${selected ? "bg-[var(--editor-accent)] text-[var(--on-brand)]" : hidden ? "bg-[var(--editor-panel)] text-[var(--editor-text)] opacity-60" : "bg-[var(--editor-panel)] text-[var(--editor-text)]"}`}
                   >
                     <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
-                      <button type="button" onClick={() => toggleDrawingVisibility("cell", cell.id)} className={selected ? "text-white/90" : "text-[#9aa7ba]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
+                      <button type="button" onClick={() => toggleDrawingVisibility("cell", cell.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
                       <button type="button" onClick={(event) => selectCellLayer(cell.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="h-11 w-11">
                         {renderCellThumbnail(cell, "h-full w-full")}
                       </button>
                       <button type="button" onClick={(event) => selectCellLayer(cell.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="min-w-0 text-left">
                         <span className="block truncate text-[13px] font-semibold">{cell.name}</span>
-                        <span className={`mt-0.5 block text-[12px] ${selected ? "text-white/85" : "text-[#9aa7ba]"}`}>{hidden ? "Hidden" : "Visible"}</span>
+                        <span className={`mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"}</span>
                       </button>
-                      <span className={`text-[12px] font-medium ${selected ? "text-white/85" : "text-[#9aa7ba]"}`}>100%</span>
-                      <button type="button" onClick={() => toggleDrawingLock("cell", cell.id)} className={selected ? "text-white" : "text-[#9aa7ba]"} title={cell.locked ? "Unlock layer" : "Lock layer"}>{cell.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
-                      <button type="button" draggable onDragStart={handleLayerDragStart("cell", cell.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-white/90" : "text-[#9aa7ba]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
+                      <span className={`text-[12px] font-medium ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>100%</span>
+                      <button type="button" onClick={() => toggleDrawingLock("cell", cell.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={cell.locked ? "Unlock layer" : "Lock layer"}>{cell.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
+                      <button type="button" draggable onDragStart={handleLayerDragStart("cell", cell.id)} className={`cursor-grab active:cursor-grabbing ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title="Drag to reorder"><Menu size={16} aria-hidden="true" /></button>
                     </div>
                   </div>
                 );
               })}
             </div>
           ) : (
-            <div className="grid min-h-24 place-items-center px-4 py-6 text-center text-sm text-[#9aa7ba]">No layers yet</div>
+            <div className="grid min-h-24 place-items-center px-4 py-6 text-center text-sm text-[var(--editor-text-dim)]">No layers yet</div>
           )}
         </section>
 
-        <section className={`${leftPanelTab === "library" ? "" : "hidden"} border-b border-[#2a3344] bg-[#141b28]`}>
-          <div className="flex h-10 items-center justify-between border-b border-[#2a3344] px-3">
-            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#e7edf5]">Reusable clipart</h2>
-            <Sparkles size={16} className="text-[#9aa7ba]" aria-hidden="true" />
+        <section className={`${leftPanelTab === "library" ? "shrink-0" : "hidden"} border-b border-[var(--editor-line)] bg-[var(--editor-panel)]`}>
+          <div className="flex h-10 items-center justify-between border-b border-[var(--editor-line)] px-3">
+            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[var(--editor-text)]">Reusable clipart</h2>
+            <Sparkles size={16} className="text-[var(--editor-text-dim)]" aria-hidden="true" />
           </div>
           <div className="space-y-3 p-3">
-            <div className="rounded-xl border border-[#232c3c] bg-[#161f2e] p-3">
+            <div className="rounded-xl border border-[var(--editor-line-soft)] bg-[var(--editor-panel-2)] p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs font-bold uppercase tracking-wide text-[#c3cdda]">Source imports</span>
-                <span className="rounded-full bg-[#141b28] px-2 py-0.5 text-[11px] font-semibold text-[#9aa7ba]">{settings.sourceImages.length}</span>
+                <span className="text-xs font-bold uppercase tracking-wide text-[var(--editor-text-dim)]">Source imports</span>
+                <span className="rounded-full bg-[var(--editor-panel)] px-2 py-0.5 text-[11px] font-semibold text-[var(--editor-text-dim)]">{settings.sourceImages.length}</span>
               </div>
-              <label className={`inline-flex h-9 w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-semibold text-[#c3cdda] hover:border-[#008c8f] hover:bg-teal-50 ${uploadingSources ? "cursor-wait opacity-60" : ""}`}>
+              <label className={`inline-flex h-9 w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] text-xs font-semibold text-[var(--editor-text-dim)] hover:border-[var(--editor-accent)] hover:bg-[var(--editor-accent-soft)] ${uploadingSources ? "cursor-wait opacity-60" : ""}`}>
                 {uploadingSources ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Plus size={15} aria-hidden="true" />}
                 Add source images
                 <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
@@ -5867,12 +6003,12 @@ export function EditorClient({ project }: { project: Project }) {
               </label>
             </div>
 
-            <div className="rounded-xl border border-[#232c3c] bg-[#161f2e] p-3">
+            <div className="rounded-xl border border-[var(--editor-line-soft)] bg-[var(--editor-panel-2)] p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className="text-xs font-bold uppercase tracking-wide text-[#c3cdda]">Clipart assets</span>
-                <span className="rounded-full bg-[#141b28] px-2 py-0.5 text-[11px] font-semibold text-[#9aa7ba]">{settings.clipartAssets.length}</span>
+                <span className="text-xs font-bold uppercase tracking-wide text-[var(--editor-text-dim)]">Clipart assets</span>
+                <span className="rounded-full bg-[var(--editor-panel)] px-2 py-0.5 text-[11px] font-semibold text-[var(--editor-text-dim)]">{settings.clipartAssets.length}</span>
               </div>
-              <label className={`mb-3 inline-flex h-9 w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-semibold text-[#c3cdda] hover:border-[#008c8f] hover:bg-teal-50 ${uploadingCliparts ? "cursor-wait opacity-60" : ""}`}>
+              <label className={`mb-3 inline-flex h-9 w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] text-xs font-semibold text-[var(--editor-text-dim)] hover:border-[var(--editor-accent)] hover:bg-[var(--editor-accent-soft)] ${uploadingCliparts ? "cursor-wait opacity-60" : ""}`}>
                 {uploadingCliparts ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Plus size={15} aria-hidden="true" />}
                 Upload clipart
                 <input
@@ -5889,7 +6025,7 @@ export function EditorClient({ project }: { project: Project }) {
                 />
               </label>
               {settings.clipartAssets.length ? (
-                <div className="max-h-72 overflow-y-auto rounded-lg border border-[#232c3c] bg-[#eef2f7] p-1">
+                <div className="max-h-72 overflow-y-auto scrollbar-thin rounded-lg border border-[var(--editor-line-soft)] bg-[var(--editor-panel)] p-1">
                   {settings.clipartAssets.map((asset) => {
                     const previewUrl = asset.url ?? asset.dataUrl ?? null;
                     const selected = selectedClipartAsset?.id === asset.id;
@@ -5903,26 +6039,26 @@ export function EditorClient({ project }: { project: Project }) {
                           setDrawTab("clipart");
                           setSettingsPanelCollapsed(false);
                         }}
-                        className={`grid w-full grid-cols-[40px_minmax(0,1fr)_22px] items-center gap-2 rounded-md px-2 py-1.5 text-left ${selected ? "bg-[#0f2f30]" : "hover:bg-[#161f2e]"}`}
+                        className={`grid w-full grid-cols-[40px_minmax(0,1fr)_22px] items-center gap-2 rounded-md px-2 py-1.5 text-left ${selected ? "bg-[var(--editor-accent-soft)]" : "hover:bg-[var(--editor-panel-2)]"}`}
                       >
                         {previewUrl ? (
-                          <img src={previewUrl} alt="" className="h-10 w-10 rounded border border-[#2a3344] bg-[#eef2f7] object-contain p-1" />
+                          <img src={previewUrl} alt="" className="h-10 w-10 rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] object-contain p-1" />
                         ) : (
-                          <span className="grid h-10 w-10 place-items-center rounded border border-[#2a3344] bg-[#eef2f7] text-[#6b7688]">
+                          <span className="grid h-10 w-10 place-items-center rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] text-[var(--editor-muted)]">
                             <ImageIcon size={15} aria-hidden="true" />
                           </span>
                         )}
                         <span className="min-w-0">
-                          <span className="block truncate text-[12px] font-semibold text-[#e7edf5]">{asset.name}</span>
-                          <span className="block truncate text-[11px] text-[#9aa7ba]">{asset.width} x {asset.height}</span>
+                          <span className="block truncate text-[12px] font-semibold text-[var(--editor-text)]">{asset.name}</span>
+                          <span className="block truncate text-[11px] text-[var(--editor-text-dim)]">{asset.width} x {asset.height}</span>
                         </span>
-                        {selected ? <Check size={15} className="text-[#008c8f]" aria-hidden="true" /> : null}
+                        {selected ? <Check size={15} className="text-[var(--editor-accent)]" aria-hidden="true" /> : null}
                       </button>
                     );
                   })}
                 </div>
               ) : (
-                <div className="rounded-lg border border-dashed border-[#2a3344] bg-[#141b28] px-3 py-5 text-center text-xs font-medium text-[#9aa7ba]">
+                <div className="rounded-lg border border-dashed border-[var(--editor-line)] bg-[var(--editor-panel)] px-3 py-5 text-center text-xs font-medium text-[var(--editor-text-dim)]">
                   Upload clipart once, then reuse it from Draw &gt; Clipart.
                 </div>
               )}
@@ -5931,19 +6067,19 @@ export function EditorClient({ project }: { project: Project }) {
         </section>
 
         <section className="hidden" aria-hidden="true">
-          <div className="flex h-10 items-center justify-between border-b border-[#2a3344] px-3">
-            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#e7edf5]">Status</h2>
-            <ChevronDown size={16} className="text-[#9aa7ba]" aria-hidden="true" />
+          <div className="flex h-10 items-center justify-between border-b border-[var(--editor-line)] px-3">
+            <h2 className="text-[13px] font-bold uppercase tracking-wide text-[var(--editor-text)]">Status</h2>
+            <ChevronDown size={16} className="text-[var(--editor-text-dim)]" aria-hidden="true" />
           </div>
-          <div className="space-y-3 p-3 text-[13px] text-[#9aa7ba]">
+          <div className="space-y-3 p-3 text-[13px] text-[var(--editor-text-dim)]">
             <div className="flex items-center justify-between gap-3">
-              <span className="inline-flex min-w-0 items-center gap-2 font-semibold text-[#c3cdda]">
-                <span className={`grid h-5 w-5 place-items-center rounded-full ${sourceErrorCount ? "bg-red-500" : processing || (!sourceReady && settings.sourceImages.length) ? "bg-[#6b7688]" : "bg-[#22c55e]"} text-white`}>
+              <span className="inline-flex min-w-0 items-center gap-2 font-semibold text-[var(--editor-text-dim)]">
+                <span className={`grid h-5 w-5 place-items-center rounded-full ${sourceErrorCount ? "bg-[var(--red)]" : processing || (!sourceReady && settings.sourceImages.length) ? "bg-[var(--editor-muted)]" : "bg-[var(--green)]"} text-[var(--on-brand)]`}>
                   {sourceErrorCount ? <X size={12} aria-hidden="true" /> : processing || (!sourceReady && settings.sourceImages.length) ? <Loader2 size={12} className="animate-spin" aria-hidden="true" /> : <Check size={12} aria-hidden="true" />}
                 </span>
                 <span className="truncate">{statusLabel}</span>
               </span>
-              <span className="shrink-0 text-[#9aa7ba]">{statusMeta}</span>
+              <span className="shrink-0 text-[var(--editor-text-dim)]">{statusMeta}</span>
             </div>
             <p>Cells: {settings.graphWidth} x {settings.graphHeight} ({formatCount(totalCells)})</p>
             <p>Colors: {palette.length}</p>
@@ -5963,11 +6099,11 @@ export function EditorClient({ project }: { project: Project }) {
         className="group absolute inset-y-0 right-0 hidden w-3 cursor-col-resize touch-none place-items-center lg:grid"
       >
         <span
-          className="absolute top-1/2 right-1.5 h-[80vh] w-px -translate-y-1/2 bg-slate-200 opacity-0 transition-colors transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-hover:bg-[var(--teal)]"
+          className="absolute top-1/2 right-1.5 h-[80vh] w-px -translate-y-1/2 bg-[var(--editor-line)] opacity-0 transition-colors transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-hover:bg-[var(--teal)]"
           aria-hidden="true"
         />
         <span
-          className={`grid h-6 w-6 place-items-center rounded-full border border-[var(--line)] bg-[#141b28] text-[#8592a6] shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${
+          className={`grid h-6 w-6 place-items-center rounded-full border border-[var(--editor-line)] bg-[var(--editor-panel)] text-[var(--editor-text-dim)] shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${
             resizingPanelSide === "left" ? "opacity-100" : "opacity-0"
           }`}
           aria-hidden="true"
@@ -6080,24 +6216,24 @@ export function EditorClient({ project }: { project: Project }) {
   const floatingPaletteNode =
     floatingPalette && floatingFillRegion ? (
       <div
-        className="fixed z-50 w-[244px] rounded-md border border-[var(--line)] bg-[#141b28] p-3 shadow-lg"
+        className="fixed z-50 w-[244px] rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] p-3 shadow-[0_20px_55px_var(--editor-shadow)]"
         style={{ left: floatingPalette.x, top: floatingPalette.y }}
       >
         <div className="mb-3 flex items-center justify-between gap-3">
-          <span className="inline-flex min-w-0 items-center gap-2 text-xs font-semibold text-[#9aa7ba]">
+          <span className="inline-flex min-w-0 items-center gap-2 text-xs font-semibold text-[var(--editor-text-dim)]">
             <Pipette size={14} aria-hidden="true" />
             Fill {floatingFillRegion.id}
           </span>
           <button
             type="button"
             onClick={() => setFloatingPalette(null)}
-            className="grid h-7 w-7 place-items-center rounded-md border border-[var(--line)] text-[#9aa7ba] hover:bg-slate-50"
+            className="grid h-7 w-7 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)]"
             title="Close"
           >
             <X size={13} aria-hidden="true" />
           </button>
         </div>
-        <div className="grid grid-cols-7 gap-1.5">
+        <div className="grid grid-cols-4 gap-1.5">
           {PRESET_GRAPH_COLORS.map((color) => {
             const selected = color.hex.toLowerCase() === floatingFillRegionColor.toLowerCase();
             return (
@@ -6108,7 +6244,7 @@ export function EditorClient({ project }: { project: Project }) {
                   updateFillRegionColor(floatingFillRegion.id, color.hex);
                   setFloatingPalette(null);
                 }}
-                className={`h-7 rounded-sm border ${selected ? "border-[#0b0f16] ring-2 ring-slate-300" : "border-[#2a3344]"}`}
+                className={`h-7 rounded-sm border ${selected ? "border-[var(--editor-text)] ring-2 ring-[var(--editor-accent)]" : "border-[var(--editor-line)]"}`}
                 style={{ backgroundColor: color.hex }}
                 title={color.name}
                 aria-label={`Apply ${color.name}`}
@@ -6121,41 +6257,31 @@ export function EditorClient({ project }: { project: Project }) {
               updateFillRegionColor(floatingFillRegion.id, TRANSPARENT_FILL_COLOR);
               setFloatingPalette(null);
             }}
-            className={`h-7 rounded-sm border bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:10px_10px] bg-[position:0_0,0_5px,5px_-5px,-5px_0] ${isTransparentFillColor(floatingFillRegionColor) ? "border-[#0b0f16] ring-2 ring-slate-300" : "border-[#2a3344]"}`}
+            className={`h-7 rounded-sm border bg-[linear-gradient(45deg,var(--checker-mark)_25%,transparent_25%),linear-gradient(-45deg,var(--checker-mark)_25%,transparent_25%),linear-gradient(45deg,transparent_75%,var(--checker-mark)_75%),linear-gradient(-45deg,transparent_75%,var(--checker-mark)_75%)] bg-[length:10px_10px] bg-[position:0_0,0_5px,5px_-5px,-5px_0] ${isTransparentFillColor(floatingFillRegionColor) ? "border-[var(--editor-text)] ring-2 ring-[var(--editor-accent)]" : "border-[var(--editor-line)]"}`}
             title="Transparent"
             aria-label="Apply transparent"
           />
         </div>
-        <label className="mt-3 flex h-9 items-center gap-2 rounded-md border border-[var(--line)] bg-[#141b28] px-2 text-xs font-semibold text-[#9aa7ba]">
-          <input
-            type="color"
-            value={isHexColor(floatingFillRegionColor) ? floatingFillRegionColor : "#ffffff"}
-            onChange={(event) => updateFillRegionColor(floatingFillRegion.id, event.target.value)}
-            className="h-6 w-8 cursor-pointer rounded border border-[#2a3344] bg-[#141b28] p-0"
-            aria-label="Custom fill color"
-          />
-          <span>Custom</span>
-        </label>
       </div>
     ) : null;
   const shortcutsPanelNode = showShortcutsPanel ? (
-    <div className="fixed right-6 bottom-16 z-50 w-[min(360px,calc(100vw-2rem))] rounded-xl border border-[#2a3344] bg-[#141b28] p-4 text-sm shadow-xl">
+    <div className="fixed right-6 bottom-16 z-50 w-[min(360px,calc(100vw-2rem))] rounded-xl border border-[var(--editor-line)] bg-[var(--editor-panel)] p-4 text-sm shadow-[0_20px_55px_var(--editor-shadow)]">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h3 className="text-[13px] font-bold uppercase tracking-wide text-[#e7edf5]">Keyboard shortcuts</h3>
-        <button type="button" onClick={() => setShowShortcutsPanel(false)} className="grid h-7 w-7 place-items-center rounded-md border border-[#2a3344] text-[#9aa7ba] hover:bg-[#161f2e]" title="Close">
+        <h3 className="text-[13px] font-bold uppercase tracking-wide text-[var(--editor-text)]">Keyboard shortcuts</h3>
+        <button type="button" onClick={() => setShowShortcutsPanel(false)} className="grid h-7 w-7 place-items-center rounded-md border border-[var(--editor-line)] text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)]" title="Close">
           <X size={13} aria-hidden="true" />
         </button>
       </div>
-      <div className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-[12px] text-[#9aa7ba]">
-        <span>Undo / redo</span><kbd className="rounded bg-[#1b2433] px-1.5 py-0.5 font-mono">Ctrl Z / Y</kbd>
-        <span>Copy / paste layer</span><kbd className="rounded bg-[#1b2433] px-1.5 py-0.5 font-mono">Ctrl C / V</kbd>
-        <span>Delete layer</span><kbd className="rounded bg-[#1b2433] px-1.5 py-0.5 font-mono">Del</kbd>
-        <span>Nudge selected layer(s)</span><kbd className="rounded bg-[#1b2433] px-1.5 py-0.5 font-mono">Arrow keys</kbd>
-        <span>Pan canvas while selecting</span><kbd className="rounded bg-[#1b2433] px-1.5 py-0.5 font-mono">Space drag</kbd>
-        <span>Disable snapping during drag</span><kbd className="rounded bg-[#1b2433] px-1.5 py-0.5 font-mono">Alt</kbd>
-        <span>Add to layer selection</span><kbd className="rounded bg-[#1b2433] px-1.5 py-0.5 font-mono">Shift/Ctrl click</kbd>
+      <div className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2 text-[12px] text-[var(--editor-text-dim)]">
+        <span>Undo / redo</span><kbd className="rounded bg-[var(--editor-panel-2)] px-1.5 py-0.5 font-mono text-[var(--editor-text)]">Ctrl Z / Y</kbd>
+        <span>Copy / paste layer</span><kbd className="rounded bg-[var(--editor-panel-2)] px-1.5 py-0.5 font-mono text-[var(--editor-text)]">Ctrl C / V</kbd>
+        <span>Delete layer</span><kbd className="rounded bg-[var(--editor-panel-2)] px-1.5 py-0.5 font-mono text-[var(--editor-text)]">Del</kbd>
+        <span>Nudge selected layer(s)</span><kbd className="rounded bg-[var(--editor-panel-2)] px-1.5 py-0.5 font-mono text-[var(--editor-text)]">Arrow keys</kbd>
+        <span>Pan canvas while selecting</span><kbd className="rounded bg-[var(--editor-panel-2)] px-1.5 py-0.5 font-mono text-[var(--editor-text)]">Space drag</kbd>
+        <span>Disable snapping during drag</span><kbd className="rounded bg-[var(--editor-panel-2)] px-1.5 py-0.5 font-mono text-[var(--editor-text)]">Alt</kbd>
+        <span>Add to layer selection</span><kbd className="rounded bg-[var(--editor-panel-2)] px-1.5 py-0.5 font-mono text-[var(--editor-text)]">Shift/Ctrl click</kbd>
       </div>
-      <p className="mt-3 text-[11px] leading-5 text-[#9aa7ba]">
+      <p className="mt-3 text-[11px] leading-5 text-[var(--editor-text-dim)]">
         Shortcut help and auto-save interval are browser-local productivity preferences for this v1.
       </p>
     </div>
@@ -6171,6 +6297,28 @@ export function EditorClient({ project }: { project: Project }) {
           width: Math.max(1, Math.round(selectedSourceLayout.width * GRAPH_MAJOR_CELL_PIXELS * zoom)),
           height: Math.max(1, Math.round(selectedSourceLayout.height * GRAPH_MAJOR_CELL_PIXELS * zoom)),
         }
+      : null;
+  const dragPreviewSource = dragPreviewSourceId ? settings.sourceImages.find((source) => source.id === dragPreviewSourceId) ?? null : null;
+  const dragPreviewLayout = dragPreviewSource ? sourceLayouts(settings.sourceImages).find((layout) => layout.source.id === dragPreviewSource.id) ?? null : null;
+  const dragPreviewStyle: CSSProperties | null =
+    dragPreviewSource && dragPreviewLayout && !showOriginal
+      ? (() => {
+          const baseWidth = Math.max(1, Math.round(dragPreviewLayout.width * GRAPH_MAJOR_CELL_PIXELS * zoom));
+          const baseHeight = Math.max(1, Math.round(dragPreviewLayout.height * GRAPH_MAJOR_CELL_PIXELS * zoom));
+          const rotation = normalizeRotationDegrees(dragPreviewSource.rotationDegrees);
+          const sideways = rotation === 90 || rotation === 270;
+          const width = sideways ? baseHeight : baseWidth;
+          const height = sideways ? baseWidth : baseHeight;
+          const centerX = outsideNumberMargin + (dragPreviewLayout.x * GRAPH_MAJOR_CELL_PIXELS + settings.imageOffsetX) * zoom + baseWidth / 2;
+          const centerY = outsideNumberMargin + (dragPreviewLayout.y * GRAPH_MAJOR_CELL_PIXELS + settings.imageOffsetY) * zoom + baseHeight / 2;
+          return {
+            left: Math.round(centerX - width / 2),
+            top: Math.round(centerY - height / 2),
+            width,
+            height,
+            transform: `rotate(${rotation}deg) scale(${dragPreviewSource.flipX ? -1 : 1}, ${dragPreviewSource.flipY ? -1 : 1})`,
+          };
+        })()
       : null;
   const selectedShapeBox =
     selectedShapeLayer && !showOriginal
@@ -6267,14 +6415,14 @@ export function EditorClient({ project }: { project: Project }) {
 
   const canvasPanel = (
     <section className="editor-canvas-panel relative grid min-h-0 grid-rows-[44px_minmax(0,1fr)_28px]">
-        <div className="flex items-center justify-between gap-3 border-b border-[#2a3344] bg-[#141b28] px-4">
+        <div className="flex items-center justify-between gap-3 border-b border-[var(--editor-line)] bg-[var(--editor-panel)] px-4">
           <div className="min-w-0">
-            <h1 className="text-[13px] font-bold uppercase tracking-wide text-[#e7edf5]">Canvas</h1>
-            <p className="truncate text-[11px] text-[#9aa7ba]">{statusLabel}</p>
+            <h1 className="text-[13px] font-bold uppercase tracking-wide text-[var(--editor-text)]">Canvas</h1>
+            <p className="truncate text-[11px] text-[var(--editor-text-dim)]">{statusLabel}</p>
           </div>
-          <div className="inline-flex items-center gap-2 text-xs font-semibold text-[#9aa7ba]">
-            {processing ? <Loader2 size={14} className="animate-spin text-[#008c8f]" aria-hidden="true" /> : <Check size={14} className="text-emerald-600" aria-hidden="true" />}
-            {processing ? "Rendering" : "Ready"}
+          <div className="inline-flex items-center gap-2 text-xs font-semibold text-[var(--editor-text-dim)]">
+            {canvasUpdatePending ? <Loader2 size={14} className="animate-spin text-[var(--editor-accent)]" aria-hidden="true" /> : <Check size={14} className="text-[var(--green)]" aria-hidden="true" />}
+            {canvasUpdatePending ? canvasUpdateLabel : "Ready"}
           </div>
         </div>
 
@@ -6353,10 +6501,10 @@ export function EditorClient({ project }: { project: Project }) {
           {notice ? (
             <div className={`absolute left-24 top-3 z-20 flex min-h-8 w-[min(560px,calc(100%-8rem))] items-start gap-2 rounded-md border px-3 py-2 text-sm shadow-sm ${
               notice.tone === "error"
-                ? "border-red-200 bg-red-50 text-red-700"
+                ? "border-[var(--danger)] bg-[var(--danger-soft)] text-[var(--danger)]"
                 : notice.tone === "ok"
-                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                  : "border-[#2a3344] bg-[#141b28] text-[#9aa7ba]"
+                  ? "border-[var(--success)] bg-[var(--success-soft)] text-[var(--green)]"
+                  : "border-[var(--editor-line)] bg-[var(--editor-panel)] text-[var(--editor-text-dim)]"
             }`}>
               <span className="min-w-0 flex-1 leading-5">{notice.text}</span>
               <button
@@ -6371,31 +6519,31 @@ export function EditorClient({ project }: { project: Project }) {
             </div>
           ) : null}
           {processing ? (
-            <div className="absolute right-3 top-3 inline-flex items-center gap-2 rounded-md border border-[var(--line)] bg-[#141b28] px-3 py-2 text-xs font-semibold text-[#9aa7ba] shadow-sm">
+            <div className="absolute right-3 top-3 inline-flex items-center gap-2 rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] px-3 py-2 text-xs font-semibold text-[var(--editor-text-dim)] shadow-sm">
               <Loader2 size={14} className="animate-spin" aria-hidden="true" />
               Processing
             </div>
           ) : null}
           {layerChooser ? (
             <div
-              className="fixed z-40 w-64 overflow-hidden rounded-md border border-[#2a3344] bg-[#141b28] text-sm shadow-xl"
+              className="fixed z-40 w-64 overflow-hidden rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] text-sm shadow-xl"
               style={{ left: layerChooser.x + 8, top: layerChooser.y + 8 }}
             >
-              <div className="border-b border-[#232c3c] px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-[#9aa7ba]">Select layer</div>
+              <div className="border-b border-[var(--editor-line-soft)] px-3 py-2 text-[11px] font-bold uppercase tracking-wide text-[var(--editor-text-dim)]">Select layer</div>
               <div className="max-h-64 overflow-y-auto">
                 {layerChooser.choices.map((choice) => (
                   <button
                     key={choice.key}
                     type="button"
                     onClick={() => selectLayerChoice(choice)}
-                    className="grid w-full grid-cols-[24px_minmax(0,1fr)] items-center gap-2 border-b border-[#eef2f6] px-3 py-2 text-left last:border-b-0 hover:bg-[#161f2e]"
+                    className="grid w-full grid-cols-[24px_minmax(0,1fr)] items-center gap-2 border-b border-[var(--editor-line-soft)] px-3 py-2 text-left last:border-b-0 hover:bg-[var(--editor-panel-2)]"
                   >
-                    <span className="grid h-6 w-6 place-items-center rounded border border-[#2a3344] bg-[#161f2e] text-[#9aa7ba]">
+                    <span className="grid h-6 w-6 place-items-center rounded border border-[var(--editor-line)] bg-[var(--editor-panel-2)] text-[var(--editor-text-dim)]">
                       {choice.type === "source" || choice.type === "clipart" ? <ImageIcon size={14} aria-hidden="true" /> : <Maximize2 size={14} aria-hidden="true" />}
                     </span>
                     <span className="min-w-0">
-                      <span className="block truncate text-[12px] font-semibold text-[#e7edf5]">{choice.name}</span>
-                      <span className="block truncate text-[11px] text-[#9aa7ba]">{choice.detail}</span>
+                      <span className="block truncate text-[12px] font-semibold text-[var(--editor-text)]">{choice.name}</span>
+                      <span className="block truncate text-[11px] text-[var(--editor-text-dim)]">{choice.detail}</span>
                     </span>
                   </button>
                 ))}
@@ -6403,7 +6551,7 @@ export function EditorClient({ project }: { project: Project }) {
             </div>
           ) : null}
           {showOriginal && sourcePreviewUrl ? (
-            <img src={sourcePreviewUrl} alt="" className="block rounded bg-[#eef2f7] object-contain shadow-sm" style={{ width: `${graphPreviewWidth}px`, height: "auto" }} />
+            <img src={sourcePreviewUrl} alt="" className="block rounded bg-[var(--artboard-bg)] object-contain shadow-sm" style={{ width: `${graphPreviewWidth}px`, height: "auto" }} />
           ) : (
             <div
               ref={graphStageRef}
@@ -6437,7 +6585,7 @@ export function EditorClient({ project }: { project: Project }) {
                 onDragOver={handleGeneratedShapeDragOver}
                 onDrop={handleGeneratedShapeDrop}
                 title="Drag image to move it; double-click a fill area to choose its color; arrow keys move selected image by 0.1cm; Space or Ctrl plus drag pans the view"
-                className="absolute left-0 top-0 rounded bg-[#141b28] shadow-sm"
+                className="absolute left-0 top-0 rounded bg-[var(--artboard-bg)] shadow-sm"
                 style={{
                   left: `${outsideNumberMargin}px`,
                   top: `${outsideNumberMargin}px`,
@@ -6448,8 +6596,20 @@ export function EditorClient({ project }: { project: Project }) {
                   touchAction: "none",
                 }}
               />
+              {dragPreviewStyle ? (
+                <canvas
+                  ref={dragPreviewCanvasRef}
+                  className="pointer-events-none absolute z-10 opacity-70 drop-shadow-[0_0_7px_rgba(34,211,238,0.72)]"
+                  aria-hidden="true"
+                  style={{
+                    ...dragPreviewStyle,
+                    transformOrigin: "center",
+                    imageRendering: "auto",
+                  }}
+                />
+              ) : null}
               {settings.showNumbers && settings.gridNumberPlacement === "outside" ? (
-                <div className="pointer-events-none absolute inset-0 text-[11px] font-semibold text-[#8592a6]">
+                <div className="pointer-events-none absolute inset-0 text-[11px] font-semibold text-[var(--editor-text-dim)]">
                   {outsideHorizontalLabels.map((value) => {
                     const x = outsideNumberMargin + (value - 0.5) * GRAPH_MAJOR_CELL_PIXELS * zoom;
                     return (
@@ -6489,14 +6649,14 @@ export function EditorClient({ project }: { project: Project }) {
                   {pageBreakGuideY.map((sourceY, index) => (
                     <div
                       key={`page-y-${sourceY}`}
-                      className="absolute border-t-2 border-dotted border-slate-700/70"
+                      className="absolute border-t-2 border-dotted border-[var(--editor-muted)]"
                       style={{
                         left: canvasViewportGuide.left,
                         top: outsideNumberMargin + sourceY * zoom,
                         width: pageBreakGuideWidth,
                       }}
                     >
-                      <span className="absolute right-2 -top-5 rounded bg-slate-50/90 px-1.5 py-0.5 text-[10px] font-semibold text-[#c3cdda] shadow-sm">
+                      <span className="absolute right-2 -top-5 rounded bg-[var(--editor-panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--editor-text-dim)] shadow-sm">
                         Page {index + 2}
                       </span>
                     </div>
@@ -6504,14 +6664,14 @@ export function EditorClient({ project }: { project: Project }) {
                   {pageBreakGuideX.map((sourceX, index) => (
                     <div
                       key={`page-x-${sourceX}`}
-                      className="absolute border-l-2 border-dotted border-slate-700/70"
+                      className="absolute border-l-2 border-dotted border-[var(--editor-muted)]"
                       style={{
                         height: pageBreakGuideHeight,
                         left: outsideNumberMargin + sourceX * zoom,
                         top: canvasViewportGuide.top,
                       }}
                     >
-                      <span className="absolute left-1 top-2 rounded bg-slate-50/90 px-1.5 py-0.5 text-[10px] font-semibold text-[#c3cdda] shadow-sm">
+                      <span className="absolute left-1 top-2 rounded bg-[var(--editor-panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--editor-text-dim)] shadow-sm">
                         Page {index + 2}
                       </span>
                     </div>
@@ -6524,7 +6684,7 @@ export function EditorClient({ project }: { project: Project }) {
                     guide.axis === "x" ? (
                       <div
                         key={`snap-x-${guide.value}-${index}`}
-                        className="absolute border-l-2 border-[#00c7d4] shadow-[0_0_8px_rgba(0,199,212,0.65)]"
+                        className="absolute border-l-2 border-[var(--editor-accent)] shadow-[0_0_8px_var(--editor-accent-soft)]"
                         style={{
                           left: outsideNumberMargin + guide.value * GRAPH_MAJOR_CELL_PIXELS * zoom,
                           top: outsideNumberMargin,
@@ -6534,7 +6694,7 @@ export function EditorClient({ project }: { project: Project }) {
                     ) : (
                       <div
                         key={`snap-y-${guide.value}-${index}`}
-                        className="absolute border-t-2 border-[#00c7d4] shadow-[0_0_8px_rgba(0,199,212,0.65)]"
+                        className="absolute border-t-2 border-[var(--editor-accent)] shadow-[0_0_8px_var(--editor-accent-soft)]"
                         style={{
                           left: outsideNumberMargin,
                           top: outsideNumberMargin + guide.value * GRAPH_MAJOR_CELL_PIXELS * zoom,
@@ -6606,9 +6766,9 @@ export function EditorClient({ project }: { project: Project }) {
             </div>
           )}
         </div>
-      <EditorStatusBar
-        status={statusMeta}
-        processing={processing}
+        <EditorStatusBar
+          status={statusMeta}
+          processing={canvasUpdatePending}
         dimensions={`${settings.graphWidth} x ${settings.graphHeight} cells`}
         selection={selectedLayerStatusLabel}
         zoom={zoom}
@@ -6627,7 +6787,7 @@ export function EditorClient({ project }: { project: Project }) {
         onRedo={() => restoreSettingsHistory("redo")}
         onSave={() => saveProject()}
         savePending={isPending}
-        saveDisabled={isPending || processing || !title.trim()}
+        saveDisabled={isPending || processing || Boolean(dragPreviewSourceId) || !title.trim()}
         sourcePanelCollapsed={sourcePanelCollapsed}
         onToggleSourcePanel={() => setSourcePanelCollapsed((value) => !value)}
         inspectorCollapsed={settingsPanelCollapsed}
@@ -6655,7 +6815,7 @@ export function EditorClient({ project }: { project: Project }) {
                     <h3>Workspace</h3>
                     <p>Project metadata and productivity controls.</p>
                   </div>
-                  <SquarePen size={18} className="text-[#008c8f]" aria-hidden="true" />
+                  <SquarePen size={18} className="text-[var(--editor-accent)]" aria-hidden="true" />
                 </div>
                 <label className="mt-3 grid gap-1.5">
                   <span>Project description</span>
@@ -6669,7 +6829,7 @@ export function EditorClient({ project }: { project: Project }) {
                     <h3>Templates</h3>
                     <p>Apply a starter layout to the current project.</p>
                   </div>
-                  <Sparkles size={18} className="text-[#008c8f]" aria-hidden="true" />
+                  <Sparkles size={18} className="text-[var(--editor-accent)]" aria-hidden="true" />
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   {EDITOR_TEMPLATE_OPTIONS.map((template) => (
@@ -6827,8 +6987,8 @@ export function EditorClient({ project }: { project: Project }) {
             setDraftShapeFillMode={setDraftShapeFillMode}
             setDraftShapeSide={setDraftShapeSide}
             setDraftShapeStrokeWidth={setDraftShapeStrokeWidth}
-            setDraftShapeStrokeColor={setDraftShapeStrokeColor}
-            setDraftShapeFillColor={setDraftShapeFillColor}
+            setDraftShapeStrokeColor={(value) => setDraftShapeStrokeColor(normalizeCanvasColor(value))}
+            setDraftShapeFillColor={(value) => setDraftShapeFillColor(normalizeCanvasFillColor(value))}
             setPlacingGeneratedShape={setPlacingGeneratedShape}
             setPlacingClipartAssetId={setPlacingClipartAssetId}
             draftClipartWidthCm={draftClipartWidthCm}
@@ -6838,8 +6998,8 @@ export function EditorClient({ project }: { project: Project }) {
             draftClipartPreviewDimensions={draftClipartPreviewDimensions}
             setDraftClipartWidthCm={setDraftClipartWidthCm}
             setDraftClipartHeightCm={setDraftClipartHeightCm}
-            setDraftClipartStrokeColor={setDraftClipartStrokeColor}
-            setDraftClipartFillColor={setDraftClipartFillColor}
+            setDraftClipartStrokeColor={(value) => setDraftClipartStrokeColor(normalizeCanvasColor(value))}
+            setDraftClipartFillColor={(value) => setDraftClipartFillColor(normalizeCanvasFillColor(value))}
             handleGeneratedShapeDragStart={handleGeneratedShapeDragStart}
             handleClipartDragStart={handleClipartDragStart}
             clearGraphShapes={clearGraphShapes}
@@ -6965,7 +7125,7 @@ export function EditorClient({ project }: { project: Project }) {
                         className="h-full w-full"
                       />
                     ) : (
-                      <div className="grid h-full place-items-center text-sm font-semibold text-white/70">Select a loaded source image to crop.</div>
+                      <div className="grid h-full place-items-center text-sm font-semibold text-[var(--editor-text-dim)]">Select a loaded source image to crop.</div>
                     )}
                   </div>
                 </div>

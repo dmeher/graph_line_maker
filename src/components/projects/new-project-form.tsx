@@ -50,7 +50,7 @@ import { bytesToSize } from "@/lib/utils/format";
 
 const ManualCropper = dynamic(() => import("@/components/projects/manual-cropper").then((module) => module.ManualCropper), {
   ssr: false,
-  loading: () => <div className="grid h-full min-h-[420px] place-items-center text-sm font-semibold text-[#667085]">Preparing crop</div>,
+  loading: () => <div className="grid h-full min-h-[420px] place-items-center text-sm font-semibold text-[var(--muted)]">Preparing crop</div>,
 });
 
 type CropQueueItem = {
@@ -673,17 +673,17 @@ export function NewProjectForm() {
 
   return (
     <form onSubmit={submit} className={`create-workbench ${cropItems.length ? "has-files" : ""}`}>
-      <div className="create-workbench-main grid min-h-0 border-t border-[#d7dde5]">
-        <aside className="create-workbench-details min-h-0 overflow-y-auto border-r border-[#d7dde5] bg-white p-5">
-          <h2 className="text-lg font-semibold text-[#101828]">Project details</h2>
-          <label className="mt-4 block text-sm font-medium text-[#344054]" htmlFor="title">Title *</label>
+      <div className="create-workbench-main grid min-h-0 border-t border-[var(--line)]">
+        <aside className="create-workbench-details min-h-0 overflow-y-auto border-r border-[var(--line)] bg-[var(--panel)] p-5">
+          <h2 className="text-lg font-semibold text-[var(--foreground)]">Project details</h2>
+          <label className="mt-4 block text-sm font-medium text-[var(--foreground)]" htmlFor="title">Title *</label>
           <input id="title" value={title} onChange={(event) => setTitle(event.target.value)} className="mock-input mt-2 h-10" required />
-          <label className="mt-4 block text-sm font-medium text-[#344054]" htmlFor="description">Description</label>
+          <label className="mt-4 block text-sm font-medium text-[var(--foreground)]" htmlFor="description">Description</label>
           <textarea id="description" value={description} maxLength={500} onChange={(event) => setDescription(event.target.value)} className="mock-input mt-2 min-h-20 resize-none" />
-          <p className="mt-1 text-right text-xs text-[#667085]">{description.length} / 500</p>
+          <p className="mt-1 text-right text-xs text-[var(--muted)]">{description.length} / 500</p>
 
-          <h2 className="mt-5 text-lg font-semibold text-[#101828]">Upload files</h2>
-          <p className="mt-1 text-sm leading-5 text-[#667085]">Images, PDF, or SVG line art. Up to {MAX_PROJECT_UPLOAD_FILES} files.</p>
+          <h2 className="mt-5 text-lg font-semibold text-[var(--foreground)]">Upload files</h2>
+          <p className="mt-1 text-sm leading-5 text-[var(--muted)]">Images, PDF, or SVG line art. Up to {MAX_PROJECT_UPLOAD_FILES} files.</p>
           <label
             onDragEnter={(event) => {
               event.preventDefault();
@@ -695,15 +695,15 @@ export function NewProjectForm() {
             }}
             onDragLeave={() => setIsDraggingFiles(false)}
             onDrop={handleUploadDrop}
-            className={`mt-4 grid min-h-[112px] cursor-pointer place-items-center rounded-lg border border-dashed bg-white px-3 py-3 text-center hover:border-[#008c8f] ${
-              isDraggingFiles ? "border-[#008c8f] bg-[#f0fafa]" : "border-[#cfd7df]"
+            className={`mt-4 grid min-h-[112px] cursor-pointer place-items-center rounded-lg border border-dashed bg-[var(--surface)] px-3 py-3 text-center hover:border-[var(--teal)] ${
+              isDraggingFiles ? "border-[var(--teal)] bg-[var(--teal-wash)]" : "border-[var(--line-strong)]"
             }`}
           >
             <span className="grid w-full min-w-0 place-items-center leading-tight">
-              <CloudUpload size={26} className="mx-auto text-[#101828]" strokeWidth={1.8} />
-              <span className="mt-2 block text-sm font-medium text-[#101828]">Drag & drop files here</span>
-              <span className="text-sm font-medium text-[#008c8f]">or click to browse</span>
-              <span className="mt-2 block text-xs leading-4 text-[#667085]">
+              <CloudUpload size={26} className="mx-auto text-[var(--foreground)]" strokeWidth={1.8} />
+              <span className="mt-2 block text-sm font-medium text-[var(--foreground)]">Drag & drop files here</span>
+              <span className="text-sm font-medium text-[var(--teal)]">or click to browse</span>
+              <span className="mt-2 block text-xs leading-4 text-[var(--muted)]">
                 <span className="block">PNG, JPG, SVG, PDF</span>
                 <span className="block">Max {MAX_PROJECT_UPLOAD_FILES} files, 50MB each</span>
               </span>
@@ -712,41 +712,41 @@ export function NewProjectForm() {
           </label>
 
           <div className="mt-5 flex items-center justify-between">
-            <p className="text-sm font-semibold text-[#101828]">Files ({cropItems.length})</p>
-            <button type="button" className="text-sm font-semibold text-[#008c8f] disabled:text-[#98a2b3]" onClick={clearCropItems} disabled={!cropItems.length}>Clear all</button>
+            <p className="text-sm font-semibold text-[var(--foreground)]">Files ({cropItems.length})</p>
+            <button type="button" className="text-sm font-semibold text-[var(--teal)] disabled:text-[var(--muted)]" onClick={clearCropItems} disabled={!cropItems.length}>Clear all</button>
           </div>
-          <div className="create-file-filmstrip mt-3 divide-y divide-[#e8edf2] overflow-hidden rounded-md border border-[#d7dde5]">
+          <div className="create-file-filmstrip mt-3 divide-y divide-[var(--line)] overflow-hidden rounded-md border border-[var(--line)]">
             {cropItems.length ? (
               cropItems.map((item) => {
                 const selected = selectedItem?.id === item.id;
                 return (
-                  <div key={item.id} className={`create-file-row grid grid-cols-[44px_minmax(0,1fr)_auto_auto] items-center gap-3 p-2 ${selected ? "bg-[#f0fafa] ring-1 ring-inset ring-[#008c8f]" : "bg-white"}`}>
+                  <div key={item.id} className={`create-file-row grid grid-cols-[44px_minmax(0,1fr)_auto_auto] items-center gap-3 p-2 ${selected ? "bg-[var(--teal-wash)] ring-1 ring-inset ring-[var(--teal)]" : "bg-[var(--surface)]"}`}>
                     <button type="button" onClick={() => setSelectedItemId(item.id)} className="contents text-left">
-                      {item.previewUrl ? <img src={item.previewUrl} alt="" className="h-10 w-10 rounded border border-[#d7dde5] object-contain p-1" /> : <span className="grid h-10 w-10 place-items-center rounded border border-[#d7dde5]"><ImageIcon size={17} /></span>}
-                      <span className="min-w-0"><span className="block truncate text-sm font-medium text-[#101828]">{item.file.name}</span><span className="text-xs text-[#667085]">{item.issue ?? formatDimensions(item)}</span></span>
-                      <span className={`min-w-0 truncate rounded px-2 py-0.5 text-xs font-medium ${item.issue ? "bg-red-50 text-red-700" : item.transform.crop ? "bg-[#dcfce7] text-[#15803d]" : "bg-[#f2f4f7] text-[#344054]"}`}>{item.issue ? "Issue" : cropQueueStatus(item.transform.crop)}</span>
+                      {item.previewUrl ? <img src={item.previewUrl} alt="" className="h-10 w-10 rounded border border-[var(--line)] object-contain p-1" /> : <span className="grid h-10 w-10 place-items-center rounded border border-[var(--line)]"><ImageIcon size={17} /></span>}
+                      <span className="min-w-0"><span className="block truncate text-sm font-medium text-[var(--foreground)]">{item.file.name}</span><span className="text-xs text-[var(--muted)]">{item.issue ?? formatDimensions(item)}</span></span>
+                      <span className={`min-w-0 truncate rounded px-2 py-0.5 text-xs font-medium ${item.issue ? "bg-[var(--danger-soft)] text-[var(--red)]" : item.transform.crop ? "bg-[var(--success-soft)] text-[var(--green)]" : "bg-[var(--surface-subtle)] text-[var(--muted)]"}`}>{item.issue ? "Issue" : cropQueueStatus(item.transform.crop)}</span>
                     </button>
-                    <button type="button" onClick={() => removeCropItem(item.id)} className="grid h-8 w-8 place-items-center rounded text-[#667085] hover:bg-[#f2f4f7] hover:text-[#101828]" title="Remove file">
+                    <button type="button" onClick={() => removeCropItem(item.id)} className="grid h-8 w-8 place-items-center rounded text-[var(--muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--foreground)]" title="Remove file">
                       <Trash2 size={15} aria-hidden="true" />
                     </button>
                   </div>
                 );
               })
             ) : (
-              <div className="grid min-h-[112px] place-items-center bg-white p-4 text-center text-sm text-[#667085]">
+              <div className="grid min-h-[112px] place-items-center bg-[var(--surface)] p-4 text-center text-sm text-[var(--muted)]">
                 <span><ImageIcon size={22} className="mx-auto mb-2" />Select files to start crop review.</span>
               </div>
             )}
           </div>
-          {fileIssue ? <p className="mt-3 flex gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"><AlertTriangle size={16} />{fileIssue}</p> : null}
-          {message ? <p className="mt-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{message}</p> : null}
+          {fileIssue ? <p className="mt-3 flex gap-2 rounded-md border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--amber)]"><AlertTriangle size={16} />{fileIssue}</p> : null}
+          {message ? <p className="mt-3 rounded-md border border-[var(--red)] bg-[var(--danger-soft)] p-3 text-sm text-[var(--red)]">{message}</p> : null}
         </aside>
 
         <main className="create-workbench-stage grid min-h-0">
-          <div className="flex items-center justify-between border-b border-[#d7dde5] bg-white px-6">
-            <div className="flex items-center gap-2"><h1 className="text-lg font-semibold text-[#101828]">Crop review</h1><span className="text-sm text-[#667085]">Crop each image for best results</span></div>
+          <div className="flex items-center justify-between border-b border-[var(--line)] bg-[var(--panel)] px-6">
+            <div className="flex items-center gap-2"><h1 className="text-lg font-semibold text-[var(--foreground)]">Crop review</h1><span className="text-sm text-[var(--muted)]">Crop each image for best results</span></div>
             <div className="flex items-center gap-4">
-              <div className="min-w-0 text-sm"><p className="truncate font-semibold text-[#101828]">{selectedItem?.file.name || "No file selected"}</p><p className="truncate text-[#667085]">{selectedItem ? `${formatDimensions(selectedItem)} - ${selectedItem.file.type || "File"} - ${bytesToSize(selectedItem.file.size)}` : "Upload a source image to begin"}</p></div>
+              <div className="min-w-0 text-sm"><p className="truncate font-semibold text-[var(--foreground)]">{selectedItem?.file.name || "No file selected"}</p><p className="truncate text-[var(--muted)]">{selectedItem ? `${formatDimensions(selectedItem)} - ${selectedItem.file.type || "File"} - ${bytesToSize(selectedItem.file.size)}` : "Upload a source image to begin"}</p></div>
               <button type="button" onClick={viewSelectedOriginal} disabled={!selectedItem?.previewUrl} className="mock-btn">View original <ExternalLink size={15} /></button>
             </div>
           </div>
@@ -826,9 +826,9 @@ export function NewProjectForm() {
                 <Redo2 size={15} aria-hidden="true" />
               </button>
             </div>
-            <div className="create-crop-frame relative mx-auto h-full min-h-0 w-full max-h-[760px] max-w-[560px] border-2 border-[#008c8f] bg-white">
+            <div className="create-crop-frame relative mx-auto h-full min-h-0 w-full max-h-[760px] max-w-[560px] border-2 border-[var(--teal)] bg-[var(--crop-stage-bg)]">
               {selectedItem?.previewPending ? (
-                <div className="grid h-full place-items-center"><Loader2 className="animate-spin text-[#008c8f]" /></div>
+                <div className="grid h-full place-items-center"><Loader2 className="animate-spin text-[var(--teal)]" /></div>
               ) : selectedItem?.previewUrl ? (
                 <ManualCropper
                   key={selectedItem.id}
@@ -848,7 +848,7 @@ export function NewProjectForm() {
                   className="h-full"
                 />
               ) : (
-                <div className="grid h-full place-items-center p-8 text-center text-sm text-[#667085]">
+                <div className="grid h-full place-items-center p-8 text-center text-sm text-[var(--muted)]">
                   <span><ImageIcon size={34} className="mx-auto mb-3" />Upload a file to activate crop review.</span>
                 </div>
               )}
@@ -942,21 +942,21 @@ export function NewProjectForm() {
             </aside>
           </div>
 
-          <div className="flex items-center justify-between border-t border-[#d7dde5] bg-white px-6">
+          <div className="flex items-center justify-between border-t border-[var(--line)] bg-[var(--panel)] px-6">
             <button type="button" onClick={() => selectRelativeItem(-1)} className="mock-btn h-10"><ChevronLeft size={16} />Previous image</button>
-            <p className="text-sm font-semibold text-[#101828]">{progressCropped} of {progressTotal} cropped</p>
+            <p className="text-sm font-semibold text-[var(--foreground)]">{progressCropped} of {progressTotal} cropped</p>
             <button type="button" onClick={() => selectRelativeItem(1)} className="mock-btn h-10">Next image<ChevronRight size={16} /></button>
           </div>
         </main>
       </div>
 
-      <div className="create-workbench-footer grid gap-2 border-t border-[#d7dde5] bg-white p-2">
-        <div className="create-workbench-notice rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+      <div className="create-workbench-footer grid gap-2 border-t border-[var(--line)] bg-[var(--panel)] p-2">
+        <div className="create-workbench-notice rounded-md border border-[var(--warning)] bg-[var(--warning-soft)] p-2 text-xs text-[var(--amber)]">
           <p className="flex gap-2 font-semibold"><AlertTriangle size={18} />{isOnline ? (cropItems.length ? "Crop review ready." : "Add source files to begin.") : "Needs connection to upload source files."}</p>
           <p className="mt-1">{isOnline ? "Project creation uploads the reviewed source files when you start conversion." : "Project creation is disabled while offline."}</p>
         </div>
         <div className="create-workbench-progress mock-card flex items-center justify-between gap-3 p-2">
-          <p className="min-w-0 text-sm text-[#475467]"><strong className="text-[#101828]">{progressTotal} {progressTotal === 1 ? "file" : "files"}</strong> · {progressCropped} with custom crop · unchanged files upload at original quality</p>
+          <p className="min-w-0 text-sm text-[var(--muted)]"><strong className="text-[var(--foreground)]">{progressTotal} {progressTotal === 1 ? "file" : "files"}</strong> · {progressCropped} with custom crop · unchanged files upload at original quality</p>
           <div className="create-workbench-actions flex shrink-0 gap-3">
             <button type="button" onClick={() => setCropItems((current) => current.map((item) => ({ ...item, transform: copyTransform(DEFAULT_CROP_TRANSFORM), undoStack: [...item.undoStack, copyTransform(item.transform)].slice(-30), redoStack: [] })))} disabled={!cropItems.some(hasTransform)} className="mock-btn h-10">Reset all</button>
             <button disabled={pending || previewPending || !isOnline || !cropItems.length || Boolean(fileIssue) || !title.trim()} className="mock-btn mock-btn-primary h-11 min-w-0 sm:min-w-[220px] text-base">

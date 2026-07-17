@@ -2,11 +2,13 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { PROCESSED_IMAGES_BUCKET, ORIGINAL_IMAGES_BUCKET } from "@/lib/constants";
+import { MAX_SOURCE_IMAGES, PROCESSED_IMAGES_BUCKET, ORIGINAL_IMAGES_BUCKET } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
 import {
   GRAPH_GRID_LINE_STYLE_KEYS,
   GRAPH_GRID_PATTERN_KEYS,
+  CANVAS_COLOR_VALUES,
+  GRAPH_LINE_COLOR_VALUES,
   GRAPH_IMAGE_DENOISE_LEVEL_KEYS,
   GRAPH_IMAGE_EDGE_DETECTION_KEYS,
   GRAPH_IMAGE_TRACE_ENGINE_KEYS,
@@ -35,12 +37,14 @@ import {
   VECTORIZER_LINE_ADJUST_STEP,
   GRAPH_VECTORIZER_FIDELITY_KEYS,
 } from "@/lib/graph-paper";
-import { MAX_CANVAS_DIMENSION, inspectCanvasBudget } from "@/lib/canvas/performance-limits";
+import { MAX_CANVAS_DIMENSION, MAX_GRAPH_HEIGHT_CELLS, MAX_GRAPH_WIDTH_CELLS, inspectCanvasBudget } from "@/lib/canvas/performance-limits";
 import { assertProjectOwner, clipartImagePath, imagePath, normalizeGraphSettings, sourceImagePath } from "@/lib/projects";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
+import type { GraphSettings, PaletteColor } from "@/lib/types";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
 
-const hexSchema = z.string().regex(/^#[0-9A-Fa-f]{6}$/);
+const hexSchema = z.enum(CANVAS_COLOR_VALUES);
+const graphLineColorSchema = z.enum(GRAPH_LINE_COLOR_VALUES);
 const fillColorSchema = z.union([hexSchema, z.literal(TRANSPARENT_FILL_COLOR)]);
 const rotationDegreesSchema = z
   .number()
@@ -68,11 +72,12 @@ const vectorizerLineAdjustSchema = z
   );
 const groupIdSchema = z.string().min(1).max(80).nullable().optional();
 const eraseStrokeSchema = z.object({
+  // Normalized UV coordinates across the source's working canvas; radius is a fraction of the canvas width.
   points: z
-    .array(z.object({ x: z.number().min(-100000).max(100000), y: z.number().min(-100000).max(100000) }))
+    .array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }))
     .min(1)
     .max(400),
-  radius: z.number().min(1).max(400),
+  radius: z.number().min(0.0005).max(0.5),
 });
 const eraseStrokesSchema = z.array(eraseStrokeSchema).max(80).optional();
 const backgroundRemovalSchema = z
@@ -189,8 +194,8 @@ const clipartImageSchema = z.object({
 });
 
 const graphSettingsSchema = z.object({
-  graphWidth: z.number().int().min(1).max(1000),
-  graphHeight: z.number().int().min(1).max(1000),
+  graphWidth: z.number().int().min(1).max(MAX_GRAPH_WIDTH_CELLS),
+  graphHeight: z.number().int().min(1).max(MAX_GRAPH_HEIGHT_CELLS),
   cellWidth: z.number().int().min(1).max(240),
   cellHeight: z.number().int().min(1).max(240),
   cellSizeCm: z.number().min(0.05).max(100),
@@ -222,7 +227,7 @@ const graphSettingsSchema = z.object({
   vectorizerLineAdjust: vectorizerLineAdjustSchema,
   vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
   vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
-  gridLineColor: hexSchema,
+  gridLineColor: graphLineColorSchema,
   gridLineLayer: z.enum(GRAPH_LINE_LAYER_KEYS),
   gridLineStyle: z.enum(GRAPH_GRID_LINE_STYLE_KEYS),
   gridPattern: z.enum(GRAPH_GRID_PATTERN_KEYS),
@@ -233,9 +238,9 @@ const graphSettingsSchema = z.object({
   gridNumberPlacement: z.union([z.literal("inside"), z.literal("outside")]),
   showPageBreaks: z.boolean(),
   majorGridEvery: z.union([z.literal(1), z.literal(2), z.literal(5), z.literal(10)]),
-  imageWidth: z.number().min(0.01).max(1000),
-  imageHeight: z.number().min(0.01).max(1000),
-  sourceImages: z.array(sourceImageSchema).max(100),
+  imageWidth: z.number().min(0.01).max(MAX_GRAPH_HEIGHT_CELLS),
+  imageHeight: z.number().min(0.01).max(MAX_GRAPH_HEIGHT_CELLS),
+  sourceImages: z.array(sourceImageSchema).max(MAX_SOURCE_IMAGES),
   cellPaints: z.array(cellPaintSchema).max(2000),
   graphShapes: z.array(graphShapeSchema).max(500),
   clipartAssets: z.array(clipartAssetSchema).max(120),
@@ -283,7 +288,18 @@ const saveProjectSchema = z.object({
   palettes: z.array(paletteSchema).max(256),
 });
 
-export async function saveProjectState(input: z.infer<typeof saveProjectSchema>) {
+type SaveProjectStateInput = {
+  projectId: string;
+  title: string;
+  description?: string;
+  settings: GraphSettings;
+  width: number;
+  height: number;
+  colorCount: number;
+  palettes: PaletteColor[];
+};
+
+export async function saveProjectState(input: SaveProjectStateInput) {
   const session = await requireSession();
   const payload = saveProjectSchema.parse(input);
   const normalizedSettings = normalizeGraphSettings({

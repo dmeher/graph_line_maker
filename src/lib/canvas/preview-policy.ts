@@ -81,3 +81,15 @@ export function draftDimensions(width: number, height: number, policy: PreviewPo
     scale,
   };
 }
+
+/**
+ * Allocates the policy's image-cache budget across all layer slots that can
+ * retain a pristine or derived working canvas. This keeps many-layer projects
+ * bounded even when their compressed upload bytes are tiny.
+ */
+export function workingImagePixelCap(policy: PreviewPolicy, itemCount: number, absolutePixelCap: number) {
+  const safeItemCount = Math.max(1, Math.round(itemCount) || 1);
+  const safeAbsoluteCap = Math.max(1, Math.round(absolutePixelCap) || 1);
+  const cachePixelCap = Math.max(1, Math.floor(policy.imageCacheBytes / 4 / safeItemCount));
+  return Math.min(safeAbsoluteCap, cachePixelCap);
+}

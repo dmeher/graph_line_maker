@@ -70,6 +70,35 @@ New editor features (image-line eraser, background remover, layer group/copy-pas
 
 New unit tests: `src/lib/canvas/background-removal.test.ts`, `src/lib/editor/erase-geometry.test.ts`, `src/lib/editor/layer-extras.test.ts` (added to the `test:unit` script). Suite is 91/91. Rendered validation: the editor dark theme, image-eraser contextual toolbar, background-removal toggle+tolerance, and the crop popup were verified at 1440px via the dev fixture `/dev/editor-test`.
 
+## Remediation update - 2026-07-17 (graph caps, working downscale, dark UX redesign)
+
+| Issue IDs | Implemented evidence |
+|---|---|
+| `PERF-CANVAS-001` | The graph is now hard-capped at **20 × 125 cells** (`MAX_GRAPH_WIDTH_CELLS`/`MAX_GRAPH_HEIGHT_CELLS` applied inside `clampGraphCellDimensions`, the save schema, and Inspector inputs), bounding the output canvas at 800 × 5000 px (4 MP) — far below the 16 MP/512 MB guards. Oversized legacy projects clamp per axis on load. |
+| `PERF-CANVAS-002/004` | Source/clipart working canvases are downscaled at load to `MAX_WORKING_SOURCE_PIXELS = 4 MP` (`fitCanvasToWorkingPixelBudget` now resizes via `resizeImage` instead of rejecting >16 MP decodes). Full-frame pixel loops, vectorize payloads, and retained canvas bytes shrink proportionally (a 48 MP photo now retains 1/12 of its former working pixels). Erase strokes moved to normalized UV coordinates so the cap cannot misalign saved strokes. |
+| Upload counts | `MAX_PROJECT_UPLOAD_FILES`/`MAX_SOURCE_IMAGES` raised to a 500 sanity bound (effectively unlimited); the 50 MB per-file and 150 MB per-create-request byte caps remain the real resource guards. |
+| UX redesign note | The whole app now uses the dark design system on `:root` with a fixed icon-rail shell (no off-canvas sidebar/topbar). Navigation chrome is lighter than before (rail is pure CSS + three links); no new client JS beyond the previous shell. Line-art preview surfaces intentionally stay light. |
+
+Validation: `npm run test:unit` 94/94 (includes new 20×125 clamp cases and normalized-stroke tests); rendered DOM verification of landing, login, dashboard (12 real projects), settings, new-project workbench, mobile dock, and the editor fixture; Inspector width/height entries of 50/200 clamp to 20/125.
+
+## Remediation update - 2026-07-17 (bounded editor layers and four-color canvas policy)
+
+| Issue IDs | Implemented evidence |
+|---|---|
+| `PERF-CANVAS-001/002` | The renderer still rejects oversized dimensions/pixel counts and a 512 MB estimated peak, but the estimate now models one sequential layer scratch buffer instead of multiplying scratch allocation by every visible layer. This admits the 320 x 4480, 83-layer project whose old estimate was 1,160 MB despite its sequential processing path. Source load groups layers by Storage path, sharing one decoded canvas/object URL, and `workingImagePixelCap` divides each preview tier's image-cache budget by source-layer slot before retaining pristine or derived working canvases. |
+| `PERF-CANVAS-002` | Source vector cache identity now uses source asset path/URL plus erase/background signatures rather than layer ID. Duplicate editable layers share vectorization work but transformations still invalidate the cache correctly. |
+| `PERF-CANVAS-003/004`, `PERF-REACT-001` | Source-position drags now render a transient source-canvas overlay and defer the exact graph render until release, so pointer movement no longer starts a full 83-layer composition every frame. The async vector path builds masks only for each source's padded placed rectangle, merges them into the authoritative graph map, and retains unchanged source masks in a 48 MiB byte-bounded LRU keyed by source processing identity. Save, auto-save, and export wait for the final exact render, preserving persisted/exported correctness. |
+| Canvas color policy | `graph-paper.ts` defines the only persisted artwork colors: white `#ffffff`, black `#000000`, light grey `#b0b0b0`, plus transparent fills/background. The graph/grid line setting defaults to red `#dc2626` and may also use green `#16a34a` or the artwork colors. Legacy hex values normalize to the nearest applicable fixed color on load, editor controls expose only fixed swatches, and the Server Action schema rejects unsupported future colors. No schema migration is required; normalized values persist on the next save. |
+| Canvas navigation | Desktop canvas hosts are viewport-height sticky frames. The graph itself scrolls in the center panel, retaining access to the canvas header, view controls, and tool rail without duplicating canvas state or creating a second renderer. |
+
+Validation pending this patch: focused unit tests cover sequential budget accounting, per-tier source cache allocation, duplicate source vector identity, local-mask placement merging, and legacy color normalization. Rendered browser validation remains intentionally skipped unless explicitly authorized.
+
+## Build update - 2026-07-17 (Webpack production compiler)
+
+`next build` with the default Turbopack compiler can remain indefinitely at `Creating an optimized production build` with a flat CPU counter and no compiler diagnostics in this workspace. `next build --webpack` completes compilation and reaches TypeScript checking, so the `build` script explicitly selects Webpack until the Turbopack stall can be reproduced and resolved upstream. Do not remove the flag without a successful Turbopack production build. The Webpack build also catches strict TypeScript errors that the stalled path never reports.
+
+Validation on 2026-07-17: `npm run build` completed compilation, TypeScript checking, static generation (14 routes), and trace collection without the former non-fatal Webpack runtime chunk-cycle warnings (`2919` / `webpack-runtime` and `7915` / `webpack`). They were traced to `crop-detection.worker.ts` importing `crop.ts`, which dynamically loads the crop-detection client. The worker now imports the geometry-only helper, preventing that entry-point cycle without changing crop behavior.
+
 ## Known-good boundaries to preserve
 
 | ID | Status | Evidence | Contract |
@@ -78,7 +107,7 @@ New unit tests: `src/lib/canvas/background-removal.test.ts`, `src/lib/editor/era
 | `PERF-GUARD-002` | Guard | `src/lib/canvas/pdf.ts`, `src/components/projects/new-project-form.tsx` | `pdfjs-dist` is reached through dynamic imports. Do not statically import it into editor or new-project entry modules. |
 | `PERF-GUARD-003` | Guard | `src/lib/canvas/exports.ts`, editor export handlers | `jspdf` and export code are loaded on export intent. Keep them out of initial editor JavaScript. |
 | `PERF-GUARD-004` | Guard | `src/lib/canvas/processor-worker-client.ts`, production build output | Both Turbopack and Webpack builds compiled the module worker. Turbopack's raw `.ts` media artifact was not the runtime worker entry; do not switch bundlers solely because that artifact exists. Add a production-server worker smoke test before changing this conclusion. |
-| `PERF-GUARD-005` | Guard | `src/components/projects/new-project-form.tsx`, `src/lib/canvas/crop.ts`, `src/lib/canvas/crop-detection.worker.ts` | Edge detection is opt-in. File selection must not call `detectContentCropResult`; Detect artwork analyzes a worker-side copy capped at 2 MP, reports confidence, and proposes one undoable crop. Unchanged files upload byte-for-byte, and native lossless rendering occurs only for an explicit transform. |
+| `PERF-GUARD-005` | Guard | `src/components/projects/new-project-form.tsx`, `src/lib/canvas/crop.ts`, `src/lib/canvas/crop-geometry.ts`, `src/lib/canvas/crop-detection.worker.ts` | Edge detection is opt-in. File selection must not call `detectContentCropResult`; Detect artwork analyzes a worker-side copy capped at 2 MP, reports confidence, and proposes one undoable crop. Unchanged files upload byte-for-byte, and native lossless rendering occurs only for an explicit transform. The worker must use the geometry-only helper rather than `crop.ts`, whose dynamic client import would recreate a runtime chunk cycle. |
 
 ## Editor, canvas, and React issues
 

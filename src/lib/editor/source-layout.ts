@@ -191,12 +191,17 @@ export function sourceProcessingCacheKey(source: GraphSourceImage, layout: Pick<
   ].join("|");
 }
 
+/** Stable identity for a source asset shared by multiple editable layers. */
+export function sourceAssetCacheKey(source: GraphSourceImage) {
+  if (source.path) return `path:${source.path}`;
+  if (source.url) return `url:${source.url}`;
+  return `source:${source.id}`;
+}
+
 export function sourceVectorizerCacheKey(source: GraphSourceImage) {
   return [
     "source",
-    source.id,
-    source.path ?? "",
-    source.url ?? "",
+    sourceAssetCacheKey(source),
     eraseStrokesSignature(source.eraseStrokes),
     backgroundRemovalSignature(source.backgroundRemoval),
   ].join("|");

@@ -1,6 +1,7 @@
 export const GRAPH_SUBDIVISIONS = 10;
 export const GRAPH_MINOR_PIXEL_SIZE = 4;
 export const GRAPH_MAJOR_CELL_PIXELS = GRAPH_SUBDIVISIONS * GRAPH_MINOR_PIXEL_SIZE;
+export { MAX_GRAPH_WIDTH_CELLS, MAX_GRAPH_HEIGHT_CELLS } from "./canvas/performance-limits.ts";
 export const MAX_IMAGE_PADDING_PIXELS = 1200;
 export const DEFAULT_IMAGE_PADDING_CELLS = 2;
 export const DEFAULT_IMAGE_PADDING_PIXELS = DEFAULT_IMAGE_PADDING_CELLS * GRAPH_MINOR_PIXEL_SIZE;
@@ -21,9 +22,20 @@ export const MAX_SOURCE_FILL_MIN_STROKE_PIXELS = 48;
 export const DEFAULT_STROKE_GAP_CLOSE_PIXELS = 0;
 export const MIN_STROKE_GAP_CLOSE_PIXELS = 0;
 export const MAX_STROKE_GAP_CLOSE_PIXELS = 2;
-export const DEFAULT_OUTLINE_COLOR = "#111827";
-export const DEFAULT_GRID_LINE_COLOR = "#dc2626";
+export const CANVAS_WHITE = "#ffffff";
+export const CANVAS_BLACK = "#000000";
+export const CANVAS_LIGHT_GREY = "#b0b0b0";
+export const CANVAS_COLOR_VALUES = [CANVAS_WHITE, CANVAS_BLACK, CANVAS_LIGHT_GREY] as const;
+export type CanvasColor = (typeof CANVAS_COLOR_VALUES)[number];
+export const GRAPH_LINE_RED = "#dc2626";
+export const GRAPH_LINE_GREEN = "#16a34a";
+export const GRAPH_LINE_COLOR_VALUES = [...CANVAS_COLOR_VALUES, GRAPH_LINE_RED, GRAPH_LINE_GREEN] as const;
+export type GraphLineColor = (typeof GRAPH_LINE_COLOR_VALUES)[number];
+export const DEFAULT_BACKGROUND_COLOR: CanvasColor = CANVAS_WHITE;
+export const DEFAULT_OUTLINE_COLOR: CanvasColor = CANVAS_BLACK;
+export const DEFAULT_GRID_LINE_COLOR: GraphLineColor = GRAPH_LINE_RED;
 export const TRANSPARENT_FILL_COLOR = "transparent";
+export type CanvasFillColor = CanvasColor | typeof TRANSPARENT_FILL_COLOR;
 export const GRAPH_LINE_LAYER_KEYS = ["front", "back"] as const;
 export type GraphLineLayer = (typeof GRAPH_LINE_LAYER_KEYS)[number];
 export const DEFAULT_GRAPH_LINE_LAYER: GraphLineLayer = "back";
@@ -163,63 +175,83 @@ export function isPrintVerticalAlignment(value: unknown): value is PrintVertical
 
 export type PresetColor = {
   name: string;
-  hex: string;
+  hex: CanvasColor;
 };
 
 export const PRESET_GRAPH_COLORS: PresetColor[] = [
-  { name: "White", hex: "#ffffff" },
-  { name: "Black", hex: "#111827" },
-  { name: "Slate", hex: "#334155" },
-  { name: "Gray", hex: "#6b7280" },
-  { name: "Zinc", hex: "#71717a" },
-  { name: "Red", hex: "#dc2626" },
-  { name: "Crimson", hex: "#be123c" },
-  { name: "Rose", hex: "#e11d48" },
-  { name: "Pink", hex: "#db2777" },
-  { name: "Fuchsia", hex: "#c026d3" },
-  { name: "Purple", hex: "#9333ea" },
-  { name: "Violet", hex: "#7c3aed" },
-  { name: "Indigo", hex: "#4f46e5" },
-  { name: "Blue", hex: "#2563eb" },
-  { name: "Navy", hex: "#1e3a8a" },
-  { name: "Sky", hex: "#0284c7" },
-  { name: "Cyan", hex: "#0891b2" },
-  { name: "Teal", hex: "#0f766e" },
-  { name: "Emerald", hex: "#059669" },
-  { name: "Green", hex: "#16a34a" },
-  { name: "Lime", hex: "#65a30d" },
-  { name: "Olive", hex: "#4d7c0f" },
-  { name: "Yellow", hex: "#ca8a04" },
-  { name: "Gold", hex: "#d97706" },
-  { name: "Amber", hex: "#f59e0b" },
-  { name: "Orange", hex: "#ea580c" },
-  { name: "Coral", hex: "#f97316" },
-  { name: "Brown", hex: "#92400e" },
-  { name: "Maroon", hex: "#7f1d1d" },
-  { name: "Mint", hex: "#2dd4bf" },
-  { name: "Lavender", hex: "#a78bfa" },
+  { name: "White", hex: CANVAS_WHITE },
+  { name: "Black", hex: CANVAS_BLACK },
+  { name: "Light grey", hex: CANVAS_LIGHT_GREY },
 ];
 
-export const PRESET_GRAPH_LINE_COLORS: PresetColor[] = [
-  { name: "Red", hex: DEFAULT_GRID_LINE_COLOR },
-  { name: "Green", hex: "#16a34a" },
-  { name: "Blue", hex: "#2563eb" },
-  { name: "Purple", hex: "#9333ea" },
-  { name: "Orange", hex: "#ea580c" },
-  { name: "Black", hex: "#111827" },
-  { name: "Gray", hex: "#64748b" },
+export const PRESET_GRAPH_LINE_COLORS: { name: string; hex: GraphLineColor }[] = [
+  ...PRESET_GRAPH_COLORS,
+  { name: "Red", hex: GRAPH_LINE_RED },
+  { name: "Green", hex: GRAPH_LINE_GREEN },
 ];
 
 export function isHexColor(value: unknown): value is string {
   return typeof value === "string" && /^#[0-9A-Fa-f]{6}$/.test(value);
 }
 
+export function isCanvasColor(value: unknown): value is CanvasColor {
+  return typeof value === "string" && CANVAS_COLOR_VALUES.includes(value.toLowerCase() as CanvasColor);
+}
+
+export function isGraphLineColor(value: unknown): value is GraphLineColor {
+  return typeof value === "string" && GRAPH_LINE_COLOR_VALUES.includes(value.toLowerCase() as GraphLineColor);
+}
+
+function rgbChannels(value: string) {
+  const normalized = value.slice(1);
+  return [
+    Number.parseInt(normalized.slice(0, 2), 16),
+    Number.parseInt(normalized.slice(2, 4), 16),
+    Number.parseInt(normalized.slice(4, 6), 16),
+  ] as const;
+}
+
+/** Maps legacy hex colors to the closest approved opaque canvas color. */
+function nearestColor<T extends string>(value: string, colors: readonly T[]): T {
+  const [red, green, blue] = rgbChannels(value);
+  return colors.reduce((closest, candidate) => {
+    const [candidateRed, candidateGreen, candidateBlue] = rgbChannels(candidate);
+    const candidateDistance = (red - candidateRed) ** 2 + (green - candidateGreen) ** 2 + (blue - candidateBlue) ** 2;
+    const [closestRed, closestGreen, closestBlue] = rgbChannels(closest);
+    const closestDistance = (red - closestRed) ** 2 + (green - closestGreen) ** 2 + (blue - closestBlue) ** 2;
+    return candidateDistance < closestDistance ? candidate : closest;
+  }, colors[0]);
+}
+
+export function normalizeCanvasColor(value: unknown, fallback: CanvasColor = DEFAULT_OUTLINE_COLOR): CanvasColor {
+  if (isCanvasColor(value)) return value.toLowerCase() as CanvasColor;
+  if (!isHexColor(value)) return fallback;
+
+  return nearestColor(value, CANVAS_COLOR_VALUES);
+}
+
+export function normalizeGraphLineColor(value: unknown, fallback: GraphLineColor = DEFAULT_GRID_LINE_COLOR): GraphLineColor {
+  if (isGraphLineColor(value)) return value.toLowerCase() as GraphLineColor;
+  if (!isHexColor(value)) return fallback;
+
+  return nearestColor(value, GRAPH_LINE_COLOR_VALUES);
+}
+
 export function isTransparentFillColor(value: unknown): value is typeof TRANSPARENT_FILL_COLOR {
   return value === TRANSPARENT_FILL_COLOR;
 }
 
-export function isFillColor(value: unknown): value is string {
-  return isHexColor(value) || isTransparentFillColor(value);
+export function isFillColor(value: unknown): value is CanvasFillColor {
+  return isCanvasColor(value) || isTransparentFillColor(value);
+}
+
+export function normalizeCanvasFillColor(
+  value: unknown,
+  fallback: CanvasFillColor = TRANSPARENT_FILL_COLOR,
+): CanvasFillColor {
+  if (isTransparentFillColor(value)) return TRANSPARENT_FILL_COLOR;
+  if (isHexColor(value)) return normalizeCanvasColor(value);
+  return fallback;
 }
 
 export function clampImageLineThickness(value: unknown) {

@@ -21,21 +21,30 @@ test("normalizeGroupId trims, bounds, and nullifies blanks", () => {
   assert.equal(normalizeGroupId("x".repeat(200))?.length, 80);
 });
 
-test("normalizeEraseStrokes rounds points and drops empty strokes", () => {
+test("normalizeEraseStrokes keeps normalized coords and drops empty strokes", () => {
   const strokes = normalizeEraseStrokes([
-    { points: [{ x: 1.4, y: 2.6 }, { x: 3, y: 4 }], radius: 8 },
-    { points: [], radius: 5 },
+    { points: [{ x: 0.25, y: 0.5 }, { x: 0.75, y: 1 }], radius: 0.02 },
+    { points: [], radius: 0.02 },
     { notPoints: true },
   ]);
   assert.equal(strokes.length, 1);
-  assert.deepEqual(strokes[0].points, [{ x: 1, y: 3 }, { x: 3, y: 4 }]);
-  assert.equal(strokes[0].radius, 8);
+  assert.deepEqual(strokes[0].points, [{ x: 0.25, y: 0.5 }, { x: 0.75, y: 1 }]);
+  assert.equal(strokes[0].radius, 0.02);
+});
+
+test("normalizeEraseStrokes drops legacy pixel-space strokes instead of clamping them", () => {
+  const strokes = normalizeEraseStrokes([
+    { points: [{ x: 140, y: 260 }, { x: 300, y: 400 }], radius: 12 },
+    { points: [{ x: 0.1, y: 0.2 }], radius: 0.03 },
+  ]);
+  assert.equal(strokes.length, 1);
+  assert.deepEqual(strokes[0].points, [{ x: 0.1, y: 0.2 }]);
 });
 
 test("normalizeEraseStrokes enforces the per-layer point budget", () => {
   const big = Array.from({ length: MAX_ERASE_STROKES_PER_LAYER + 20 }, () => ({
-    points: Array.from({ length: 300 }, (_unused, index) => ({ x: index, y: index })),
-    radius: 4,
+    points: Array.from({ length: 300 }, (_unused, index) => ({ x: (index % 100) / 100, y: (index % 100) / 100 })),
+    radius: 0.01,
   }));
   const strokes = normalizeEraseStrokes(big);
   assert.ok(strokes.length <= MAX_ERASE_STROKES_PER_LAYER);
@@ -69,9 +78,11 @@ test("normalizeLayerGroups dedupes ids and bounds names", () => {
 
 test("signatures change when erase/background state changes", () => {
   assert.equal(eraseStrokesSignature(undefined), "0");
-  const a = eraseStrokesSignature([{ points: [{ x: 1, y: 1 }], radius: 4 }]);
-  const b = eraseStrokesSignature([{ points: [{ x: 1, y: 1 }, { x: 2, y: 2 }], radius: 4 }]);
+  const a = eraseStrokesSignature([{ points: [{ x: 0.1, y: 0.1 }], radius: 0.02 }]);
+  const b = eraseStrokesSignature([{ points: [{ x: 0.1, y: 0.1 }, { x: 0.2, y: 0.2 }], radius: 0.02 }]);
+  const c = eraseStrokesSignature([{ points: [{ x: 0.1, y: 0.1 }, { x: 0.2001, y: 0.2 }], radius: 0.02 }]);
   assert.notEqual(a, b);
+  assert.notEqual(b, c);
   assert.equal(backgroundRemovalSignature(undefined), "0");
   assert.notEqual(backgroundRemovalSignature({ enabled: true, tolerance: 0.1 }), backgroundRemovalSignature({ enabled: true, tolerance: 0.2 }));
 });

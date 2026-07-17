@@ -11,8 +11,9 @@ import {
   DEFAULT_OUTLINE_COLOR,
   PRESET_GRAPH_COLORS,
   TRANSPARENT_FILL_COLOR,
-  isHexColor,
   isTransparentFillColor,
+  normalizeCanvasColor,
+  normalizeCanvasFillColor,
 } from "@/lib/graph-paper";
 
 export const NumberField = memo(function NumberField({
@@ -124,16 +125,18 @@ export const ColorPresetField = memo(function ColorPresetField({
   onChange,
   colors = PRESET_GRAPH_COLORS,
   allowTransparent = false,
+  normalizeColor = normalizeCanvasColor,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
-  colors?: typeof PRESET_GRAPH_COLORS;
+  colors?: readonly { name: string; hex: string }[];
   allowTransparent?: boolean;
+  normalizeColor?: (value: unknown) => string;
 }) {
   const [open, setOpen] = useState(false);
-  const colorPickerValue = isHexColor(value) ? value : "#ffffff";
-  const transparentSelected = isTransparentFillColor(value);
+  const normalizedValue = allowTransparent ? normalizeCanvasFillColor(value) : normalizeColor(value);
+  const transparentSelected = isTransparentFillColor(normalizedValue);
 
   return (
     <div className="min-w-0 rounded-md border border-[#2a3344] bg-[#141b28]">
@@ -145,9 +148,9 @@ export const ColorPresetField = memo(function ColorPresetField({
       >
         <span className="min-w-0 truncate text-xs font-semibold text-[#8592a6]">{label}</span>
         <span className="ml-auto inline-flex min-w-0 items-center gap-2">
-          <ColorSummary value={value} />
+          <ColorSummary value={normalizedValue} />
           <span className="max-w-24 truncate font-mono text-[11px] font-semibold text-[#9aa7ba]">
-            {transparentSelected ? "Transparent" : value.toUpperCase()}
+            {transparentSelected ? "Transparent" : normalizedValue.toUpperCase()}
           </span>
           {open ? (
             <ChevronDown size={14} className="shrink-0 text-[#9aa7ba]" aria-hidden="true" />
@@ -160,7 +163,7 @@ export const ColorPresetField = memo(function ColorPresetField({
         <div className="grid min-w-0 gap-2 border-t border-[#232c3c] p-2">
           <div className="grid grid-cols-[repeat(auto-fit,minmax(1.75rem,1fr))] gap-1.5">
             {colors.map((color) => {
-              const selected = color.hex.toLowerCase() === value.toLowerCase();
+              const selected = color.hex === normalizedValue;
               return (
                 <button
                   key={`${label}-${color.hex}`}
@@ -183,16 +186,6 @@ export const ColorPresetField = memo(function ColorPresetField({
               />
             ) : null}
           </div>
-          <label className="flex h-10 items-center gap-2 rounded-md border border-[var(--line)] bg-[#141b28] px-2 text-sm font-semibold text-[#9aa7ba]">
-            <input
-              type="color"
-              value={colorPickerValue}
-              onChange={(event) => onChange(event.target.value)}
-              className="h-7 w-9 cursor-pointer rounded border border-[#2a3344] bg-[#141b28] p-0"
-              aria-label={`${label}: custom color`}
-            />
-            <span>Custom</span>
-          </label>
         </div>
       ) : null}
     </div>
@@ -271,8 +264,8 @@ export const ShapePreviewSvg = memo(function ShapePreviewSvg({
   const circleLike = kind === "circle" || kind === "oval";
   const halfCircleLike = kind === "half-circle";
   const normalizedSides = isTransparentFillColor(fillColor) ? (sides.length ? sides : CELL_LINE_SIDE_KEYS) : CELL_LINE_SIDE_KEYS;
-  const stroke = isHexColor(strokeColor) ? strokeColor : DEFAULT_OUTLINE_COLOR;
-  const fill = isTransparentFillColor(fillColor) ? "none" : fillColor;
+  const stroke = normalizeCanvasColor(strokeColor, DEFAULT_OUTLINE_COLOR);
+  const fill = isTransparentFillColor(fillColor) ? "none" : normalizeCanvasColor(fillColor);
   const previewStrokeWidth = Math.max(2, Math.min(10, strokeWidth * 1.5));
   const rawWidth = Math.max(0.01, Number(widthCells) || (kind === "square" || kind === "circle" ? 1 : 1.65));
   const rawHeight = kind === "square" || kind === "circle" ? rawWidth : Math.max(0.01, Number(heightCells) || 1);

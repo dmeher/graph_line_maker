@@ -5,6 +5,7 @@ import {
   applyUnlockedSourcePatch,
   normalizeRotationDegrees,
   reorderSourceImages,
+  sourceAssetCacheKey,
   snapCellToGrid,
   snapRectToLayerGuides,
   sourceLayouts,
@@ -160,10 +161,15 @@ test("source processing cache key changes only for relevant source fields", () =
 test("native vectorizer cache key ignores graph placement but changes with source content", () => {
   const original = source({ id: "lion", path: "projects/lion.jpeg", url: "https://example.test/lion.jpeg" });
   const moved = source({ ...original, x: 4, y: 8, width: 12, height: 16, rotationDegrees: 90 });
+  const duplicateLayer = source({ ...original, id: "lion-copy", url: "https://example.test/lion.jpeg?signature=next" });
   const replaced = source({ ...original, path: "projects/lion-v2.jpeg", url: "https://example.test/lion-v2.jpeg" });
+  const erased = source({ ...original, eraseStrokes: [{ points: [{ x: 0.2, y: 0.3 }], radius: 0.02 }] });
 
   assert.equal(sourceVectorizerCacheKey(moved), sourceVectorizerCacheKey(original));
+  assert.equal(sourceAssetCacheKey(duplicateLayer), sourceAssetCacheKey(original));
+  assert.equal(sourceVectorizerCacheKey(duplicateLayer), sourceVectorizerCacheKey(original));
   assert.notEqual(sourceVectorizerCacheKey(replaced), sourceVectorizerCacheKey(original));
+  assert.notEqual(sourceVectorizerCacheKey(erased), sourceVectorizerCacheKey(original));
 });
 
 test("vectorizer line adjustment clamps to half steps inside range", () => {

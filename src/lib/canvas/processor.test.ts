@@ -65,6 +65,43 @@ test("layer merging preserves vector outline coverage and clears it below top fi
   assert.deepEqual(Array.from(outlineCoverage), [37, 0]);
 });
 
+test("layer merging writes bounded local masks at their graph placement", () => {
+  const fillRegionMap = new Uint16Array(12);
+  const outlineMask = new Uint8Array(12);
+  const localFillRegionMap = new Uint16Array([
+    0, 4,
+    0, 0,
+  ]);
+  const layerOutlineMask = new Uint8Array([
+    1, 0,
+    0, 1,
+  ]);
+
+  mergeLayerPixelMasks(
+    fillRegionMap,
+    outlineMask,
+    localFillRegionMap,
+    layerOutlineMask,
+    new Map([[4, 9]]),
+    undefined,
+    0,
+    undefined,
+    undefined,
+    { offsetX: 1, offsetY: 1, width: 2, destinationWidth: 4 },
+  );
+
+  assert.deepEqual(Array.from(fillRegionMap), [
+    0, 0, 0, 0,
+    0, 0, 9, 0,
+    0, 0, 0, 0,
+  ]);
+  assert.deepEqual(Array.from(outlineMask), [
+    0, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+  ]);
+});
+
 test("image preprocessing applies color quantization without mutating input", () => {
   const imageData = {
     width: 2,

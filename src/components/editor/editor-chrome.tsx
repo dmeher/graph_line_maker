@@ -29,6 +29,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { LogoMark } from "@/components/layout/brand-mark";
+import { ThemeToggle } from "@/components/layout/theme-toggle";
 
 export type EditorToolId = "select" | "pan" | "draw" | "shape" | "fill" | "eraser" | "image-eraser";
 
@@ -99,6 +100,7 @@ export const EditorCommandBar = memo(function EditorCommandBar({
         <button type="button" onClick={onToggleInspector} className="editor-dark-btn editor-panel-toggle editor-icon-only" title={inspectorCollapsed ? "Show properties" : "Hide properties"} aria-label={inspectorCollapsed ? "Show properties" : "Hide properties"}>
           {inspectorCollapsed ? <PanelRightOpen size={17} aria-hidden="true" /> : <PanelRightClose size={17} aria-hidden="true" />}
         </button>
+        <ThemeToggle variant="editor" />
         <button ref={workspaceButtonRef} type="button" onClick={onToggleWorkspace} className="editor-dark-btn" title="Workspace settings" aria-label="Workspace settings" aria-expanded={workspaceOpen}>
           <SlidersHorizontal size={16} aria-hidden="true" />
           <span>Workspace</span>

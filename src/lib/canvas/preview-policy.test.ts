@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PREVIEW_POLICIES, draftDimensions, performanceTierForCapabilities } from "./preview-policy.ts";
+import { PREVIEW_POLICIES, draftDimensions, performanceTierForCapabilities, workingImagePixelCap } from "./preview-policy.ts";
 
 test("capability tiers favor safe defaults and low-spec constraints", () => {
   assert.equal(performanceTierForCapabilities({}), "standard");
@@ -13,4 +13,11 @@ test("draft dimensions preserve aspect ratio while respecting the tier cap", () 
   assert.ok(result.width * result.height <= PREVIEW_POLICIES.low.draftPixelCap);
   assert.ok(Math.abs(result.width / result.height - 4 / 3) < 0.01);
   assert.equal(draftDimensions(800, 600, PREVIEW_POLICIES.low).scale, 1);
+});
+
+test("working image cap divides the cache budget across layer slots", () => {
+  const cap = workingImagePixelCap(PREVIEW_POLICIES.low, 83, 4_000_000);
+
+  assert.ok(cap * 83 * 4 <= PREVIEW_POLICIES.low.imageCacheBytes);
+  assert.equal(workingImagePixelCap(PREVIEW_POLICIES.high, 1, 4_000_000), 4_000_000);
 });

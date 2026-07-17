@@ -74,6 +74,7 @@ export type FittedImageLayer = {
   settings: GraphSettings;
   vectorizerSource?: VectorizerSource;
   vectorizerCacheKey?: string;
+  processingCacheKey?: string;
 };
 
 export type WorkerFittedImageLayer = {
@@ -87,6 +88,7 @@ type AnyFittedImageLayer = {
   settings: GraphSettings;
   vectorizerSource?: VectorizerSource;
   vectorizerCacheKey?: string;
+  processingCacheKey?: string;
 };
 
 type FillMaskLayer = {
@@ -101,14 +103,27 @@ type VectorizedImageResult = {
   vectorizedInkMask: Uint8Array | null;
   vectorizedInkCoverage: Uint8Array | null;
 };
+type LayerMaskResult = {
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  height: number;
+  enclosedFillMask: Uint8Array;
+  outlineMask: Uint8Array;
+  outlineCoverage: Uint8Array | null;
+  sourceFillMask: Uint8Array;
+};
 const MAX_VECTORIZED_SVG_CACHE_BYTES = 8 * 1024 * 1024;
 const MAX_VECTORIZED_IMAGE_CACHE_BYTES = 96 * 1024 * 1024;
+const MAX_PLACED_LAYER_MASK_CACHE_BYTES = 48 * 1024 * 1024;
 const vectorizedSvgCache = new ByteLruCache<string, string>(MAX_VECTORIZED_SVG_CACHE_BYTES);
 const vectorizedImageCache = new ByteLruCache<string, VectorizedImageResult>(MAX_VECTORIZED_IMAGE_CACHE_BYTES);
+const placedLayerMaskCache = new ByteLruCache<string, LayerMaskResult>(MAX_PLACED_LAYER_MASK_CACHE_BYTES);
 
 export function clearCanvasProcessingCaches() {
   vectorizedSvgCache.clear();
   vectorizedImageCache.clear();
+  placedLayerMaskCache.clear();
 }
 
 function positiveInteger(value: unknown, fallback = 1) {
@@ -177,6 +192,13 @@ function vectorizedResultBytes(result: VectorizedImageResult) {
   return result.imageData.data.byteLength +
     (result.vectorizedInkMask?.byteLength ?? 0) +
     (result.vectorizedInkCoverage?.byteLength ?? 0);
+}
+
+function layerMaskResultBytes(result: LayerMaskResult) {
+  return result.enclosedFillMask.byteLength +
+    result.outlineMask.byteLength +
+    (result.outlineCoverage?.byteLength ?? 0) +
+    result.sourceFillMask.byteLength;
 }
 
 function readVectorizedImage(key: string) {
@@ -558,6 +580,108 @@ async function buildArtworkMasksAsync(imageData: ImageDataLike, settings: GraphS
   );
 }
 
+export type SourcePlacementRegion = {
+  offsetX: number;
+  offsetY: number;
+  width: number;
+  height: number;
+};
+
+type PlacementMetrics = {
+  centerX: number;
+  centerY: number;
+  fittedWidth: number;
+  fittedHeight: number;
+  rotationDegrees: number;
+};
+
+type PlacedImageData = SourcePlacementRegion & {
+  imageData: ImageDataLike;
+};
+
+const PLACEMENT_REGION_PADDING_PIXELS = 4;
+
+function placementMetrics(placement: VectorizerSourcePlacement): PlacementMetrics | null {
+  const drawX = Math.round(placement.x * GRAPH_MAJOR_CELL_PIXELS + (placement.offsetX ?? 0));
+  const drawY = Math.round(placement.y * GRAPH_MAJOR_CELL_PIXELS + (placement.offsetY ?? 0));
+  const drawWidth = Math.round(placement.width * GRAPH_MAJOR_CELL_PIXELS);
+  const drawHeight = Math.round(placement.height * GRAPH_MAJOR_CELL_PIXELS);
+  if (!Number.isFinite(drawX) || !Number.isFinite(drawY) || !Number.isFinite(drawWidth) || !Number.isFinite(drawHeight) || drawWidth <= 0 || drawHeight <= 0) {
+    return null;
+  }
+
+  const rotationDegrees = normalizeRotationDegrees(placement.rotationDegrees);
+  const rotatedSideways = rotationDegrees === 90 || rotationDegrees === 270;
+  return {
+    centerX: drawX + drawWidth / 2,
+    centerY: drawY + drawHeight / 2,
+    fittedWidth: rotatedSideways ? drawHeight : drawWidth,
+    fittedHeight: rotatedSideways ? drawWidth : drawHeight,
+    rotationDegrees,
+  };
+}
+
+/** Returns the smallest padded output rectangle that can contain a placed source layer. */
+export function sourcePlacementRegion(
+  placement: VectorizerSourcePlacement,
+  outputWidth: number,
+  outputHeight: number,
+): SourcePlacementRegion | null {
+  const metrics = placementMetrics(placement);
+  if (!metrics || outputWidth <= 0 || outputHeight <= 0) return null;
+
+  const radians = (metrics.rotationDegrees * Math.PI) / 180;
+  const halfWidth = (Math.abs(Math.cos(radians)) * metrics.fittedWidth + Math.abs(Math.sin(radians)) * metrics.fittedHeight) / 2;
+  const halfHeight = (Math.abs(Math.sin(radians)) * metrics.fittedWidth + Math.abs(Math.cos(radians)) * metrics.fittedHeight) / 2;
+  const offsetX = Math.max(0, Math.floor(metrics.centerX - halfWidth) - PLACEMENT_REGION_PADDING_PIXELS);
+  const offsetY = Math.max(0, Math.floor(metrics.centerY - halfHeight) - PLACEMENT_REGION_PADDING_PIXELS);
+  const right = Math.min(outputWidth, Math.ceil(metrics.centerX + halfWidth) + PLACEMENT_REGION_PADDING_PIXELS);
+  const bottom = Math.min(outputHeight, Math.ceil(metrics.centerY + halfHeight) + PLACEMENT_REGION_PADDING_PIXELS);
+  if (right <= offsetX || bottom <= offsetY) return null;
+
+  return { offsetX, offsetY, width: right - offsetX, height: bottom - offsetY };
+}
+
+function placeSourceCanvasImageData(
+  sourceCanvas: CanvasLike,
+  contentBounds: ContentBounds,
+  placement: VectorizerSourcePlacement,
+  outputWidth: number,
+  outputHeight: number,
+): PlacedImageData | null {
+  const metrics = placementMetrics(placement);
+  const region = sourcePlacementRegion(placement, outputWidth, outputHeight);
+  if (!metrics || !region) return null;
+
+  const output = createProcessingCanvas(region.width, region.height);
+  const outputContext = getProcessingContext(output, { willReadFrequently: true });
+  if (!outputContext) return null;
+  outputContext.clearRect(0, 0, region.width, region.height);
+  outputContext.imageSmoothingEnabled = true;
+  outputContext.imageSmoothingQuality = "high";
+  outputContext.save();
+  outputContext.translate(metrics.centerX - region.offsetX, metrics.centerY - region.offsetY);
+  outputContext.rotate((metrics.rotationDegrees * Math.PI) / 180);
+  outputContext.scale(placement.flipX ? -1 : 1, placement.flipY ? -1 : 1);
+  outputContext.drawImage(
+    sourceCanvas,
+    contentBounds.x,
+    contentBounds.y,
+    contentBounds.width,
+    contentBounds.height,
+    -metrics.fittedWidth / 2,
+    -metrics.fittedHeight / 2,
+    metrics.fittedWidth,
+    metrics.fittedHeight,
+  );
+  outputContext.restore();
+
+  return {
+    ...region,
+    imageData: outputContext.getImageData(0, 0, region.width, region.height),
+  };
+}
+
 function placeVectorizedSourceImageData(
   vectorizedImageData: ImageDataLike,
   sourceCanvas: HTMLCanvasElement,
@@ -572,54 +696,7 @@ function placeVectorizedSourceImageData(
   const vectorizedContext = getProcessingContext(vectorizedCanvas, { willReadFrequently: true });
   if (!vectorizedContext) return null;
   vectorizedContext.putImageData(nativeImageData, 0, 0);
-
-  const output = createProcessingCanvas(outputWidth, outputHeight);
-  const outputContext = getProcessingContext(output, { willReadFrequently: true });
-  if (!outputContext) return null;
-  outputContext.clearRect(0, 0, outputWidth, outputHeight);
-  outputContext.imageSmoothingEnabled = true;
-  outputContext.imageSmoothingQuality = "high";
-
-  const bounds = findContentBounds(sourceCanvas);
-  const drawX = Math.round(placement.x * GRAPH_MAJOR_CELL_PIXELS + (placement.offsetX ?? 0));
-  const drawY = Math.round(placement.y * GRAPH_MAJOR_CELL_PIXELS + (placement.offsetY ?? 0));
-  const drawWidth = Math.round(placement.width * GRAPH_MAJOR_CELL_PIXELS);
-  const drawHeight = Math.round(placement.height * GRAPH_MAJOR_CELL_PIXELS);
-  if (
-    !Number.isFinite(drawX) ||
-    !Number.isFinite(drawY) ||
-    !Number.isFinite(drawWidth) ||
-    !Number.isFinite(drawHeight) ||
-    drawWidth <= 0 ||
-    drawHeight <= 0
-  ) {
-    return null;
-  }
-
-  const rotation = normalizeRotationDegrees(placement.rotationDegrees);
-  const rotatedSideways = rotation === 90 || rotation === 270;
-  const fittedWidth = rotatedSideways ? drawHeight : drawWidth;
-  const fittedHeight = rotatedSideways ? drawWidth : drawHeight;
-  if (fittedWidth <= 0 || fittedHeight <= 0) return null;
-
-  outputContext.save();
-  outputContext.translate(drawX + drawWidth / 2, drawY + drawHeight / 2);
-  outputContext.rotate((rotation * Math.PI) / 180);
-  outputContext.scale(placement.flipX ? -1 : 1, placement.flipY ? -1 : 1);
-  outputContext.drawImage(
-    vectorizedCanvas,
-    bounds.x,
-    bounds.y,
-    bounds.width,
-    bounds.height,
-    -fittedWidth / 2,
-    -fittedHeight / 2,
-    fittedWidth,
-    fittedHeight,
-  );
-  outputContext.restore();
-
-  return outputContext.getImageData(0, 0, outputWidth, outputHeight);
+  return placeSourceCanvasImageData(vectorizedCanvas, findContentBounds(sourceCanvas), placement, outputWidth, outputHeight);
 }
 
 function placeSourceImageData(
@@ -628,41 +705,7 @@ function placeSourceImageData(
   outputWidth: number,
   outputHeight: number,
 ) {
-  const output = createProcessingCanvas(outputWidth, outputHeight);
-  const outputContext = getProcessingContext(output, { willReadFrequently: true });
-  if (!outputContext) return null;
-  outputContext.clearRect(0, 0, outputWidth, outputHeight);
-  outputContext.imageSmoothingEnabled = true;
-  outputContext.imageSmoothingQuality = "high";
-
-  const bounds = findContentBounds(sourceCanvas);
-  const drawX = Math.round(placement.x * GRAPH_MAJOR_CELL_PIXELS + (placement.offsetX ?? 0));
-  const drawY = Math.round(placement.y * GRAPH_MAJOR_CELL_PIXELS + (placement.offsetY ?? 0));
-  const drawWidth = Math.round(placement.width * GRAPH_MAJOR_CELL_PIXELS);
-  const drawHeight = Math.round(placement.height * GRAPH_MAJOR_CELL_PIXELS);
-  if (drawWidth <= 0 || drawHeight <= 0) return null;
-
-  const rotation = normalizeRotationDegrees(placement.rotationDegrees);
-  const rotatedSideways = rotation === 90 || rotation === 270;
-  const fittedWidth = rotatedSideways ? drawHeight : drawWidth;
-  const fittedHeight = rotatedSideways ? drawWidth : drawHeight;
-  outputContext.save();
-  outputContext.translate(drawX + drawWidth / 2, drawY + drawHeight / 2);
-  outputContext.rotate((rotation * Math.PI) / 180);
-  outputContext.scale(placement.flipX ? -1 : 1, placement.flipY ? -1 : 1);
-  outputContext.drawImage(
-    sourceCanvas,
-    bounds.x,
-    bounds.y,
-    bounds.width,
-    bounds.height,
-    -fittedWidth / 2,
-    -fittedHeight / 2,
-    fittedWidth,
-    fittedHeight,
-  );
-  outputContext.restore();
-  return outputContext.getImageData(0, 0, outputWidth, outputHeight);
+  return placeSourceCanvasImageData(sourceCanvas, findContentBounds(sourceCanvas), placement, outputWidth, outputHeight);
 }
 
 async function buildLayerArtworkMasksAsync(
@@ -672,15 +715,75 @@ async function buildLayerArtworkMasksAsync(
   height: number,
   signal?: AbortSignal,
 ) {
+  const cached = layer.processingCacheKey ? placedLayerMaskCache.get(layer.processingCacheKey) : null;
+  if (cached) {
+    markGraphCacheHit("placed-layer-mask", layerMaskResultBytes(cached));
+    return cached;
+  }
+
+  function remember(result: LayerMaskResult) {
+    if (layer.processingCacheKey) {
+      placedLayerMaskCache.set(layer.processingCacheKey, result, { bytes: layerMaskResultBytes(result) });
+    }
+    return result;
+  }
+
+  function resultFromPlaced(
+    placed: PlacedImageData,
+    vectorizedInkMask?: Uint8Array | null,
+    vectorizedInkCoverage?: Uint8Array | null,
+  ) {
+    const masks = buildArtworkMasksFromImageData(
+      placed.imageData,
+      placed.width,
+      placed.height,
+      layer.settings,
+      vectorizedInkMask,
+      vectorizedInkCoverage,
+    );
+    return remember({
+      offsetX: placed.offsetX,
+      offsetY: placed.offsetY,
+      width: placed.width,
+      height: placed.height,
+      enclosedFillMask: masks.enclosedFillMask,
+      outlineMask: masks.outlineMask,
+      outlineCoverage: masks.outlineCoverage,
+      sourceFillMask: masks.sourceFillMask,
+    });
+  }
+
   const vectorizerSource = layer.vectorizerSource;
   if (!vectorizerSource || !hasDrawableCanvas(vectorizerSource.canvas)) {
     if (!fallbackImageData) throw new Error("Layer image data is not available.");
-    return buildArtworkMasksAsync(fallbackImageData, layer.settings, signal, layer.vectorizerCacheKey);
+    const masks = await buildArtworkMasksAsync(fallbackImageData, layer.settings, signal, layer.vectorizerCacheKey);
+    return remember({
+      offsetX: 0,
+      offsetY: 0,
+      width,
+      height,
+      enclosedFillMask: masks.enclosedFillMask,
+      outlineMask: masks.outlineMask,
+      outlineCoverage: masks.outlineCoverage,
+      sourceFillMask: masks.sourceFillMask,
+    });
   }
 
   function fallbackMasks() {
     const placedSource = placeSourceImageData(vectorizerSource!.canvas, vectorizerSource!.placement, width, height);
-    return buildArtworkMasks(placedSource ?? fallbackImageData ?? { data: new Uint8ClampedArray(width * height * 4), width, height }, layer.settings);
+    if (placedSource) return resultFromPlaced(placedSource);
+    if (!fallbackImageData) return null;
+    const masks = buildArtworkMasks(fallbackImageData, layer.settings);
+    return remember({
+      offsetX: 0,
+      offsetY: 0,
+      width: fallbackImageData.width,
+      height: fallbackImageData.height,
+      enclosedFillMask: masks.enclosedFillMask,
+      outlineMask: masks.outlineMask,
+      outlineCoverage: masks.outlineCoverage,
+      sourceFillMask: masks.sourceFillMask,
+    });
   }
 
   const sourceContext = getProcessingContext(vectorizerSource.canvas, { willReadFrequently: true });
@@ -694,25 +797,18 @@ async function buildLayerArtworkMasksAsync(
   );
   if (!vectorized.vectorizedInkMask) return fallbackMasks();
 
-  const placedImageData = placeVectorizedSourceImageData(
+  const placedImage = placeVectorizedSourceImageData(
     vectorized.imageData,
     vectorizerSource.canvas,
     vectorizerSource.placement,
     width,
     height,
   );
-  if (!placedImageData) return fallbackMasks();
-  const placedInk = maskFromVectorizedImageData(placedImageData);
+  if (!placedImage) return fallbackMasks();
+  const placedInk = maskFromVectorizedImageData(placedImage.imageData);
   if (!placedInk.count) return fallbackMasks();
 
-  return buildArtworkMasksFromImageData(
-    placedImageData,
-    width,
-    height,
-    layer.settings,
-    placedInk.mask,
-    placedInk.coverage,
-  );
+  return resultFromPlaced(placedImage, placedInk.mask, placedInk.coverage);
 }
 
 function defaultFillColorForRegion(settings: GraphSettings, kind: FillRegionKind) {
@@ -1452,27 +1548,23 @@ export async function pixelateLayeredCanvasesAsync(
       if (!fittedContext) throw new Error("Canvas is not available.");
       sourceData = fittedContext.getImageData(0, 0, width, height);
     }
-    const {
-      enclosedFillMask,
-      outlineMask: layerOutlineMask,
-      outlineCoverage: layerOutlineCoverage,
-      sourceFillMask,
-    } = await buildLayerArtworkMasksAsync(
+    const layerMasks = await buildLayerArtworkMasksAsync(
       layer,
       sourceData,
       width,
       height,
       options.signal,
     );
+    if (!layerMasks) continue;
     throwIfAborted(options.signal);
     const layerOutlineColorNumber = outlineColorNumber(outlineColorForSettings(layer.settings, settings));
     const local = labelFillRegions(
       [
-        { mask: sourceFillMask, kind: "source" },
-        { mask: enclosedFillMask, kind: "enclosed" },
+        { mask: layerMasks.sourceFillMask, kind: "source" },
+        { mask: layerMasks.enclosedFillMask, kind: "enclosed" },
       ],
-      width,
-      height,
+      layerMasks.width,
+      layerMasks.height,
       settings,
     );
 
@@ -1485,6 +1577,8 @@ export async function pixelateLayeredCanvasesAsync(
       regions.push({
         ...region,
         id: globalId,
+        centerX: region.centerX + layerMasks.offsetX,
+        centerY: region.centerY + layerMasks.offsetY,
         color: fillColorForRegion(layer.settings, region.id, region.kind),
       });
     }
@@ -1493,12 +1587,18 @@ export async function pixelateLayeredCanvasesAsync(
       fillRegionMap,
       outlineMask,
       local.fillRegionMap,
-      layerOutlineMask,
+      layerMasks.outlineMask,
       regionNumberMap,
       outlineColorMap,
       layerOutlineColorNumber,
       outlineCoverage,
-      layerOutlineCoverage ?? undefined,
+      layerMasks.outlineCoverage ?? undefined,
+      {
+        offsetX: layerMasks.offsetX,
+        offsetY: layerMasks.offsetY,
+        width: layerMasks.width,
+        destinationWidth: width,
+      },
     );
     maxLineThickness = Math.max(maxLineThickness, lineThicknessForSettings(layer.settings));
   }

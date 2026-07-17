@@ -47,7 +47,12 @@ export type PaletteColor = {
 
 export type GraphRotationDegrees = number;
 
-/** A freehand erase stroke stored in the image's own (source-local) pixel space. */
+/**
+ * A freehand erase stroke stored in resolution-independent coordinates:
+ * `points` are normalized UV positions (0..1) across the image's working canvas
+ * and `radius` is a fraction of the canvas width. This keeps strokes aligned
+ * when working canvases are downscaled to the shared pixel budget.
+ */
 export type GraphEraseStroke = {
   points: { x: number; y: number }[];
   radius: number;

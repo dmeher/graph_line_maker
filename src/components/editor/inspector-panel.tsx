@@ -65,6 +65,8 @@ import {
   GRAPH_MAJOR_CELL_PIXELS,
   GRAPH_VECTORIZER_FIDELITY_KEYS,
   MAJOR_GRID_EVERY_KEYS,
+  MAX_GRAPH_HEIGHT_CELLS,
+  MAX_GRAPH_WIDTH_CELLS,
   MAX_VECTORIZER_INK_THRESHOLD,
   MAX_VECTORIZER_LINE_ADJUST,
   MIN_VECTORIZER_INK_THRESHOLD,
@@ -76,6 +78,7 @@ import {
   PRINT_PAPER_SIZES,
   PRINT_VERTICAL_ALIGNMENT_KEYS,
   TRANSPARENT_FILL_COLOR,
+  normalizeGraphLineColor,
 } from "@/lib/graph-paper";
 import {
   CELL_LINE_SIDE_KEYS,
@@ -86,7 +89,6 @@ import {
   GRAPH_SHAPE_KIND_LABELS,
   GRAPH_LINE_LAYER_LABELS,
   GRID_NUMBER_PLACEMENT_LABELS,
-  MAX_CANVAS_DIMENSION,
   MEASUREMENT_UNIT_LABELS,
   PRINT_HORIZONTAL_ALIGNMENT_LABELS,
   PRINT_ORIENTATION_LABELS,
@@ -600,7 +602,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   label="Width (cells)"
                   value={settings.graphWidth}
                   min={1}
-                  max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)}
+                  max={MAX_GRAPH_WIDTH_CELLS}
                   inputClassName={inspectorControlClass}
                   onChange={(value) => updateSetting("graphWidth", value)}
                 />
@@ -608,11 +610,12 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   label="Height (cells)"
                   value={settings.graphHeight}
                   min={1}
-                  max={Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS)}
+                  max={MAX_GRAPH_HEIGHT_CELLS}
                   inputClassName={inspectorControlClass}
                   onChange={(value) => updateSetting("graphHeight", value)}
                 />
               </div>
+              <p className="text-[11px] leading-4 text-[#6b7688]">Maximum {MAX_GRAPH_WIDTH_CELLS} x {MAX_GRAPH_HEIGHT_CELLS} cells ({MAX_GRAPH_WIDTH_CELLS} x {MAX_GRAPH_HEIGHT_CELLS} cm).</p>
               <InspectorCheckbox label="Square cells" checked disabled />
             </InspectorGroup>
 
@@ -643,7 +646,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                     label={`Graph height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
                     value={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
                     min={0.01}
-                    max={roundMeasure(cmToUnit(Math.floor(MAX_CANVAS_DIMENSION / GRAPH_MAJOR_CELL_PIXELS) * DEFAULT_CELL_SIZE_CM, settings.measurementUnit))}
+                    max={roundMeasure(cmToUnit(MAX_GRAPH_HEIGHT_CELLS * DEFAULT_CELL_SIZE_CM, settings.measurementUnit))}
                     step={0.1}
                     allowDecimalInput
                     hideLabel
@@ -1138,7 +1141,13 @@ export function InspectorPanel(props: InspectorPanelProps) {
             ) : null}
 
             <CollapsibleSection title="Graph lines" summary={<ColorSummary value={settings.gridLineColor} />} open={!collapsedSections.graphLines} onToggle={() => toggleSection("graphLines")}>
-              <ColorPresetField label="Graph lines" value={settings.gridLineColor} colors={PRESET_GRAPH_LINE_COLORS} onChange={(value) => updateSetting("gridLineColor", value)} />
+              <ColorPresetField
+                label="Graph lines"
+                value={settings.gridLineColor}
+                colors={PRESET_GRAPH_LINE_COLORS}
+                normalizeColor={normalizeGraphLineColor}
+                onChange={(value) => updateSetting("gridLineColor", value)}
+              />
             </CollapsibleSection>
           </InspectorGroup>
         </div>

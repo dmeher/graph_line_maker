@@ -11,8 +11,12 @@ export const MAX_ERASE_STROKES_PER_LAYER = 80;
 export const MAX_ERASE_POINTS_PER_STROKE = 400;
 /** Cap total erase points per layer to keep the settings payload well under the 2 MB server-action limit. */
 export const MAX_ERASE_POINTS_PER_LAYER = 6000;
-export const MIN_ERASE_RADIUS = 1;
-export const MAX_ERASE_RADIUS = 400;
+/** Erase radius is stored as a fraction of the working canvas width (resolution independent). */
+export const MIN_ERASE_RADIUS_FRACTION = 0.001;
+export const MAX_ERASE_RADIUS_FRACTION = 0.5;
+const DEFAULT_ERASE_RADIUS_FRACTION = 0.02;
+/** Precision used when persisting normalized stroke values. */
+const ERASE_COORD_DECIMALS = 4;
 
 export const MIN_BACKGROUND_TOLERANCE = 0.02;
 export const MAX_BACKGROUND_TOLERANCE = 0.6;
@@ -33,14 +37,23 @@ export function normalizeGroupId(value: unknown): string | null {
 }
 
 export function clampEraseRadius(value: unknown): number {
-  return clampNumber(value, MIN_ERASE_RADIUS, MAX_ERASE_RADIUS, 12);
+  return clampNumber(value, MIN_ERASE_RADIUS_FRACTION, MAX_ERASE_RADIUS_FRACTION, DEFAULT_ERASE_RADIUS_FRACTION);
 }
 
 export function clampBackgroundTolerance(value: unknown): number {
   return clampNumber(value, MIN_BACKGROUND_TOLERANCE, MAX_BACKGROUND_TOLERANCE, DEFAULT_BACKGROUND_TOLERANCE);
 }
 
-/** Normalize erase strokes: integer source-local coords, bounded strokes/points/total-points. */
+function roundEraseCoord(value: number) {
+  const factor = 10 ** ERASE_COORD_DECIMALS;
+  return Math.round(value * factor) / factor;
+}
+
+/**
+ * Normalize erase strokes: UV coords in 0..1, bounded strokes/points/total-points.
+ * Strokes with out-of-range coordinates (e.g. legacy pixel-space drafts) are dropped
+ * rather than clamped so they cannot smear along the canvas edge.
+ */
 export function normalizeEraseStrokes(value: unknown): GraphEraseStroke[] {
   if (!Array.isArray(value)) return [];
   const strokes: GraphEraseStroke[] = [];
@@ -52,15 +65,24 @@ export function normalizeEraseStrokes(value: unknown): GraphEraseStroke[] {
     if (!Array.isArray(record.points) || !record.points.length) continue;
     const radius = clampEraseRadius(record.radius);
     const points: { x: number; y: number }[] = [];
+    let legacyStroke = false;
     for (const point of record.points) {
       if (points.length >= MAX_ERASE_POINTS_PER_STROKE) break;
       if (totalPoints >= MAX_ERASE_POINTS_PER_LAYER) break;
       if (!point || typeof point !== "object") continue;
-      const px = (point as { x?: unknown }).x;
-      const py = (point as { y?: unknown }).y;
-      if (!Number.isFinite(Number(px)) || !Number.isFinite(Number(py))) continue;
-      points.push({ x: Math.round(Number(px)), y: Math.round(Number(py)) });
+      const px = Number((point as { x?: unknown }).x);
+      const py = Number((point as { y?: unknown }).y);
+      if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+      if (px < -0.001 || px > 1.001 || py < -0.001 || py > 1.001) {
+        legacyStroke = true;
+        break;
+      }
+      points.push({ x: roundEraseCoord(Math.max(0, Math.min(1, px))), y: roundEraseCoord(Math.max(0, Math.min(1, py))) });
       totalPoints += 1;
+    }
+    if (legacyStroke) {
+      totalPoints -= points.length;
+      continue;
     }
     if (points.length) strokes.push({ points, radius });
     if (totalPoints >= MAX_ERASE_POINTS_PER_LAYER) break;
@@ -101,7 +123,7 @@ export function eraseStrokesSignature(strokes: GraphEraseStroke[] | undefined): 
   for (const stroke of strokes) {
     points += stroke.points.length;
     const tail = stroke.points[stroke.points.length - 1];
-    if (tail) last = `${Math.round(tail.x)},${Math.round(tail.y)}:${stroke.radius}`;
+    if (tail) last = `${tail.x.toFixed(4)},${tail.y.toFixed(4)}:${stroke.radius.toFixed(4)}`;
   }
   return `${strokes.length}/${points}/${last}`;
 }

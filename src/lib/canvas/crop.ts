@@ -1,3 +1,7 @@
+import { transformedImageSize } from "./crop-geometry.ts";
+
+export { transformedImageSize } from "./crop-geometry.ts";
+
 export type CropPixels = {
   x: number;
   y: number;
@@ -173,30 +177,6 @@ export async function cropImageUrlToFile(imageUrl: string, crop: CropPixels, fil
   );
 
   return canvasToFile(canvas, fileName, type);
-}
-
-function normalizeRightAngleRotation(rotationDegrees = 0) {
-  return ((Math.round(rotationDegrees / 90) * 90) % 360 + 360) % 360;
-}
-
-function normalizeFreeRotation(rotationDegrees = 0) {
-  const numeric = Number(rotationDegrees);
-  if (!Number.isFinite(numeric)) return 0;
-  return ((numeric % 360) + 360) % 360;
-}
-
-export function transformedImageSize(width: number, height: number, rotationDegrees = 0, straightenDegrees = 0) {
-  const safeWidth = positiveInteger(width);
-  const safeHeight = positiveInteger(height);
-  const rotation = normalizeFreeRotation(normalizeRightAngleRotation(rotationDegrees) + Number(straightenDegrees || 0));
-  const radians = (rotation * Math.PI) / 180;
-  const cosine = Math.abs(Math.cos(radians));
-  const sine = Math.abs(Math.sin(radians));
-  return {
-    width: Math.max(1, Math.ceil(safeWidth * cosine + safeHeight * sine)),
-    height: Math.max(1, Math.ceil(safeWidth * sine + safeHeight * cosine)),
-    rotationDegrees: rotation,
-  };
 }
 
 function drawTransformedImage(

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, Loader2, LockKeyhole, Mail, RefreshCw, Send } from "lucide-react";
+import { CheckCircle2, Grid3X3, ImageUp, Loader2, LockKeyhole, Mail, Palette, RefreshCw, Send, ShieldCheck } from "lucide-react";
 import { BrandMark } from "@/components/layout/brand-mark";
 import { OFFLINE_SESSION_CLEAR_MESSAGE, OFFLINE_SESSION_STORAGE_KEY } from "@/lib/auth/offline-session";
 import { clearEditorSessionDrafts } from "@/lib/editor/session-draft";
@@ -186,10 +186,26 @@ export function LoginForm() {
 
   return (
     <main className="auth-shell">
-      <div className="auth-backdrop" aria-hidden="true" />
-      <section className="auth-card" aria-labelledby="login-title">
+      <aside className="auth-hero" aria-hidden="true">
+        <div className="auth-hero__copy">
+          <BrandMark />
+          <h2>
+            Turn line art into <em>print-ready</em> graph charts.
+          </h2>
+          <p>Upload artwork, refine it on a precision pixel grid, and export tiled PDFs sized for real paper.</p>
+        </div>
+        <ul className="auth-hero__points">
+          <li><ImageUp size={17} /> PNG, JPG, WEBP, SVG, and PDF uploads</li>
+          <li><Grid3X3 size={17} /> Cell-perfect grids up to 20 × 125 cm</li>
+          <li><Palette size={17} /> Palette locks with live cell counts</li>
+          <li><ShieldCheck size={17} /> Private, allowlist-only workspace</li>
+        </ul>
+      </aside>
+
+      <section className="auth-pane" aria-labelledby="login-title">
+      <div className="auth-card">
         <div className="auth-brand-row">
-          <Link href="/" aria-label="Graph Pixel Maker home" className="[--brand-text:#101828]">
+          <Link href="/" aria-label="Graph Pixel Maker home" className="auth-brand-row__mark">
             <BrandMark />
           </Link>
           <span className="ui-chip">{progressLabel}</span>
@@ -299,6 +315,7 @@ export function LoginForm() {
         )}
 
         <p className="auth-security-note">Passwordless access · 10-minute code · Secure session</p>
+      </div>
       </section>
     </main>
   );

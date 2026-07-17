@@ -1,9 +1,5 @@
-"use client";
-
-import { ChevronDown } from "lucide-react";
 import type { ReactNode } from "react";
-import { isHexColor } from "@/lib/graph-paper";
-import { DEFAULT_GRID_LINE_COLOR } from "@/lib/graph-paper";
+import { normalizeGraphLineColor, PRESET_GRAPH_LINE_COLORS } from "@/lib/graph-paper";
 
 export const inspectorControlClass =
   "h-9 w-full min-w-0 rounded-md border border-[#2a3344] bg-[#141b28] px-2.5 text-[13px] font-medium text-[#e7edf5] outline-none focus:border-[#008c8f] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-[#6b7688]";
@@ -86,12 +82,28 @@ export function InspectorCheckbox({
 }
 
 export function InspectorColorControl({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  const selectedColor = normalizeGraphLineColor(value);
+
   return (
-    <label className={`${inspectorControlClass} flex cursor-pointer items-center gap-2 px-2`} title={`${label}: ${value}`}>
-      <input type="color" value={isHexColor(value) ? value : DEFAULT_GRID_LINE_COLOR} onChange={(event) => onChange(event.target.value)} className="sr-only" aria-label={label} />
-      <span className="h-5 w-5 shrink-0 rounded border border-[#2a3344]" style={{ backgroundColor: value }} aria-hidden="true" />
-      <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{value.toUpperCase()}</span>
-      <ChevronDown size={14} className="shrink-0 text-[#9aa7ba]" aria-hidden="true" />
-    </label>
+    <div className="flex h-9 items-center gap-2" aria-label={label}>
+      {PRESET_GRAPH_LINE_COLORS.map((color) => {
+        const selected = color.hex === selectedColor;
+        return (
+          <button
+            key={color.hex}
+            type="button"
+            onClick={() => onChange(color.hex)}
+            className={`grid h-7 w-7 place-items-center rounded border transition-colors ${
+              selected ? "border-[#22d3c5] ring-1 ring-[#22d3c5]" : "border-[#2a3344] hover:border-[#7b8aa3]"
+            }`}
+            title={color.name}
+            aria-label={`${label}: ${color.name}`}
+            aria-pressed={selected}
+          >
+            <span className="h-4 w-4 rounded-sm border border-black/20" style={{ backgroundColor: color.hex }} aria-hidden="true" />
+          </button>
+        );
+      })}
+    </div>
   );
 }

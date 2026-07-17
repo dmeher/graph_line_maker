@@ -45,6 +45,12 @@ import {
   isPdfFile,
 } from "@/lib/constants";
 import { cropQueueItemId, cropQueueStatus } from "@/lib/projects/crop-queue";
+import {
+  DEFAULT_BACKGROUND_TOLERANCE,
+  MAX_BACKGROUND_TOLERANCE,
+  MIN_BACKGROUND_TOLERANCE,
+  clampBackgroundTolerance,
+} from "@/lib/editor/layer-extras";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
 import { bytesToSize } from "@/lib/utils/format";
 
@@ -156,6 +162,7 @@ async function cropFile(file: File, imageUrl: string, transform: CropTransform) 
     straightenDegrees: transform.straightenDegrees,
     flipX: transform.flipX,
     flipY: transform.flipY,
+    backgroundRemoval: transform.backgroundRemoval,
     fileName: file.name,
     type: "image/png",
   });
@@ -204,7 +211,8 @@ function hasTransform(item: CropQueueItem) {
     transform.rotationDegrees ||
     transform.straightenDegrees ||
     transform.flipX ||
-    transform.flipY,
+    transform.flipY ||
+    transform.backgroundRemoval?.enabled,
   );
 }
 
@@ -212,6 +220,7 @@ function copyTransform(transform: CropTransform): CropTransform {
   return {
     ...transform,
     crop: transform.crop ? { ...transform.crop } : null,
+    backgroundRemoval: transform.backgroundRemoval ? { ...transform.backgroundRemoval } : undefined,
   };
 }
 
@@ -222,6 +231,8 @@ function transformsEqual(left: CropTransform, right: CropTransform) {
     left.flipX === right.flipX &&
     left.flipY === right.flipY &&
     left.aspectRatio === right.aspectRatio &&
+    left.backgroundRemoval?.enabled === right.backgroundRemoval?.enabled &&
+    left.backgroundRemoval?.tolerance === right.backgroundRemoval?.tolerance &&
     ((!left.crop && !right.crop) ||
       Boolean(
         left.crop &&
@@ -324,6 +335,24 @@ export function NewProjectForm() {
 
   function updateItemCrop(itemId: string, crop: CropPixels | null) {
     updateItemTransform(itemId, (transform) => ({ ...transform, crop }));
+  }
+
+  function setSelectedBackgroundRemoval(enabled: boolean) {
+    if (!selectedItem) return;
+    updateItemTransform(selectedItem.id, (transform) => ({
+      ...transform,
+      backgroundRemoval: enabled
+        ? { enabled: true, tolerance: transform.backgroundRemoval?.tolerance ?? DEFAULT_BACKGROUND_TOLERANCE }
+        : undefined,
+    }));
+  }
+
+  function setSelectedBackgroundTolerance(tolerance: number) {
+    if (!selectedItem?.transform.backgroundRemoval?.enabled) return;
+    updateItemTransform(selectedItem.id, (transform) => ({
+      ...transform,
+      backgroundRemoval: { enabled: true, tolerance: clampBackgroundTolerance(tolerance) },
+    }));
   }
 
   function updateItemSize(itemId: string, size: { width: number; height: number }) {
@@ -841,6 +870,7 @@ export function NewProjectForm() {
                   straightenDegrees={selectedItem.transform.straightenDegrees}
                   flipX={selectedItem.transform.flipX}
                   flipY={selectedItem.transform.flipY}
+                  backgroundRemoval={selectedItem.transform.backgroundRemoval}
                   guide={cropGuide}
                   interactionMode={cropInteractionMode}
                   onImageSizeChange={(size) => updateItemSize(selectedItem.id, size)}
@@ -932,6 +962,32 @@ export function NewProjectForm() {
                     disabled={!selectedItem}
                   />
                 </label>
+              </div>
+
+              <div className="create-transform-section">
+                <label className="flex items-center justify-between gap-3 text-sm font-semibold text-[var(--foreground)]">
+                  <span className="inline-flex items-center gap-2"><Scissors size={15} aria-hidden="true" />Remove background</span>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(selectedItem?.transform.backgroundRemoval?.enabled)}
+                    onChange={(event) => setSelectedBackgroundRemoval(event.target.checked)}
+                    disabled={!selectedItem}
+                    className="h-4 w-4 accent-[var(--teal)]"
+                  />
+                </label>
+                {selectedItem?.transform.backgroundRemoval?.enabled ? (
+                  <label className="create-straighten-control mt-3">
+                    <span>Tolerance <strong>{Math.round(selectedItem.transform.backgroundRemoval.tolerance * 100)}%</strong></span>
+                    <input
+                      type="range"
+                      min={Math.round(MIN_BACKGROUND_TOLERANCE * 100)}
+                      max={Math.round(MAX_BACKGROUND_TOLERANCE * 100)}
+                      step={1}
+                      value={Math.round(selectedItem.transform.backgroundRemoval.tolerance * 100)}
+                      onChange={(event) => setSelectedBackgroundTolerance(Number(event.target.value) / 100)}
+                    />
+                  </label>
+                ) : null}
               </div>
 
               <div className="create-transform-footer">

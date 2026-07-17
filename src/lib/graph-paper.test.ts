@@ -5,6 +5,7 @@ import {
   CANVAS_LIGHT_GREY,
   CANVAS_WHITE,
   DEFAULT_GRID_LINE_COLOR,
+  DEFAULT_MAJOR_GRID_EVERY,
   GRAPH_LINE_GREEN,
   GRAPH_LINE_RED,
   TRANSPARENT_FILL_COLOR,
@@ -40,4 +41,8 @@ test("graph lines may additionally use red and green", () => {
   assert.equal(isGraphLineColor(GRAPH_LINE_GREEN), true);
   assert.equal(normalizeGraphLineColor("#ef4444"), GRAPH_LINE_RED);
   assert.equal(normalizeGraphLineColor("#22c55e"), GRAPH_LINE_GREEN);
+});
+
+test("major grid lines default to every cell", () => {
+  assert.equal(DEFAULT_MAJOR_GRID_EVERY, 1);
 });

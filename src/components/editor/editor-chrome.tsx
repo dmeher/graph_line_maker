@@ -21,9 +21,9 @@ import {
   Pencil,
   Redo2,
   RotateCcw,
+  Scissors,
   Shapes,
   SlidersHorizontal,
-  Trash2,
   Undo2,
   ZoomIn,
   ZoomOut,
@@ -31,7 +31,7 @@ import {
 import { LogoMark } from "@/components/layout/brand-mark";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 
-export type EditorToolId = "select" | "pan" | "draw" | "shape" | "fill" | "eraser" | "image-eraser";
+export type EditorToolId = "select" | "pan" | "draw" | "shape" | "fill" | "background-remover" | "image-eraser";
 
 type EditorCommandBarProps = {
   title: string;
@@ -126,7 +126,7 @@ const TOOL_ITEMS: { id: EditorToolId; label: string; icon: typeof MousePointer2 
   { id: "draw", label: "Draw cells", icon: Pencil },
   { id: "shape", label: "Shape", icon: Shapes },
   { id: "fill", label: "Fill", icon: PaintBucket },
-  { id: "eraser", label: "Erase cells", icon: Trash2 },
+  { id: "background-remover", label: "Remove background", icon: Scissors },
   { id: "image-eraser", label: "Erase image", icon: Eraser },
 ];
 

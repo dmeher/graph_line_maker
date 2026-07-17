@@ -1,7 +1,7 @@
 import "server-only";
 
 import { getSupabaseAdmin, tryGetSupabaseAdmin } from "@/lib/supabase/server";
-import { ORIGINAL_IMAGES_BUCKET, PROCESSED_IMAGES_BUCKET } from "@/lib/constants";
+import { MAX_SOURCE_IMAGES, ORIGINAL_IMAGES_BUCKET, PROCESSED_IMAGES_BUCKET } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
 import {
   DEFAULT_CELL_SIZE_CM,

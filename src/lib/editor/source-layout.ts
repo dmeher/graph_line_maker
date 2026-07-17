@@ -31,6 +31,56 @@ export type LayerSnapResult = {
   guides: LayerSnapGuide[];
 };
 
+/** Scales a layer's rectangle with its containing selection bounds. */
+export function scaleLayerBoxToBounds(
+  box: LayerSnapBox,
+  startBounds: Pick<LayerSnapBox, "x" | "y" | "width" | "height">,
+  nextBounds: Pick<LayerSnapBox, "x" | "y" | "width" | "height">,
+): LayerSnapBox {
+  const scaleX = nextBounds.width / Math.max(0.01, startBounds.width);
+  const scaleY = nextBounds.height / Math.max(0.01, startBounds.height);
+  return {
+    ...box,
+    x: roundCells(nextBounds.x + (box.x - startBounds.x) * scaleX),
+    y: roundCells(nextBounds.y + (box.y - startBounds.y) * scaleY),
+    width: roundCells(Math.max(0.01, box.width * scaleX)),
+    height: roundCells(Math.max(0.01, box.height * scaleY)),
+  };
+}
+
+/** Mirrors a layer rectangle within its containing selection bounds. */
+export function flipLayerBoxInBounds(
+  box: LayerSnapBox,
+  bounds: Pick<LayerSnapBox, "x" | "y" | "width" | "height">,
+  axis: "x" | "y",
+): LayerSnapBox {
+  return {
+    ...box,
+    x: axis === "x" ? roundCells(bounds.x + bounds.width - (box.x - bounds.x) - box.width) : box.x,
+    y: axis === "y" ? roundCells(bounds.y + bounds.height - (box.y - bounds.y) - box.height) : box.y,
+  };
+}
+
+/** Rotates a layer rectangle by a quarter turn around its selection bounds' center. */
+export function rotateLayerBoxInBounds(
+  box: LayerSnapBox,
+  bounds: Pick<LayerSnapBox, "x" | "y" | "width" | "height">,
+  direction: -1 | 1,
+): LayerSnapBox {
+  const rotatedBoundsX = bounds.x + (bounds.width - bounds.height) / 2;
+  const rotatedBoundsY = bounds.y + (bounds.height - bounds.width) / 2;
+  const localX = box.x - bounds.x;
+  const localY = box.y - bounds.y;
+
+  return {
+    ...box,
+    x: roundCells(direction === 1 ? rotatedBoundsX + bounds.height - localY - box.height : rotatedBoundsX + localY),
+    y: roundCells(direction === 1 ? rotatedBoundsY + localX : rotatedBoundsY + bounds.width - localX - box.width),
+    width: roundCells(Math.max(0.01, box.height)),
+    height: roundCells(Math.max(0.01, box.width)),
+  };
+}
+
 export function sourceLayouts(sources: GraphSourceImage[]): SourceLayout[] {
   return sources.map((source) => ({
     source,

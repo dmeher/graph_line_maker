@@ -38,6 +38,7 @@ import {
   GRAPH_VECTORIZER_FIDELITY_KEYS,
 } from "@/lib/graph-paper";
 import { MAX_CANVAS_DIMENSION, MAX_GRAPH_HEIGHT_CELLS, MAX_GRAPH_WIDTH_CELLS, inspectCanvasBudget } from "@/lib/canvas/performance-limits";
+import { isStoredFillRegionId } from "@/lib/canvas/fill-region-identity";
 import { assertProjectOwner, clipartImagePath, imagePath, normalizeGraphSettings, sourceImagePath } from "@/lib/projects";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
@@ -52,7 +53,7 @@ const rotationDegreesSchema = z
   .max(345)
   .refine((value) => Math.abs(value / 15 - Math.round(value / 15)) < 0.000001, "Rotation must use 15 degree steps.");
 const fillRegionsSchema = z
-  .record(z.string().regex(/^\d+$/), fillColorSchema)
+  .record(z.string().refine(isStoredFillRegionId, "Invalid fill region ID."), fillColorSchema)
   .refine((value) => Object.keys(value).length <= 500, "Too many custom fill regions.");
 const cellLineSideSchema = z.union([z.literal("top"), z.literal("right"), z.literal("bottom"), z.literal("left")]);
 const imageColorQuantizationSchema = z.union([

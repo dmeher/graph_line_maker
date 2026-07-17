@@ -150,6 +150,7 @@ async function pixelateLayeredImagesInWorker(
   const worker = getSharedWorker();
   const workerLayers = drawableLayers.map((layer, index) => ({
     bitmap: bitmaps[index],
+    id: layer.id,
     settings: layer.settings,
   }));
 

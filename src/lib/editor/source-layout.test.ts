@@ -3,8 +3,11 @@ import test from "node:test";
 import { clampVectorizerLineAdjust, normalizeGraphImageTraceEngine } from "../graph-paper.ts";
 import {
   applyUnlockedSourcePatch,
+  flipLayerBoxInBounds,
   normalizeRotationDegrees,
   reorderSourceImages,
+  rotateLayerBoxInBounds,
+  scaleLayerBoxToBounds,
   sourceAssetCacheKey,
   snapCellToGrid,
   snapRectToLayerGuides,
@@ -194,4 +197,24 @@ test("snap rect aligns moving layer edges and centers to nearby layers", () => {
 
   assert.equal(result.x, 10);
   assert.deepEqual(result.guides, [{ axis: "x", value: 14 }]);
+});
+
+test("selection scaling preserves each layer's relative position and size", () => {
+  const scaled = scaleLayerBoxToBounds(
+    { id: "second", x: 6, y: 4, width: 2, height: 3 },
+    { x: 2, y: 2, width: 8, height: 6 },
+    { x: 4, y: 3, width: 16, height: 3 },
+  );
+
+  assert.deepEqual(scaled, { id: "second", x: 12, y: 4, width: 4, height: 1.5 });
+});
+
+test("selection transforms rotate and flip layer boxes around the shared bounds", () => {
+  const box = { id: "second", x: 4, y: 4, width: 2, height: 1 };
+  const bounds = { x: 2, y: 3, width: 10, height: 4 };
+
+  assert.deepEqual(flipLayerBoxInBounds(box, bounds, "x"), { id: "second", x: 8, y: 4, width: 2, height: 1 });
+  assert.deepEqual(flipLayerBoxInBounds(box, bounds, "y"), { id: "second", x: 4, y: 5, width: 2, height: 1 });
+  assert.deepEqual(rotateLayerBoxInBounds(box, bounds, 1), { id: "second", x: 7, y: 2, width: 1, height: 2 });
+  assert.deepEqual(rotateLayerBoxInBounds(box, bounds, -1), { id: "second", x: 6, y: 6, width: 1, height: 2 });
 });

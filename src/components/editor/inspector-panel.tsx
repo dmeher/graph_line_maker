@@ -137,13 +137,18 @@ export interface InspectorPanelProps {
   placingClipartAssetId: string | null;
   placingGeneratedShape: boolean;
   selectedLayerCount: number;
+  selectedLayerBounds: { width: number; height: number } | null;
   selectedLayerLocked: boolean;
+  selectedLayerResizeDisabled: boolean;
   selectedLayerHidden: boolean;
   deleteSelectedLayer: () => void;
   toggleSelectedLayerLock: () => void;
   toggleSelectedLayerVisibility: () => void;
   duplicateSelectedLayers: () => void;
   nudgeSelectedLayer: (deltaX: number, deltaY: number) => void;
+  resizeSelectedLayerBounds: (size: { width?: number; height?: number }) => void;
+  rotateSelectedLayers: (direction: -1 | 1) => void;
+  flipSelectedLayers: (axis: "x" | "y") => void;
 
   draftShapeKind: GeneratedShapeKind;
   draftShapeWidthCm: number;
@@ -321,13 +326,18 @@ export function InspectorPanel(props: InspectorPanelProps) {
     placingClipartAssetId,
     placingGeneratedShape,
     selectedLayerCount,
+    selectedLayerBounds,
     selectedLayerLocked,
+    selectedLayerResizeDisabled,
     selectedLayerHidden,
     deleteSelectedLayer,
     toggleSelectedLayerLock,
     toggleSelectedLayerVisibility,
     duplicateSelectedLayers,
     nudgeSelectedLayer,
+    resizeSelectedLayerBounds,
+    rotateSelectedLayers,
+    flipSelectedLayers,
     draftShapeKind,
     draftShapeWidthCm,
     draftShapeHeightCm,
@@ -532,10 +542,10 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   ))}
                 </select>
               </label>
-              <NumberField label="Left padding" value={selectedSource.x} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { x: value })} />
-              <NumberField label="Right padding" value={sourceRightPadding(selectedSource)} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { x: settings.graphWidth - selectedSource.width - value })} />
-              <NumberField label="Top padding" value={selectedSource.y} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { y: value })} />
-              <NumberField label="Bottom padding" value={sourceBottomPadding(selectedSource)} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { y: settings.graphHeight - selectedSource.height - value })} />
+              <NumberField label="Left padding" value={selectedSource.x} min={-1000} max={1000} wholeStep readOnly onChange={() => undefined} />
+              <NumberField label="Right padding" value={sourceRightPadding(selectedSource)} min={-1000} max={1000} wholeStep readOnly onChange={() => undefined} />
+              <NumberField label="Top padding" value={selectedSource.y} min={-1000} max={1000} wholeStep readOnly onChange={() => undefined} />
+              <NumberField label="Bottom padding" value={sourceBottomPadding(selectedSource)} min={-1000} max={1000} wholeStep readOnly onChange={() => undefined} />
             </div>
             <button
               type="button"
@@ -567,7 +577,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
         <div className="grid min-h-32 place-items-center rounded-xl border border-[#2a3344] bg-[#141b28] p-4 text-center shadow-sm">
           <div className="space-y-2 text-[#8592a6]">
             <MousePointer2 size={28} className="mx-auto text-[#6b7688]" aria-hidden="true" />
-            <p className="text-sm">Select a source layer to edit its size, padding, transform, and detection settings.</p>
+            <p className="text-sm">Select a source layer to edit its size, transform, and detection settings.</p>
           </div>
         </div>
       )}
@@ -821,6 +831,36 @@ export function InspectorPanel(props: InspectorPanelProps) {
                 <button type="button" onClick={toggleSelectedLayerVisibility} disabled={!selectedLayerCount} className="h-9 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-semibold text-[#c3cdda] disabled:opacity-45">{selectedLayerHidden ? "Show" : "Hide"}</button>
                 <button type="button" onClick={toggleSelectedLayerLock} disabled={!selectedLayerCount} className="h-9 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-semibold text-[#c3cdda] disabled:opacity-45">{selectedLayerLocked ? "Unlock" : "Lock"}</button>
                 <button type="button" onClick={deleteSelectedLayer} disabled={!selectedLayerCount || selectedLayerLocked} className="h-9 rounded-md border border-[#fda29b] bg-[#141b28] text-xs font-semibold text-[#b42318] disabled:opacity-45">Delete</button>
+              </div>
+              {selectedLayerBounds ? (
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <NumberField
+                    label="Group width (cells)"
+                    value={selectedLayerBounds.width}
+                    min={0.25}
+                    max={1000}
+                    step={0.25}
+                    allowDecimalInput
+                    disabled={selectedLayerResizeDisabled}
+                    onChange={(width) => resizeSelectedLayerBounds({ width })}
+                  />
+                  <NumberField
+                    label="Group height (cells)"
+                    value={selectedLayerBounds.height}
+                    min={0.25}
+                    max={1000}
+                    step={0.25}
+                    allowDecimalInput
+                    disabled={selectedLayerResizeDisabled}
+                    onChange={(height) => resizeSelectedLayerBounds({ height })}
+                  />
+                </div>
+              ) : null}
+              <div className="mt-3 grid grid-cols-4 gap-1">
+                <button type="button" onClick={() => rotateSelectedLayers(-1)} disabled={selectedLayerResizeDisabled} aria-label="Rotate selected layers left" className="grid h-8 place-items-center rounded-md border border-[#2a3344] bg-[#141b28] text-[#c3cdda] disabled:opacity-45" title="Rotate selected layers left"><RotateCcw size={15} aria-hidden="true" /></button>
+                <button type="button" onClick={() => rotateSelectedLayers(1)} disabled={selectedLayerResizeDisabled} aria-label="Rotate selected layers right" className="grid h-8 place-items-center rounded-md border border-[#2a3344] bg-[#141b28] text-[#c3cdda] disabled:opacity-45" title="Rotate selected layers right"><RotateCw size={15} aria-hidden="true" /></button>
+                <button type="button" onClick={() => flipSelectedLayers("x")} disabled={selectedLayerResizeDisabled} aria-label="Flip selected layers horizontally" className="grid h-8 place-items-center rounded-md border border-[#2a3344] bg-[#141b28] text-[#c3cdda] disabled:opacity-45" title="Flip selected layers horizontally"><FlipHorizontal size={15} aria-hidden="true" /></button>
+                <button type="button" onClick={() => flipSelectedLayers("y")} disabled={selectedLayerResizeDisabled} aria-label="Flip selected layers vertically" className="grid h-8 place-items-center rounded-md border border-[#2a3344] bg-[#141b28] text-[#c3cdda] disabled:opacity-45" title="Flip selected layers vertically"><FlipVertical size={15} aria-hidden="true" /></button>
               </div>
               <div className="grid grid-cols-4 gap-1">
                 <button type="button" onClick={() => nudgeSelectedLayer(-1, 0)} disabled={!selectedLayerCount} className="h-8 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-bold disabled:opacity-45">←</button>
@@ -1134,7 +1174,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
             </CollapsibleSection>
 
             {selectedFillRegion ? (
-              <CollapsibleSection title={`Selected fill ${selectedFillRegion.id}`} summary={<ColorSummary value={selectedFillRegionColor} />} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")}>
+              <CollapsibleSection title={`Selected ${selectedFillRegion.kind === "source" ? "source" : "manual"} fill`} summary={<ColorSummary value={selectedFillRegionColor} />} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")}>
                 <div className="flex items-center justify-between gap-3">
                   <span className="text-xs font-semibold text-[#8592a6]">{selectedFillRegion.kind === "source" ? "Source fill" : "Manual fill"}</span>
                   <button

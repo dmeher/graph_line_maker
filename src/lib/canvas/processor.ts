@@ -4,6 +4,7 @@ import { maskFromImageData, maskFromVectorizedImageData, type ImageDataLike } fr
 import { mergeLayerPixelMasks } from "@/lib/canvas/layer-mask-merge";
 import { isPdfSource, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
 import { createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
+import { createStableFillRegionId } from "@/lib/canvas/fill-region-identity";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import {
   DEFAULT_GRID_LINE_COLOR,
@@ -37,6 +38,10 @@ export type ProcessedGraph = ProcessedGraphFor<HTMLCanvasElement>;
 
 export type FillRegion = {
   id: string;
+  /** Ephemeral value written into fillRegionMap for fast pixel hit-testing. */
+  mapId: number;
+  /** Numeric IDs from projects saved before layer-scoped fill keys existed. */
+  legacyId?: string;
   color: string;
   cellCount: number;
   centerX: number;
@@ -71,6 +76,7 @@ export type VectorizerSource = {
 };
 
 export type FittedImageLayer = {
+  id?: string;
   canvas: HTMLCanvasElement;
   settings: GraphSettings;
   vectorizerSource?: VectorizerSource;
@@ -79,12 +85,14 @@ export type FittedImageLayer = {
 };
 
 export type WorkerFittedImageLayer = {
+  id?: string;
   canvas: OffscreenCanvas;
   settings: GraphSettings;
   vectorizerCacheKey?: string;
 };
 
 type AnyFittedImageLayer = {
+  id?: string;
   canvas: CanvasLike;
   settings: GraphSettings;
   vectorizerSource?: VectorizerSource;
@@ -816,14 +824,11 @@ function defaultFillColorForRegion(settings: GraphSettings, kind: FillRegionKind
   return kind === "source" ? settings.outlineColor || settings.lineColor : settings.fillColor;
 }
 
-function fillColorForRegion(settings: GraphSettings, regionId: string, kind: FillRegionKind) {
-  const customColor = settings.fillRegions?.[regionId];
-  return customColor && isFillColor(customColor) ? customColor : defaultFillColorForRegion(settings, kind);
-}
-
 function colorForRegion(settings: GraphSettings, region: FillRegion) {
   const customColor = settings.fillRegions?.[region.id];
-  return customColor && isFillColor(customColor) ? customColor : region.color;
+  if (customColor && isFillColor(customColor)) return customColor;
+  const legacyColor = region.legacyId ? settings.fillRegions?.[region.legacyId] : undefined;
+  return legacyColor && isFillColor(legacyColor) ? legacyColor : region.color;
 }
 
 function labelFillRegions(fillLayers: FillMaskLayer[], width: number, height: number, settings: GraphSettings) {
@@ -882,7 +887,8 @@ function labelFillRegions(fillLayers: FillMaskLayer[], width: number, height: nu
 
       regions.push({
         id: regionId,
-        color: fillColorForRegion(settings, regionId, kind),
+        mapId: nextRegionId,
+        color: defaultFillColorForRegion(settings, kind),
         cellCount: count,
         centerX: count ? Math.round(sumX / count) : 0,
         centerY: count ? Math.round(sumY / count) : 0,
@@ -935,7 +941,7 @@ function drawFillRegions(
   if (!layerContext) throw new Error("Canvas is not available.");
 
   const colorCache = new Map<string, ReturnType<typeof hexToRgb>>();
-  const regionByNumber = new Map(regions.map((region) => [Number(region.id), region] as const));
+  const regionByNumber = new Map(regions.map((region) => [region.mapId, region] as const));
   const imageData = layerContext.createImageData(width, height);
   const data = imageData.data;
 
@@ -1310,10 +1316,11 @@ function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, optio
   const outputContext = getProcessingContext(output, { willReadFrequently: true });
   if (!outputContext) throw new Error("Canvas is not available.");
 
+  const displayRegions = regions.map((region) => ({ ...region, color: colorForRegion(settings, region) }));
   outputContext.fillStyle = settings.backgroundColor || "#ffffff";
   outputContext.fillRect(0, 0, output.width, output.height);
   if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
-  drawFillRegions(outputContext, fillRegionMap, regions, output.width, output.height, settings, 0.8);
+  drawFillRegions(outputContext, fillRegionMap, displayRegions, output.width, output.height, settings, 0.8);
   const imageLineThickness = lineThicknessForSettings(settings);
   const outlineColor = outlineColorForSettings(settings);
   drawMaskLayer(outputContext, outlineMask, output.width, output.height, outlineColor, 255, 0.12 * imageLineThickness);
@@ -1324,7 +1331,7 @@ function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, optio
   const outlineHex = rgbToHex(hexToRgb(outlineColor));
   const outlineCount = outlineMask.reduce((sum, value) => sum + value, 0);
   const fillCountsByColor = new Map<string, number>();
-  for (const region of regions) {
+  for (const region of displayRegions) {
     if (isTransparentFillColor(region.color)) continue;
     const hex = rgbToHex(hexToRgb(region.color));
     fillCountsByColor.set(hex, (fillCountsByColor.get(hex) ?? 0) + region.cellCount);
@@ -1342,7 +1349,7 @@ function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, optio
         sortOrder: index + 1,
       })),
     ],
-    fillRegions: regions,
+    fillRegions: displayRegions,
     fillRegionMap,
   };
 }
@@ -1379,7 +1386,7 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     return next;
   }
 
-  for (const layer of layers) {
+  for (const [layerIndex, layer] of layers.entries()) {
     if (!hasDrawableCanvas(layer.canvas)) continue;
     const fitted =
       layer.canvas.width === width && layer.canvas.height === height
@@ -1411,12 +1418,25 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     for (const region of local.regions) {
       if (nextRegionId >= 65535) break;
       nextRegionId += 1;
-      const globalId = String(nextRegionId);
+      const legacyId = String(nextRegionId);
       regionNumberMap.set(Number(region.id), nextRegionId);
+      const centerX = region.centerX;
+      const centerY = region.centerY;
+      const stableId = createStableFillRegionId({
+        layerId: layer.id ?? `layer:${layerIndex}`,
+        kind: region.kind,
+        centerX,
+        centerY,
+        placement: layer.vectorizerSource?.placement,
+      });
       regions.push({
         ...region,
-        id: globalId,
-        color: fillColorForRegion(layer.settings, region.id, region.kind),
+        id: stableId,
+        mapId: nextRegionId,
+        legacyId,
+        centerX,
+        centerY,
+        color: defaultFillColorForRegion(layer.settings, region.kind),
       });
     }
 
@@ -1424,15 +1444,15 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     maxLineThickness = Math.max(maxLineThickness, lineThicknessForSettings(layer.settings));
   }
 
-  const visibleCounts = new Map<string, number>();
+  const visibleCounts = new Map<number, number>();
   for (let pixel = 0; pixel < fillRegionMap.length; pixel += 1) {
     const regionNumber = fillRegionMap[pixel];
-    if (regionNumber) visibleCounts.set(String(regionNumber), (visibleCounts.get(String(regionNumber)) ?? 0) + 1);
+    if (regionNumber) visibleCounts.set(regionNumber, (visibleCounts.get(regionNumber) ?? 0) + 1);
   }
   const visibleRegions = regions
     .map((region) => ({
       ...region,
-      cellCount: visibleCounts.get(region.id) ?? 0,
+      cellCount: visibleCounts.get(region.mapId) ?? 0,
       color: colorForRegion(settings, region),
     }))
     .filter((region) => region.cellCount > 0);
@@ -1457,9 +1477,9 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     outlineCountsByColor.set(rgbToHex(hexToRgb(outlineColorForSettings(settings))), 0);
   }
   const fillCountsByColor = new Map<string, number>();
-  const visibleRegionById = new Map(visibleRegions.map((region) => [region.id, region] as const));
-  for (const [regionId, cellCount] of visibleCounts) {
-    const region = visibleRegionById.get(regionId);
+  const visibleRegionByMapId = new Map(visibleRegions.map((region) => [region.mapId, region] as const));
+  for (const [mapId, cellCount] of visibleCounts) {
+    const region = visibleRegionByMapId.get(mapId);
     if (!region) continue;
     const color = colorForRegion(settings, region);
     if (isTransparentFillColor(color)) continue;
@@ -1530,7 +1550,7 @@ export async function pixelateLayeredCanvasesAsync(
     return next;
   }
 
-  for (const layer of layers) {
+  for (const [layerIndex, layer] of layers.entries()) {
     throwIfAborted(options.signal);
     if (!hasDrawableCanvas(layer.canvas)) continue;
     let sourceData: ImageDataLike | null = null;
@@ -1573,14 +1593,25 @@ export async function pixelateLayeredCanvasesAsync(
     for (const region of local.regions) {
       if (nextRegionId >= 65535) break;
       nextRegionId += 1;
-      const globalId = String(nextRegionId);
+      const legacyId = String(nextRegionId);
       regionNumberMap.set(Number(region.id), nextRegionId);
+      const centerX = region.centerX + layerMasks.offsetX;
+      const centerY = region.centerY + layerMasks.offsetY;
+      const stableId = createStableFillRegionId({
+        layerId: layer.id ?? `layer:${layerIndex}`,
+        kind: region.kind,
+        centerX,
+        centerY,
+        placement: layer.vectorizerSource?.placement,
+      });
       regions.push({
         ...region,
-        id: globalId,
-        centerX: region.centerX + layerMasks.offsetX,
-        centerY: region.centerY + layerMasks.offsetY,
-        color: fillColorForRegion(layer.settings, region.id, region.kind),
+        id: stableId,
+        mapId: nextRegionId,
+        legacyId,
+        centerX,
+        centerY,
+        color: defaultFillColorForRegion(layer.settings, region.kind),
       });
     }
 
@@ -1604,15 +1635,15 @@ export async function pixelateLayeredCanvasesAsync(
     maxLineThickness = Math.max(maxLineThickness, lineThicknessForSettings(layer.settings));
   }
 
-  const visibleCounts = new Map<string, number>();
+  const visibleCounts = new Map<number, number>();
   for (let pixel = 0; pixel < fillRegionMap.length; pixel += 1) {
     const regionNumber = fillRegionMap[pixel];
-    if (regionNumber) visibleCounts.set(String(regionNumber), (visibleCounts.get(String(regionNumber)) ?? 0) + 1);
+    if (regionNumber) visibleCounts.set(regionNumber, (visibleCounts.get(regionNumber) ?? 0) + 1);
   }
   const visibleRegions = regions
     .map((region) => ({
       ...region,
-      cellCount: visibleCounts.get(region.id) ?? 0,
+      cellCount: visibleCounts.get(region.mapId) ?? 0,
       color: colorForRegion(settings, region),
     }))
     .filter((region) => region.cellCount > 0);
@@ -1648,9 +1679,9 @@ export async function pixelateLayeredCanvasesAsync(
     outlineCountsByColor.set(rgbToHex(hexToRgb(outlineColorForSettings(settings))), 0);
   }
   const fillCountsByColor = new Map<string, number>();
-  const visibleRegionById = new Map(visibleRegions.map((region) => [region.id, region] as const));
-  for (const [regionId, cellCount] of visibleCounts) {
-    const region = visibleRegionById.get(regionId);
+  const visibleRegionByMapId = new Map(visibleRegions.map((region) => [region.mapId, region] as const));
+  for (const [mapId, cellCount] of visibleCounts) {
+    const region = visibleRegionByMapId.get(mapId);
     if (!region) continue;
     const color = colorForRegion(settings, region);
     if (isTransparentFillColor(color)) continue;

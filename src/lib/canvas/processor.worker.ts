@@ -4,6 +4,7 @@ import type { RenderMode } from "@/lib/canvas/render-contracts";
 
 type WorkerLayerInput = {
   bitmap: ImageBitmap;
+  id?: string;
   settings: GraphSettings;
 };
 
@@ -53,6 +54,7 @@ workerContext.onmessage = (event: MessageEvent<WorkerRequest>) => {
       return [
         {
           canvas,
+          id: layer.id,
           settings: layer.settings,
         },
       ];

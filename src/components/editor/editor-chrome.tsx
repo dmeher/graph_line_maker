@@ -181,18 +181,16 @@ type EditorStatusBarProps = {
   dimensions: string;
   selection: string;
   zoom: number;
-  autoSave: string;
   online: boolean;
 };
 
-export const EditorStatusBar = memo(function EditorStatusBar({ status, processing, dimensions, selection, zoom, autoSave, online }: EditorStatusBarProps) {
+export const EditorStatusBar = memo(function EditorStatusBar({ status, processing, dimensions, selection, zoom, online }: EditorStatusBarProps) {
   return (
     <footer className="editor-status-bar" aria-live="polite">
       <span className={`editor-status-bar__state ${processing ? "is-processing" : ""}`}><i aria-hidden="true" />{status}</span>
       <span className="editor-status-bar__dimensions">{dimensions}</span>
       <span className="editor-status-bar__selection">{selection}</span>
       <span className="editor-status-bar__zoom">{Math.round(zoom * 100)}%</span>
-      <span className="editor-status-bar__autosave">Auto-save {autoSave}</span>
       <span className="editor-status-bar__connection"><i className={online ? "is-online" : ""} aria-hidden="true" />{online ? "Online" : "Offline"}</span>
       <span className="editor-status-bar__snap">Snap on</span>
     </footer>

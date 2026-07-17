@@ -7,6 +7,7 @@ import { createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thin
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import {
   DEFAULT_GRID_LINE_COLOR,
+  DEFAULT_MAJOR_GRID_EVERY,
   DEFAULT_OUTLINE_COLOR,
   GRAPH_MAJOR_CELL_PIXELS,
   GRAPH_SUBDIVISIONS,
@@ -1038,8 +1039,8 @@ function drawGraphPaperGrid(canvas: CanvasLike, settings: GraphSettings) {
   const baseLineWidth = Math.max(1, Math.min(10, Math.round(settings.gridLineThickness || 1)));
   const minorLineWidth = settings.gridPattern === "dot" ? baseLineWidth : Math.max(1, baseLineWidth);
   const midLineWidth = Math.max(1, baseLineWidth);
-  const majorLineWidth = Math.max(midLineWidth, baseLineWidth + 1);
-  const majorEvery = Math.max(1, Math.round(settings.majorGridEvery || 5));
+  const majorLineWidth = Math.min(10, baseLineWidth + 0.5);
+  const majorEvery = Math.max(1, Math.round(settings.majorGridEvery || DEFAULT_MAJOR_GRID_EVERY));
   const majorEveryMinor = Math.max(1, majorEvery * GRAPH_SUBDIVISIONS);
   const gridColor = hexToRgb(settings.gridLineColor || DEFAULT_GRID_LINE_COLOR);
 

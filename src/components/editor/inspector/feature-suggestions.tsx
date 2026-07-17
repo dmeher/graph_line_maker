@@ -23,7 +23,7 @@ const featureTools: FeatureToolCategory[] = [
     icon: Brush,
     status: "enabled",
     items: [
-      "Use Draw > Drawing Tools for cell paint, shape drawing, and the eraser.",
+      "Use Draw > Drawing Tools for cell paint, shape drawing, and image-line erasing.",
       "Shift/Ctrl/Cmd-click layers for multi-select, then use batch duplicate/delete/lock/show/nudge.",
       "Layer edges and centers snap while moving; hold Alt to temporarily disable snapping.",
     ],

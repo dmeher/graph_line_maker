@@ -99,7 +99,7 @@ import {
 
 type InspectorTab = "graph" | "source" | "draw" | "palette";
 type DrawTab = "shape" | "clipart";
-type DrawingTool = "image" | "cell" | "shape" | "eraser" | "image-eraser";
+type DrawingTool = "image" | "cell" | "shape" | "background-remover" | "image-eraser";
 type CollapsibleKey = "parameters" | "drawing" | "outline" | "fill" | "selectedFill" | "graphLines";
 type SourceStatus = { ready: boolean; previewUrl: string | null; error: string | null };
 
@@ -187,6 +187,7 @@ export interface InspectorPanelProps {
   renderCellAdvanced: (cell: GraphCellPaint) => ReactNode;
 
   updateSourceImage: (id: string, patch: Partial<GraphSourceImage>) => void;
+  applySourceImagePropertiesToAll: (id: string) => void;
   updateSourceImagePhysicalWidthCm: (id: string, value: number) => void;
   updateSourceImagePhysicalHeight: (id: string, value: number) => void;
   rotateSourceImage: (id: string, direction: 1 | -1) => void;
@@ -243,7 +244,6 @@ const drawTabs: { id: DrawTab; label: string }[] = [
 const drawingToolOptions: { id: DrawingTool; label: string }[] = [
   { id: "image", label: "Select" },
   { id: "cell", label: "Cell" },
-  { id: "eraser", label: "Eraser" },
   { id: "shape", label: "Shape" },
 ];
 
@@ -366,6 +366,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     renderClipartAdvanced,
     renderCellAdvanced,
     updateSourceImage,
+    applySourceImagePropertiesToAll,
     updateSourceImagePhysicalWidthCm,
     updateSourceImagePhysicalHeight,
     rotateSourceImage,
@@ -536,6 +537,15 @@ export function InspectorPanel(props: InspectorPanelProps) {
               <NumberField label="Top padding" value={selectedSource.y} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { y: value })} />
               <NumberField label="Bottom padding" value={sourceBottomPadding(selectedSource)} min={-1000} max={1000} wholeStep disabled={selectedSource.locked} onChange={(value) => updateSourceImage(selectedSource.id, { y: settings.graphHeight - selectedSource.height - value })} />
             </div>
+            <button
+              type="button"
+              onClick={() => applySourceImagePropertiesToAll(selectedSource.id)}
+              className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--line)] bg-[#141b28] px-3 text-xs font-semibold text-[#e7edf5] hover:bg-[#1b2535]"
+              title="Apply this image processing setup to every image"
+            >
+              <Copy size={14} aria-hidden="true" />
+              Apply image properties to all
+            </button>
           </div>
 
           <div className="grid grid-cols-4 gap-2">
@@ -800,7 +810,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                 onChange={(value) => setDrawingTool(value as DrawingTool)}
               />
               <p className="text-[12px] leading-5 text-[#9aa7ba]">
-                Eraser removes manual cell-paint drawings. Hold Alt while moving a layer to temporarily disable grid/layer snapping.
+                Hold Alt while moving a layer to temporarily disable grid/layer snapping.
               </p>
             </InspectorGroup>
 

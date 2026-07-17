@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type WheelEvent } from "react";
+import { removeBackgroundImageData } from "@/lib/canvas/background-removal";
 import { normalizeCrop, transformedImageSize, type CropPixels } from "@/lib/canvas/crop";
+import type { GraphBackgroundRemoval } from "@/lib/types";
 
 type ImageBox = {
   left: number;
@@ -53,6 +55,22 @@ const CROP_HANDLE_CLASSES: Record<CropHandle, string> = {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function sameImageBox(left: ImageBox | null, right: ImageBox) {
+  return Boolean(
+    left &&
+      left.left === right.left &&
+      left.top === right.top &&
+      left.width === right.width &&
+      left.height === right.height &&
+      left.naturalWidth === right.naturalWidth &&
+      left.naturalHeight === right.naturalHeight &&
+      left.sourceWidth === right.sourceWidth &&
+      left.sourceHeight === right.sourceHeight &&
+      left.scale === right.scale &&
+      left.rotationDegrees === right.rotationDegrees,
+  );
 }
 
 function cropFromPoints(startX: number, startY: number, endX: number, endY: number, box: ImageBox, aspectRatio: number | null) {
@@ -127,6 +145,7 @@ export function ManualCropper({
   flipY = false,
   guide = "thirds",
   interactionMode = "crop",
+  backgroundRemoval,
   onImageSizeChange,
   className = "",
 }: {
@@ -142,11 +161,13 @@ export function ManualCropper({
   flipY?: boolean;
   guide?: CropGuide;
   interactionMode?: "crop" | "pan";
+  backgroundRemoval?: GraphBackgroundRemoval;
   onImageSizeChange?: (size: { width: number; height: number }) => void;
   className?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const backgroundPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
   const pinchStateRef = useRef<PinchState | null>(null);
   const activePointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
@@ -157,6 +178,7 @@ export function ManualCropper({
   const [imageBox, setImageBox] = useState<ImageBox | null>(null);
   const [draftCrop, setDraftCrop] = useState<CropPixels | null>(crop);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [backgroundPreviewReady, setBackgroundPreviewReady] = useState(false);
 
   useEffect(() => {
     onImageSizeChangeRef.current = onImageSizeChange;
@@ -193,7 +215,7 @@ export function ManualCropper({
       scale,
       rotationDegrees: transformed.rotationDegrees,
     };
-    setImageBox(nextBox);
+    setImageBox((current) => (sameImageBox(current, nextBox) ? current : nextBox));
     if (
       reportedImageSizeRef.current.width !== transformed.width ||
       reportedImageSizeRef.current.height !== transformed.height
@@ -343,10 +365,50 @@ export function ManualCropper({
   }
 
   useEffect(() => {
-    setImageBox(null);
     const frame = window.requestAnimationFrame(() => measureImage());
     return () => window.cancelAnimationFrame(frame);
   }, [imageUrl, zoom, rotationDegrees, straightenDegrees, flipX, flipY, pan.x, pan.y]);
+
+  useEffect(() => {
+    const canvas = backgroundPreviewCanvasRef.current;
+    const image = imageRef.current;
+    if (!canvas || !imageBox || !image || !backgroundRemoval?.enabled) {
+      setBackgroundPreviewReady(false);
+      if (canvas) {
+        canvas.width = 1;
+        canvas.height = 1;
+      }
+      return;
+    }
+
+    const deviceScale = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    const width = Math.max(1, Math.round(imageBox.sourceWidth * imageBox.scale * deviceScale));
+    const height = Math.max(1, Math.round(imageBox.sourceHeight * imageBox.scale * deviceScale));
+    setBackgroundPreviewReady(false);
+    try {
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) return;
+      context.clearRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+      const imageData = context.getImageData(0, 0, width, height);
+      const cleaned = removeBackgroundImageData(imageData, backgroundRemoval.tolerance);
+      imageData.data.set(cleaned.data);
+      context.putImageData(imageData, 0, 0);
+      setBackgroundPreviewReady(true);
+    } catch {
+      // Keep the unmodified image visible when the browser cannot read a remote preview.
+      setBackgroundPreviewReady(false);
+    }
+  }, [
+    backgroundRemoval?.enabled,
+    backgroundRemoval?.tolerance,
+    imageBox?.scale,
+    imageBox?.sourceHeight,
+    imageBox?.sourceWidth,
+    imageUrl,
+  ]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -397,9 +459,17 @@ export function ManualCropper({
           alt="Crop preview"
           draggable={false}
           onLoad={() => window.requestAnimationFrame(() => measureImage())}
-          className="advanced-cropper__image"
+          className={`advanced-cropper__image ${backgroundRemoval?.enabled && backgroundPreviewReady ? "opacity-0" : ""}`}
           style={sourceImageStyle}
         />
+        {backgroundRemoval?.enabled ? (
+          <canvas
+            ref={backgroundPreviewCanvasRef}
+            className="advanced-cropper__image"
+            aria-hidden="true"
+            style={sourceImageStyle}
+          />
+        ) : null}
         {cropStyle ? (
           <div data-crop-move="true" className="advanced-cropper__selection" style={cropStyle}>
             <CropGuides guide={guide} />

@@ -1,4 +1,6 @@
 import { transformedImageSize } from "./crop-geometry.ts";
+import { removeBackgroundImageData } from "./background-removal.ts";
+import type { GraphBackgroundRemoval } from "@/lib/types";
 
 export { transformedImageSize } from "./crop-geometry.ts";
 
@@ -25,6 +27,8 @@ export type CropTransform = {
   flipX: boolean;
   flipY: boolean;
   aspectRatio: number | null;
+  /** Baked into the transformed crop PNG when enabled. */
+  backgroundRemoval?: GraphBackgroundRemoval;
 };
 
 export const DEFAULT_CROP_TRANSFORM: CropTransform = {
@@ -34,6 +38,7 @@ export const DEFAULT_CROP_TRANSFORM: CropTransform = {
   flipX: false,
   flipY: false,
   aspectRatio: null,
+  backgroundRemoval: undefined,
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -214,6 +219,7 @@ export async function transformImageUrlToFile({
   straightenDegrees = 0,
   flipX = false,
   flipY = false,
+  backgroundRemoval,
   fileName,
   type = "image/png",
 }: {
@@ -223,6 +229,7 @@ export async function transformImageUrlToFile({
   straightenDegrees?: number;
   flipX?: boolean;
   flipY?: boolean;
+  backgroundRemoval?: GraphBackgroundRemoval;
   fileName: string;
   type?: string;
 }) {
@@ -247,6 +254,13 @@ export async function transformImageUrlToFile({
     flipX,
     flipY,
   );
+
+  if (backgroundRemoval?.enabled) {
+    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const cleaned = removeBackgroundImageData(imageData, backgroundRemoval.tolerance);
+    imageData.data.set(cleaned.data);
+    context.putImageData(imageData, 0, 0);
+  }
 
   return canvasToFile(canvas, fileName, type);
 }

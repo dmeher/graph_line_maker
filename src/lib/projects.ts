@@ -62,7 +62,6 @@ import {
   normalizeGraphImageTraceEngine,
 } from "@/lib/graph-paper";
 import { MAX_CANVAS_DIMENSION, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
-import { MAX_SOURCE_IMAGES } from "@/lib/constants";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import {
   normalizeBackgroundRemoval,

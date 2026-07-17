@@ -25,6 +25,7 @@ export const NumberField = memo(function NumberField({
   allowDecimalInput = false,
   wholeStep = false,
   disabled = false,
+  readOnly = false,
   hideLabel = false,
   wrapperClassName,
   inputClassName,
@@ -38,6 +39,7 @@ export const NumberField = memo(function NumberField({
   allowDecimalInput?: boolean;
   wholeStep?: boolean;
   disabled?: boolean;
+  readOnly?: boolean;
   hideLabel?: boolean;
   wrapperClassName?: string;
   inputClassName?: string;
@@ -58,6 +60,7 @@ export const NumberField = memo(function NumberField({
   }
 
   function commitDraft(nextValue = draftValue) {
+    if (readOnly) return;
     const parsed = parseDraft(nextValue);
     if (parsed === null) {
       setDraftValue(String(value));
@@ -95,12 +98,15 @@ export const NumberField = memo(function NumberField({
         step={step}
         value={draftValue}
         disabled={disabled}
+        readOnly={readOnly}
+        aria-readonly={readOnly || undefined}
         onFocus={() => setIsFocused(true)}
         onBlur={() => {
           setIsFocused(false);
-          commitDraft();
+          if (!readOnly) commitDraft();
         }}
         onChange={(event) => {
+          if (readOnly) return;
           const nextValue = event.target.value;
           const parsed = parseDraft(nextValue);
           setDraftValue(nextValue);
@@ -112,7 +118,7 @@ export const NumberField = memo(function NumberField({
         }}
         className={
           inputClassName ??
-          "h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-[#141b28] px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-[#6b7688]"
+          `h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-[#141b28] px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-[#6b7688]${readOnly ? " cursor-default" : ""}`
         }
       />
     </label>

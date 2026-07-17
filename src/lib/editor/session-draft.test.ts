@@ -186,11 +186,11 @@ test("logout cleanup removes every editor draft without deleting unrelated prefe
   const storage = new MemoryStorage();
   storage.setItem(editorSessionDraftKey("project-1"), "one");
   storage.setItem(editorSessionDraftKey("project-2"), "two");
-  storage.setItem("graph-pixel-maker:autosave-interval", "30000");
+  storage.setItem("graph-pixel-maker:workspace-tab", "layers");
 
   clearEditorSessionDrafts(storage);
 
   assert.equal(storage.getItem(editorSessionDraftKey("project-1")), null);
   assert.equal(storage.getItem(editorSessionDraftKey("project-2")), null);
-  assert.equal(storage.getItem("graph-pixel-maker:autosave-interval"), "30000");
+  assert.equal(storage.getItem("graph-pixel-maker:workspace-tab"), "layers");
 });

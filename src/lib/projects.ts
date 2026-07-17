@@ -3,6 +3,7 @@ import "server-only";
 import { getSupabaseAdmin, tryGetSupabaseAdmin } from "@/lib/supabase/server";
 import { MAX_SOURCE_IMAGES, ORIGINAL_IMAGES_BUCKET, PROCESSED_IMAGES_BUCKET } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
+import { isStoredFillRegionId } from "@/lib/canvas/fill-region-identity";
 import {
   DEFAULT_CELL_SIZE_CM,
   DEFAULT_BACKGROUND_COLOR,
@@ -318,7 +319,7 @@ function clampSourceSizeCells(value: unknown, fallback: number) {
 function normalizeFillRegions(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const entries = Object.entries(value)
-    .filter(([regionId]) => /^\d+$/.test(regionId))
+    .filter(([regionId]) => isStoredFillRegionId(regionId))
     .map(([regionId, color]) => [regionId, normalizeCanvasFillColor(color)] as const)
     .slice(0, 500);
   return Object.fromEntries(entries);

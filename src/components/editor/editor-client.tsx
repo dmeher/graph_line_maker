@@ -49,6 +49,13 @@ import {
 import { saveProjectState } from "@/app/(app)/projects/actions";
 import { fullCrop, transformedImageSize, type CropPixels } from "@/lib/canvas/crop";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
+import {
+  copyFillRegionOverrides,
+  fillRegionLayerScope,
+  isStoredFillRegionId,
+  migrateLegacyFillRegionOverrides,
+  removeFillRegionOverridesForScopes,
+} from "@/lib/canvas/fill-region-identity";
 import { MAX_WORKING_SOURCE_PIXELS, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
 import { detectPreviewPolicy, workingImagePixelCap } from "@/lib/canvas/preview-policy";
 import { disposeCanvasProcessingWorker, pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
@@ -72,12 +79,15 @@ import {
 import {
   ROTATION_STEP_DEGREES,
   normalizeRotationDegrees,
+  flipLayerBoxInBounds,
   reorderSourceImages,
+  rotateLayerBoxInBounds,
   sourceAssetCacheKey,
   sourceLayouts,
   sourceProcessingCacheKey,
   sourceRenderOrder,
   sourceVectorizerCacheKey,
+  scaleLayerBoxToBounds,
   snapRectToLayerGuides,
   snapCellToGrid,
   stackEndCell,
@@ -197,7 +207,7 @@ type CanvasTool = "pointer" | "hand" | "fill";
 type DrawingLayerKey = `cell:${string}` | `shape:${string}` | `clipart:${string}`;
 type LayerKind = "source" | "cell" | "shape" | "clipart";
 type SelectableLayerKey = `source:${string}` | DrawingLayerKey;
-type ResizeHandleTarget = "source" | "shape" | null;
+type ResizeHandleTarget = "source" | "shape" | "selection" | null;
 type FillRegionPointerEvent = ReactPointerEvent<HTMLCanvasElement> | ReactMouseEvent<HTMLCanvasElement>;
 type ImageEraserCursor = { x: number; y: number; radius: number } | null;
 
@@ -247,7 +257,7 @@ const CANVAS_SELECTION_BOX_CLASS =
 const SELECT_POINTER_CURSOR =
   "url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='24'%20height='24'%20viewBox='0%200%2024%2024'%3E%3Cpath%20d='M5.5%204.8%2018.4%2010.3c.78.34.75%201.46-.04%201.77l-5.32%202.08a1.45%201.45%200%200%200-.81.81l-2.04%205.13c-.32.81-1.47.81-1.78-.01L5.5%204.8Z'%20fill='%23ffffff'%20stroke='%23000000'%20stroke-width='1.4'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E\") 6 5, default";
 type DragState = {
-  kind: "viewport" | "pan" | "source" | "shape" | "clipart" | "resize-source" | "resize-shape" | "cell-paint" | "shape-draw" | "image-erase";
+  kind: "viewport" | "pan" | "source" | "shape" | "clipart" | "resize-source" | "resize-shape" | "resize-selection" | "cell-paint" | "shape-draw" | "image-erase";
   pointerId: number;
   startClientX: number;
   startClientY: number;
@@ -282,6 +292,7 @@ type DragState = {
   startClipartX?: number;
   startClipartY?: number;
   layerStarts?: Map<SelectableLayerKey, LayerSnapBox>;
+  selectionBounds?: LayerSnapBox;
   eraseTargetSourceId?: string;
   eraseBounds?: ContentBounds;
   erasePlacement?: PlacementTransform;
@@ -332,15 +343,6 @@ const DRAG_PROCESSING_MAX_WAIT_MS = 1000;
 const COPY_OFFSET_CELLS = 0.5;
 const MAX_CLIPART_UPLOAD_BYTES = 6 * 1024 * 1024;
 const CM_PER_INCH = 2.54;
-const AUTO_SAVE_INTERVAL_STORAGE_KEY = "graph-pixel-editor-autosave-ms-v1";
-const AUTO_SAVE_ENABLED_STORAGE_KEY = "graph-pixel-editor-autosave-enabled-v1";
-const DEFAULT_AUTO_SAVE_INTERVAL_MS = 30000;
-const DEFAULT_AUTO_SAVE_ENABLED = false;
-const AUTO_SAVE_INTERVAL_OPTIONS = [
-  { value: 15000, label: "15 sec" },
-  { value: 30000, label: "30 sec" },
-  { value: 60000, label: "1 min" },
-] as const;
 const EDITOR_TEMPLATE_OPTIONS = [
   { id: "cross-stitch", label: "Cross-stitch" },
   { id: "pixel-art", label: "Pixel art" },
@@ -663,7 +665,7 @@ function normalizeFillRegions(value: GraphSettings["fillRegions"] | undefined) {
   if (!value || typeof value !== "object") return {};
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([regionId]) => /^\d+$/.test(regionId))
+      .filter(([regionId]) => isStoredFillRegionId(regionId))
       .map(([regionId, color]) => [regionId, normalizeCanvasFillColor(color)]),
   );
 }
@@ -1220,8 +1222,6 @@ export function EditorClient({ project }: { project: Project }) {
   const [selectedLayerKeys, setSelectedLayerKeys] = useState<SelectableLayerKey[]>([]);
   const [clipboardCount, setClipboardCount] = useState(0);
   const [snapGuides, setSnapGuides] = useState<LayerSnapGuide[]>([]);
-  const [autoSaveEnabled, setAutoSaveEnabled] = useState(DEFAULT_AUTO_SAVE_ENABLED);
-  const [autoSaveIntervalMs, setAutoSaveIntervalMs] = useState(DEFAULT_AUTO_SAVE_INTERVAL_MS);
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [previewCanvasSize, setPreviewCanvasSize] = useState({ width: 1, height: 1 });
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("image");
@@ -1314,6 +1314,7 @@ export function EditorClient({ project }: { project: Project }) {
   const workspaceMenuPortalRef = useRef<HTMLDivElement | null>(null);
   const noticeDismissTimerRef = useRef<number | NodeJS.Timeout | null>(null);
   const fillRegionMapRef = useRef<Uint16Array | null>(null);
+  const fillRegionIdByMapIdRef = useRef<Map<number, string>>(new Map());
   const settingsHistoryRef = useRef<SettingsHistory>({ undo: [], redo: [] });
   const pendingSettingsHistoryRef = useRef<GraphSettings | null>(null);
   const lastProcessedSignatureRef = useRef<string | null>(null);
@@ -1321,7 +1322,6 @@ export function EditorClient({ project }: { project: Project }) {
   const renderRequestRevisionRef = useRef(0);
   const cropDetectionUsedRef = useRef(false);
   const lastUploadedProcessedRevisionRef = useRef(project.processedImagePath ? 0 : -1);
-  const lastAutoSavedSignatureRef = useRef<string | null>(null);
   const lastDragProcessingAtRef = useRef(0);
   const forceNextProcessingRef = useRef(false);
   const spacePressedRef = useRef(false);
@@ -1375,20 +1375,6 @@ export function EditorClient({ project }: { project: Project }) {
       window.removeEventListener("offline", syncOnlineState);
     };
   }, [project]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const timer = window.setTimeout(() => {
-      const storedValue = window.localStorage.getItem(AUTO_SAVE_INTERVAL_STORAGE_KEY);
-      const stored = Number(storedValue ?? DEFAULT_AUTO_SAVE_INTERVAL_MS);
-      const valid = AUTO_SAVE_INTERVAL_OPTIONS.some((option) => option.value === stored);
-      setAutoSaveIntervalMs(valid ? stored : DEFAULT_AUTO_SAVE_INTERVAL_MS);
-      const storedEnabled = window.localStorage.getItem(AUTO_SAVE_ENABLED_STORAGE_KEY);
-      const legacyEnabled = storedValue !== null && valid && stored > 0;
-      setAutoSaveEnabled(storedEnabled === "true" ? true : storedEnabled === "false" ? false : legacyEnabled || DEFAULT_AUTO_SAVE_ENABLED);
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
 
   useEffect(() => {
     if (!isExportMenuOpen) return;
@@ -1565,12 +1551,17 @@ export function EditorClient({ project }: { project: Project }) {
   const setSettingsWithHistory = useCallback(
     (updater: GraphSettings | ((current: GraphSettings) => GraphSettings)) => {
       const current = settingsRef.current;
-      const next = deriveGraphSettings(typeof updater === "function" ? updater(current) : updater);
+      const migratedFillRegions = migrateLegacyFillRegionOverrides(current.fillRegions, fillRegions);
+      const base = migratedFillRegions === current.fillRegions ? current : { ...current, fillRegions: migratedFillRegions };
+      const candidate = typeof updater === "function" ? updater(base) : updater;
+      const next = deriveGraphSettings(
+        candidate.fillRegions === current.fillRegions && base !== current ? { ...candidate, fillRegions: base.fillRegions } : candidate,
+      );
       if (!pushUndoSettings(current, next)) return;
       settingsRef.current = next;
       setSettings(next);
     },
-    [pushUndoSettings],
+    [fillRegions, pushUndoSettings],
   );
   const updateSetting = useCallback(<K extends keyof GraphSettings>(key: K, value: GraphSettings[K]) => {
     setSettingsWithHistory((current) => ({ ...current, [key]: value }));
@@ -1616,7 +1607,7 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   function currentFillRegionColor(region: FillRegion) {
-    return settings.fillRegions[region.id] ?? defaultFillRegionColor(region);
+    return settings.fillRegions[region.id] ?? (region.legacyId ? settings.fillRegions[region.legacyId] : undefined) ?? defaultFillRegionColor(region);
   }
 
   const selectedFillRegionColor = selectedFillRegion ? currentFillRegionColor(selectedFillRegion) : settings.fillColor;
@@ -1840,6 +1831,45 @@ export function EditorClient({ project }: { project: Project }) {
     return [];
   }
 
+  function setLayerCheckboxSelection(key: SelectableLayerKey, checked: boolean) {
+    const current = settingsRef.current;
+    const selected = selectedLayerKeysForAction(current);
+    const groupId = layerGroupIdForKey(current, key);
+    const next = checked
+      ? expandSelectionForGroups(current, Array.from(new Set([...selected, key])))
+      : selected.filter((item) => (groupId ? layerGroupIdForKey(current, item) !== groupId : item !== key));
+    setSelectedLayerKeys(next);
+    if (next.length) {
+      focusPrimarySelection(checked ? key : next[0]);
+      return;
+    }
+    setSelectedSourceId(null);
+    setSelectedDrawingLayerId(null);
+  }
+
+  function setAllLayerCheckboxes(checked: boolean) {
+    const keys = Array.from(selectableLayerKeysFromSettings(settingsRef.current));
+    setSelectedLayerKeys(checked ? keys : []);
+    if (checked && keys.length) {
+      focusPrimarySelection(keys[0]);
+      return;
+    }
+    setSelectedSourceId(null);
+    setSelectedDrawingLayerId(null);
+  }
+
+  function renderLayerSelectionCheckbox(key: SelectableLayerKey, selected: boolean, name: string) {
+    return (
+      <input
+        type="checkbox"
+        checked={selected}
+        aria-label={`Select ${name}`}
+        onChange={(event) => setLayerCheckboxSelection(key, event.target.checked)}
+        className={`h-4 w-4 cursor-pointer ${selected ? "accent-[var(--on-brand)]" : "accent-[var(--editor-accent)]"}`}
+      />
+    );
+  }
+
   function layerSnapTargets(current: GraphSettings, activeKey: SelectableLayerKey, excludedKeys = new Set<SelectableLayerKey>([activeKey])): LayerSnapBox[] {
     const targets: LayerSnapBox[] = [];
     for (const layout of sourceLayouts(current.sourceImages)) {
@@ -1958,8 +1988,8 @@ export function EditorClient({ project }: { project: Project }) {
     };
   }
 
-  function selectionBoundsForOverlay(current: GraphSettings, keys: SelectableLayerKey[]) {
-    const boxes = Array.from(layerStartsForSelection(current, keys).values()).map((box) => {
+  function selectionBoundsForLayerStarts(current: GraphSettings, starts: Map<SelectableLayerKey, LayerSnapBox>) {
+    const boxes = Array.from(starts.values()).map((box) => {
       const { type } = parseLayerKey(box.id as SelectableLayerKey);
       const offsetX = type === "source" ? current.imageOffsetX / GRAPH_MAJOR_CELL_PIXELS : 0;
       const offsetY = type === "source" ? current.imageOffsetY / GRAPH_MAJOR_CELL_PIXELS : 0;
@@ -1970,7 +2000,203 @@ export function EditorClient({ project }: { project: Project }) {
     const top = Math.min(...boxes.map((box) => box.y));
     const right = Math.max(...boxes.map((box) => box.x + box.width));
     const bottom = Math.max(...boxes.map((box) => box.y + box.height));
-    return { x: left, y: top, width: Math.max(0.01, right - left), height: Math.max(0.01, bottom - top) };
+    return { id: "selection", x: left, y: top, width: Math.max(0.01, right - left), height: Math.max(0.01, bottom - top) };
+  }
+
+  function selectionBoundsForOverlay(current: GraphSettings, keys: SelectableLayerKey[]) {
+    return selectionBoundsForLayerStarts(current, layerStartsForSelection(current, keys));
+  }
+
+  function layerSelectionContainsLocked(current: GraphSettings, keys: SelectableLayerKey[]) {
+    return keys.some((key) => {
+      const { type, id } = parseLayerKey(key);
+      if (type === "source") return Boolean(current.sourceImages.find((source) => source.id === id)?.locked);
+      if (type === "cell") return Boolean(current.cellPaints.find((cell) => cell.id === id)?.locked);
+      if (type === "shape") return Boolean(current.graphShapes.find((shape) => shape.id === id)?.locked);
+      return Boolean(current.clipartImages.find((clipart) => clipart.id === id)?.locked);
+    });
+  }
+
+  function resizeLayerSelection(
+    current: GraphSettings,
+    starts: Map<SelectableLayerKey, LayerSnapBox>,
+    startBounds: LayerSnapBox,
+    nextBounds: LayerSnapBox,
+  ) {
+    let changed = false;
+    const sourceOffsetX = current.imageOffsetX / GRAPH_MAJOR_CELL_PIXELS;
+    const sourceOffsetY = current.imageOffsetY / GRAPH_MAJOR_CELL_PIXELS;
+    const scaledBoxFor = (key: SelectableLayerKey) => {
+      const start = starts.get(key);
+      if (!start) return null;
+      const { type } = parseLayerKey(key);
+      const visualStart = type === "source"
+        ? { ...start, x: start.x + sourceOffsetX, y: start.y + sourceOffsetY }
+        : start;
+      return scaleLayerBoxToBounds(visualStart, startBounds, nextBounds);
+    };
+
+    const sourceImages = current.sourceImages.map((source) => {
+      const key = sourceLayerKey(source.id);
+      const scaled = scaledBoxFor(key);
+      if (!scaled || source.locked) return source;
+      const width = clampSourceSizeCells(scaled.width, source.width);
+      const height = clampSourceSizeCells(scaled.height, source.height);
+      const x = clampSourceX(scaled.x - sourceOffsetX, current.graphWidth, width);
+      const y = clampFreeCellCoordinate(scaled.y - sourceOffsetY, source.y);
+      if (source.x === x && source.y === y && source.width === width && source.height === height) return source;
+      changed = true;
+      return { ...source, x, y, width, height };
+    });
+    const cellPaints = current.cellPaints.map((cell) => {
+      const scaled = scaledBoxFor(drawingLayerKey("cell", cell.id));
+      if (!scaled || cell.locked) return cell;
+      const x = roundCells(Math.max(0, scaled.x));
+      const y = roundCells(Math.max(0, scaled.y));
+      const width = clampSourceSizeCells(scaled.width, cell.width);
+      const height = clampSourceSizeCells(scaled.height, cell.height);
+      if (cell.x === x && cell.y === y && cell.width === width && cell.height === height) return cell;
+      changed = true;
+      return { ...cell, x, y, width, height };
+    });
+    const graphShapes = current.graphShapes.map((shape) => {
+      const scaled = scaledBoxFor(drawingLayerKey("shape", shape.id));
+      if (!scaled || shape.locked) return shape;
+      const x = clampFreeCellCoordinate(scaled.x, shape.x);
+      const y = clampFreeCellCoordinate(scaled.y, shape.y);
+      const width = clampSourceSizeCells(scaled.width, shape.width);
+      const height = clampSourceSizeCells(scaled.height, shape.height);
+      if (shape.x === x && shape.y === y && shape.width === width && shape.height === height) return shape;
+      changed = true;
+      return { ...shape, x, y, width, height };
+    });
+    const clipartImages = current.clipartImages.map((clipart) => {
+      const scaled = scaledBoxFor(drawingLayerKey("clipart", clipart.id));
+      if (!scaled || clipart.locked) return clipart;
+      const x = clampFreeCellCoordinate(scaled.x, clipart.x);
+      const y = clampFreeCellCoordinate(scaled.y, clipart.y);
+      const width = clampSourceSizeCells(scaled.width, clipart.width);
+      const height = clampSourceSizeCells(scaled.height, clipart.height);
+      if (clipart.x === x && clipart.y === y && clipart.width === width && clipart.height === height) return clipart;
+      changed = true;
+      return { ...clipart, x, y, width, height };
+    });
+
+    return {
+      changed,
+      next: changed
+        ? {
+            ...current,
+            sourceImages,
+            cellPaints,
+            graphShapes,
+            clipartImages,
+          }
+        : current,
+    };
+  }
+
+  function transformLayerSelection(
+    current: GraphSettings,
+    starts: Map<SelectableLayerKey, LayerSnapBox>,
+    bounds: LayerSnapBox,
+    transform: { type: "flip"; axis: "x" | "y" } | { type: "rotate"; direction: -1 | 1 },
+  ) {
+    let changed = false;
+    const sourceOffsetX = current.imageOffsetX / GRAPH_MAJOR_CELL_PIXELS;
+    const sourceOffsetY = current.imageOffsetY / GRAPH_MAJOR_CELL_PIXELS;
+    const transformedBoxFor = (key: SelectableLayerKey) => {
+      const start = starts.get(key);
+      if (!start) return null;
+      const { type } = parseLayerKey(key);
+      const visualStart = type === "source"
+        ? { ...start, x: start.x + sourceOffsetX, y: start.y + sourceOffsetY }
+        : start;
+      return transform.type === "flip"
+        ? flipLayerBoxInBounds(visualStart, bounds, transform.axis)
+        : rotateLayerBoxInBounds(visualStart, bounds, transform.direction);
+    };
+    const rotationDelta = transform.type === "rotate" ? transform.direction * ROTATION_STEP_DEGREES : 0;
+    const globalFlipAxis = transform.type === "flip" ? transform.axis : null;
+    const localFlipAxis = (rotationDegrees: number) => {
+      if (!globalFlipAxis) return null;
+      const sideways = normalizeRotationDegrees(rotationDegrees) === 90 || normalizeRotationDegrees(rotationDegrees) === 270;
+      return sideways ? (globalFlipAxis === "x" ? "y" : "x") : globalFlipAxis;
+    };
+
+    const sourceImages = current.sourceImages.map((source) => {
+      const transformed = transformedBoxFor(sourceLayerKey(source.id));
+      if (!transformed || source.locked) return source;
+      const width = clampSourceSizeCells(transformed.width, source.width);
+      const height = clampSourceSizeCells(transformed.height, source.height);
+      const x = clampSourceX(transformed.x - sourceOffsetX, current.graphWidth, width);
+      const y = clampFreeCellCoordinate(transformed.y - sourceOffsetY, source.y);
+      const axis = localFlipAxis(source.rotationDegrees);
+      const rotationDegrees = rotationDelta ? normalizeRotationDegrees(source.rotationDegrees + rotationDelta) : source.rotationDegrees;
+      const flipX = axis === "x" ? !source.flipX : source.flipX;
+      const flipY = axis === "y" ? !source.flipY : source.flipY;
+      if (source.x === x && source.y === y && source.width === width && source.height === height && source.rotationDegrees === rotationDegrees && source.flipX === flipX && source.flipY === flipY) return source;
+      changed = true;
+      return { ...source, x, y, width, height, rotationDegrees, flipX, flipY };
+    });
+    const cellPaints = current.cellPaints.map((cell) => {
+      const transformed = transformedBoxFor(drawingLayerKey("cell", cell.id));
+      if (!transformed || cell.locked) return cell;
+      const x = roundCells(Math.max(0, transformed.x));
+      const y = roundCells(Math.max(0, transformed.y));
+      const width = clampSourceSizeCells(transformed.width, cell.width);
+      const height = clampSourceSizeCells(transformed.height, cell.height);
+      const axis = localFlipAxis(cell.rotationDegrees);
+      const rotationDegrees = rotationDelta ? normalizeRotationDegrees(cell.rotationDegrees + rotationDelta) : cell.rotationDegrees;
+      const flipX = axis === "x" ? !cell.flipX : cell.flipX;
+      const flipY = axis === "y" ? !cell.flipY : cell.flipY;
+      if (cell.x === x && cell.y === y && cell.width === width && cell.height === height && cell.rotationDegrees === rotationDegrees && cell.flipX === flipX && cell.flipY === flipY) return cell;
+      changed = true;
+      return { ...cell, x, y, width, height, rotationDegrees, flipX, flipY };
+    });
+    const graphShapes = current.graphShapes.map((shape) => {
+      const transformed = transformedBoxFor(drawingLayerKey("shape", shape.id));
+      if (!transformed || shape.locked) return shape;
+      const x = clampFreeCellCoordinate(transformed.x, shape.x);
+      const y = clampFreeCellCoordinate(transformed.y, shape.y);
+      const width = clampSourceSizeCells(transformed.width, shape.width);
+      const height = clampSourceSizeCells(transformed.height, shape.height);
+      const axis = localFlipAxis(shape.rotationDegrees);
+      const rotationDegrees = rotationDelta ? normalizeRotationDegrees(shape.rotationDegrees + rotationDelta) : shape.rotationDegrees;
+      const flipX = axis === "x" ? !shape.flipX : shape.flipX;
+      const flipY = axis === "y" ? !shape.flipY : shape.flipY;
+      if (shape.x === x && shape.y === y && shape.width === width && shape.height === height && shape.rotationDegrees === rotationDegrees && shape.flipX === flipX && shape.flipY === flipY) return shape;
+      changed = true;
+      return { ...shape, x, y, width, height, rotationDegrees, flipX, flipY };
+    });
+    const clipartImages = current.clipartImages.map((clipart) => {
+      const transformed = transformedBoxFor(drawingLayerKey("clipart", clipart.id));
+      if (!transformed || clipart.locked) return clipart;
+      const x = clampFreeCellCoordinate(transformed.x, clipart.x);
+      const y = clampFreeCellCoordinate(transformed.y, clipart.y);
+      const width = clampSourceSizeCells(transformed.width, clipart.width);
+      const height = clampSourceSizeCells(transformed.height, clipart.height);
+      const axis = localFlipAxis(clipart.rotationDegrees);
+      const rotationDegrees = rotationDelta ? normalizeRotationDegrees(clipart.rotationDegrees + rotationDelta) : clipart.rotationDegrees;
+      const flipX = axis === "x" ? !clipart.flipX : clipart.flipX;
+      const flipY = axis === "y" ? !clipart.flipY : clipart.flipY;
+      if (clipart.x === x && clipart.y === y && clipart.width === width && clipart.height === height && clipart.rotationDegrees === rotationDegrees && clipart.flipX === flipX && clipart.flipY === flipY) return clipart;
+      changed = true;
+      return { ...clipart, x, y, width, height, rotationDegrees, flipX, flipY };
+    });
+
+    return {
+      changed,
+      next: changed
+        ? {
+            ...current,
+            sourceImages,
+            cellPaints,
+            graphShapes,
+            clipartImages,
+          }
+        : current,
+    };
   }
 
   function drawingRightPadding(layer: { x: number; width: number }) {
@@ -2032,10 +2258,14 @@ export function EditorClient({ project }: { project: Project }) {
 
   function updateClipartImage(clipartId: string, patch: Partial<GraphClipartImage>) {
     setSettingsWithHistory((current) => {
-      const onlyChangesPosition = Object.keys(patch).every((key) => key === "x" || key === "y");
+      const retainsFillOverrides = Object.keys(patch).every((key) =>
+        ["x", "y", "width", "height", "rotationDegrees", "flipX", "flipY", "locked", "visible", "groupId", "name"].includes(key),
+      );
       return {
         ...current,
-        ...(onlyChangesPosition ? {} : { fillRegions: {} }),
+        fillRegions: retainsFillOverrides
+          ? current.fillRegions
+          : removeFillRegionOverridesForScopes(current.fillRegions, [fillRegionLayerScope("clipart", clipartId)]),
         clipartImages: current.clipartImages.map((clipart) => {
           if (clipart.id !== clipartId || clipart.locked) return clipart;
           return {
@@ -2132,10 +2362,14 @@ export function EditorClient({ project }: { project: Project }) {
     >,
   ) {
     setSettingsWithHistory((current) => {
-      const onlyChangesPosition = Object.keys(patch).every((key) => key === "x" || key === "y");
+      const retainsFillOverrides = Object.keys(patch).every((key) =>
+        ["x", "y", "width", "height", "rotationDegrees", "flipX", "flipY", "topPadding", "bottomPadding", "locked", "measurementUnit", "groupId", "name"].includes(key),
+      );
       return {
         ...current,
-        ...(onlyChangesPosition ? {} : { fillRegions: {} }),
+        fillRegions: retainsFillOverrides
+          ? current.fillRegions
+          : removeFillRegionOverridesForScopes(current.fillRegions, [fillRegionLayerScope("source", sourceId)]),
         sourceImages: current.sourceImages.map((source) => {
           if (source.id !== sourceId) return source;
           const changesLockedGeometry =
@@ -2200,7 +2434,10 @@ export function EditorClient({ project }: { project: Project }) {
     setSettingsWithHistory((current) => ({
       ...current,
       ...properties,
-      fillRegions: {},
+      fillRegions: removeFillRegionOverridesForScopes(current.fillRegions, [
+        ...current.sourceImages.map((image) => fillRegionLayerScope("source", image.id)),
+        ...current.clipartImages.map((image) => fillRegionLayerScope("clipart", image.id)),
+      ]),
       sourceImages: current.sourceImages.map((image) => ({ ...image, ...properties })),
       clipartImages: current.clipartImages.map((image) => ({ ...image, ...properties })),
     }));
@@ -2210,7 +2447,7 @@ export function EditorClient({ project }: { project: Project }) {
   function setSourceBackgroundRemoval(sourceId: string, config: GraphBackgroundRemoval | undefined) {
     setSettingsWithHistory((current) => ({
       ...current,
-      fillRegions: {},
+      fillRegions: removeFillRegionOverridesForScopes(current.fillRegions, [fillRegionLayerScope("source", sourceId)]),
       sourceImages: current.sourceImages.map((source) =>
         source.id === sourceId ? { ...source, backgroundRemoval: config?.enabled ? { enabled: true, tolerance: clampBackgroundTolerance(config.tolerance) } : undefined } : source,
       ),
@@ -2230,7 +2467,7 @@ export function EditorClient({ project }: { project: Project }) {
   function clearSourceErasing(sourceId: string) {
     setSettingsWithHistory((current) => ({
       ...current,
-      fillRegions: {},
+      fillRegions: removeFillRegionOverridesForScopes(current.fillRegions, [fillRegionLayerScope("source", sourceId)]),
       sourceImages: current.sourceImages.map((source) =>
         source.id === sourceId ? { ...source, eraseStrokes: [] } : source,
       ),
@@ -2294,7 +2531,7 @@ export function EditorClient({ project }: { project: Project }) {
       if (index < 0 || nextIndex < 0 || nextIndex >= current.sourceImages.length) return current;
       if (current.sourceImages[index]?.locked || current.sourceImages[nextIndex]?.locked) return current;
       const sourceImages = reorderSourceImages(current.sourceImages, index, nextIndex);
-      return { ...current, fillRegions: {}, sourceImages };
+      return { ...current, sourceImages };
     });
   }
 
@@ -2305,7 +2542,7 @@ export function EditorClient({ project }: { project: Project }) {
     setDeletingSourceId(sourceId);
     setSettingsWithHistory((current) => ({
       ...current,
-      fillRegions: {},
+      fillRegions: removeFillRegionOverridesForScopes(current.fillRegions, [fillRegionLayerScope("source", sourceId)]),
       sourceImages: current.sourceImages.filter((source) => source.id !== sourceId || source.locked),
     }));
     window.setTimeout(() => setDeletingSourceId((current) => (current === sourceId ? null : current)), 180);
@@ -2364,12 +2601,12 @@ export function EditorClient({ project }: { project: Project }) {
       const toIndex = list.findIndex((item) => item.id === toId);
       if (fromIndex < 0 || toIndex < 0) return current;
       if (list[fromIndex]?.locked || list[toIndex]?.locked) return current;
-      if (type === "source") return { ...current, fillRegions: {}, sourceImages: reorderSourceImages(current.sourceImages, fromIndex, toIndex) };
+      if (type === "source") return { ...current, sourceImages: reorderSourceImages(current.sourceImages, fromIndex, toIndex) };
       const nextList = [...list];
       const [item] = nextList.splice(fromIndex, 1);
       nextList.splice(toIndex, 0, item);
       if (type === "cell") return { ...current, cellPaints: nextList as GraphCellPaint[] };
-      if (type === "clipart") return { ...current, fillRegions: {}, clipartImages: nextList as GraphClipartImage[] };
+      if (type === "clipart") return { ...current, clipartImages: nextList as GraphClipartImage[] };
       return { ...current, graphShapes: nextList as GraphShapeDrawing[] };
     });
   }
@@ -2433,7 +2670,7 @@ export function EditorClient({ project }: { project: Project }) {
       const [item] = nextList.splice(index, 1);
       nextList.splice(nextIndex, 0, item);
       if (type === "cell") return { ...current, cellPaints: nextList as GraphCellPaint[] };
-      if (type === "clipart") return { ...current, fillRegions: {}, clipartImages: nextList as GraphClipartImage[] };
+      if (type === "clipart") return { ...current, clipartImages: nextList as GraphClipartImage[] };
       return { ...current, graphShapes: nextList as GraphShapeDrawing[] };
     });
   }
@@ -2532,6 +2769,7 @@ export function EditorClient({ project }: { project: Project }) {
       const defaultColor = region ? defaultFillRegionColor(region, current) : current.fillColor;
       if (color.toLowerCase() === defaultColor.toLowerCase()) delete fillRegions[regionId];
       else fillRegions[regionId] = color;
+      if (region?.legacyId) delete fillRegions[region.legacyId];
       return { ...current, fillRegions };
     });
   }
@@ -2540,6 +2778,8 @@ export function EditorClient({ project }: { project: Project }) {
     setSettingsWithHistory((current) => {
       const fillRegions = { ...current.fillRegions };
       delete fillRegions[regionId];
+      const legacyId = fillRegionsById.get(regionId)?.legacyId;
+      if (legacyId) delete fillRegions[legacyId];
       return { ...current, fillRegions };
     });
   }
@@ -2707,7 +2947,6 @@ export function EditorClient({ project }: { project: Project }) {
     const y = clampFreeCellCoordinate(snapCellToGrid(point.y - height / 2), 0);
     setSettingsWithHistory((current) => ({
       ...current,
-      fillRegions: {},
       clipartImages: [
         ...current.clipartImages,
         {
@@ -3090,7 +3329,7 @@ export function EditorClient({ project }: { project: Project }) {
     if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return null;
 
     const regionNumber = regionMap[y * canvas.width + x];
-    return regionNumber ? String(regionNumber) : null;
+    return regionNumber ? fillRegionIdByMapIdRef.current.get(regionNumber) ?? null : null;
   }
 
   function floatingPalettePosition(event: FillRegionPointerEvent) {
@@ -3378,6 +3617,43 @@ export function EditorClient({ project }: { project: Project }) {
     beginGraphInteraction();
   }
 
+  function beginSelectionResize(event: ReactPointerEvent<HTMLElement>, resizeCorner: SourceResizeHandle) {
+    const current = settingsRef.current;
+    const keys = selectedLayerKeysForAction(current);
+    if (showOriginal || event.button !== 0 || keys.length < 2 || layerSelectionContainsLocked(current, keys)) return;
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const layerStarts = layerStartsForSelection(current, keys);
+    const selectionBounds = selectionBoundsForLayerStarts(current, layerStarts);
+    if (!selectionBounds) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setResizeHandleTarget("selection");
+    dragStateRef.current = {
+      kind: "resize-selection",
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startOffsetX: current.imageOffsetX,
+      startOffsetY: current.imageOffsetY,
+      resizeCorner,
+      startScrollLeft: canvasScrollRef.current?.scrollLeft ?? 0,
+      startScrollTop: canvasScrollRef.current?.scrollTop ?? 0,
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      rectWidth: rect.width,
+      rectHeight: rect.height,
+      layerStarts,
+      selectionBounds,
+      moved: false,
+      historyRecorded: false,
+    };
+    beginGraphInteraction();
+  }
+
   function dragGraph(event: ReactPointerEvent<HTMLElement>) {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== event.pointerId) {
@@ -3557,6 +3833,49 @@ export function EditorClient({ project }: { project: Project }) {
           ...current,
           clipartImages: current.clipartImages.map((item) => (item.id === dragState.clipartId ? { ...item, x, y } : item)),
         });
+        settingsRef.current = next;
+        return next;
+      });
+      return;
+    }
+
+    if (dragState.kind === "resize-selection" && dragState.layerStarts?.size && dragState.selectionBounds) {
+      const deltaCellsX = deltaX / GRAPH_MAJOR_CELL_PIXELS;
+      const deltaCellsY = deltaY / GRAPH_MAJOR_CELL_PIXELS;
+      setSettings((current) => {
+        if (layerSelectionContainsLocked(current, Array.from(dragState.layerStarts!.keys()))) return current;
+        let left = dragState.selectionBounds!.x;
+        let right = dragState.selectionBounds!.x + dragState.selectionBounds!.width;
+        let top = dragState.selectionBounds!.y;
+        let bottom = dragState.selectionBounds!.y + dragState.selectionBounds!.height;
+        if (dragState.resizeCorner?.includes("w")) left = snapCellToGrid(left + deltaCellsX);
+        if (dragState.resizeCorner?.includes("e")) right = snapCellToGrid(right + deltaCellsX);
+        if (dragState.resizeCorner?.includes("n")) top = snapCellToGrid(top + deltaCellsY);
+        if (dragState.resizeCorner?.includes("s")) bottom = snapCellToGrid(bottom + deltaCellsY);
+
+        const minSize = 0.25;
+        if (right - left < minSize) {
+          if (dragState.resizeCorner?.includes("w")) left = right - minSize;
+          else right = left + minSize;
+        }
+        if (bottom - top < minSize) {
+          if (dragState.resizeCorner?.includes("n")) top = bottom - minSize;
+          else bottom = top + minSize;
+        }
+
+        const resized = resizeLayerSelection(current, dragState.layerStarts!, dragState.selectionBounds!, {
+          id: "selection",
+          x: left,
+          y: top,
+          width: right - left,
+          height: bottom - top,
+        });
+        if (!resized.changed) return current;
+        if (!dragState.historyRecorded) {
+          pushUndoSettings(current);
+          dragState.historyRecorded = true;
+        }
+        const next = deriveGraphSettings(resized.next);
         settingsRef.current = next;
         return next;
       });
@@ -3858,6 +4177,7 @@ export function EditorClient({ project }: { project: Project }) {
     setFloatingPalette(null);
     setCopiedFillColor(null);
     fillRegionMapRef.current = null;
+    fillRegionIdByMapIdRef.current = new Map();
     sourceCanvasRef.current = null;
     sourceCanvasesRef.current = new Map();
     sourceWorkingCanvasesRef.current = new Map();
@@ -4138,6 +4458,7 @@ export function EditorClient({ project }: { project: Project }) {
           const sourceCanvas = ensureWorkingSourceCanvas(layout.source);
           if (!sourceCanvas) throw new Error(`${layout.source.name} is not available.`);
           return {
+            id: fillRegionLayerScope("source", layout.source.id),
             canvas: sourceCanvas,
             settings: sourceSettings(settings, layout.source),
             vectorizerSource: {
@@ -4171,6 +4492,7 @@ export function EditorClient({ project }: { project: Project }) {
           if (!sourceCanvas) throw new Error(`${clipart.name} is not available.`);
           const asset = settings.clipartAssets.find((candidate) => candidate.id === clipart.assetId);
           return {
+            id: fillRegionLayerScope("clipart", clipart.id),
             canvas: sourceCanvas,
             settings: clipartSettings(settings, clipart),
             vectorizerSource: {
@@ -4210,6 +4532,7 @@ export function EditorClient({ project }: { project: Project }) {
           processedRevisionRef.current += 1;
           processedCanvasRef.current = result.canvas;
           fillRegionMapRef.current = result.fillRegionMap;
+          fillRegionIdByMapIdRef.current = new Map(result.fillRegions.map((region) => [region.mapId, region.id] as const));
           drawPreview(result.canvas);
           setFillRegions(result.fillRegions);
           setSelectedFillRegionId((current) => (current && result.fillRegions.some((region) => region.id === current) ? current : null));
@@ -4408,7 +4731,9 @@ export function EditorClient({ project }: { project: Project }) {
 
       return {
         ...current,
-        fillRegions: {},
+        fillRegions: replacedSource
+          ? removeFillRegionOverridesForScopes(current.fillRegions, [fillRegionLayerScope("source", replacedSource.id)])
+          : current.fillRegions,
         sourceImages:
           replaceSourceId && addedSources[0]
             ? current.sourceImages.map((source) => (source.id === replaceSourceId ? addedSources[0] : source))
@@ -4975,7 +5300,7 @@ export function EditorClient({ project }: { project: Project }) {
     return result;
   }
 
-  function saveProject(options: { uploadProcessedImage?: boolean } = {}) {
+  function saveProject() {
     if (processing || dragPreviewSourceId) {
       setNotice({ tone: "info", text: "Finishing the canvas update before saving." });
       return;
@@ -4989,9 +5314,7 @@ export function EditorClient({ project }: { project: Project }) {
 
     startTransition(async () => {
       try {
-        const result = await saveProjectSnapshot(settingsRef.current, {
-          uploadProcessedImage: options.uploadProcessedImage ?? true,
-        });
+        const result = await saveProjectSnapshot(settingsRef.current, { uploadProcessedImage: true });
         if (!result.ok) {
           saveSessionDraft(`Save did not fully complete. A session draft was saved instead. ${result.message}`, "info");
           return;
@@ -5002,23 +5325,6 @@ export function EditorClient({ project }: { project: Project }) {
         saveSessionDraft(`Could not reach the database. Offline draft saved in this browser session. ${detail}`, "info");
       }
     });
-  }
-
-  function updateAutoSaveInterval(value: number) {
-    const interval = AUTO_SAVE_INTERVAL_OPTIONS.some((option) => option.value === value) ? value : DEFAULT_AUTO_SAVE_INTERVAL_MS;
-    setAutoSaveIntervalMs(interval);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(AUTO_SAVE_INTERVAL_STORAGE_KEY, String(interval));
-    }
-    lastAutoSavedSignatureRef.current = null;
-  }
-
-  function updateAutoSaveEnabled(enabled: boolean) {
-    setAutoSaveEnabled(enabled);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(AUTO_SAVE_ENABLED_STORAGE_KEY, String(enabled));
-    }
-    lastAutoSavedSignatureRef.current = null;
   }
 
   function applyEditorTemplate(templateId: EditorTemplateId) {
@@ -5087,29 +5393,6 @@ export function EditorClient({ project }: { project: Project }) {
     });
     setNotice({ tone: "ok", text: `${EDITOR_TEMPLATE_OPTIONS.find((option) => option.id === templateId)?.label ?? "Template"} applied.` });
   }
-
-  useEffect(() => {
-    if (!draftChecked || !autoSaveEnabled) return;
-    const timer = window.setInterval(() => {
-      if (processing || dragPreviewSourceId || isPending || !title.trim()) return;
-      const currentSettings = settingsRef.current;
-      const signature = [
-        title.trim(),
-        description.trim(),
-        buildProcessingSignature(currentSettings),
-        palette.map((color) => `${color.name}:${color.hex}:${color.locked}:${color.cellCount}`).join("|"),
-      ].join("::");
-      if (signature === lastAutoSavedSignatureRef.current) return;
-      lastAutoSavedSignatureRef.current = signature;
-      if (typeof navigator !== "undefined" && !navigator.onLine) {
-        setIsOnline(false);
-        saveSessionDraft("Auto-saved an offline draft.", "info");
-        return;
-      }
-      saveProject({ uploadProcessedImage: false });
-    }, autoSaveIntervalMs);
-    return () => window.clearInterval(timer);
-  }, [autoSaveEnabled, autoSaveIntervalMs, description, draftChecked, dragPreviewSourceId, isPending, palette, processing, title]);
 
   function exportPNG() {
     if (processing || dragPreviewSourceId) {
@@ -5202,7 +5485,10 @@ export function EditorClient({ project }: { project: Project }) {
   const selectedShapeIndex = selectedShapeLayer ? settings.graphShapes.findIndex((shape) => shape.id === selectedShapeLayer.id) : -1;
   const selectedClipartIndex = selectedClipartLayer ? settings.clipartImages.findIndex((clipart) => clipart.id === selectedClipartLayer.id) : -1;
   const selectedActionKeys = selectedLayerKeysForAction(settings);
+  const selectableLayerKeys = Array.from(selectableLayerKeysFromSettings(settings));
   const selectedLayerCount = selectedActionKeys.length;
+  const allLayersSelected = selectableLayerKeys.length > 0 && selectedLayerCount === selectableLayerKeys.length;
+  const someLayersSelected = selectedLayerCount > 0 && !allLayersSelected;
   const selectedLayerLocked = selectedActionKeys.length
     ? selectedActionKeys.every((key) => {
         const { type, id } = parseLayerKey(key);
@@ -5224,6 +5510,8 @@ export function EditorClient({ project }: { project: Project }) {
   const hasSelectedLayer = selectedLayerCount > 0;
   const selectionHasGroup = selectedActionKeys.some((key) => Boolean(layerGroupIdForKey(settings, key)));
   const canGroupSelection = selectedLayerCount > 1;
+  const selectedLayerContainsLocked = selectedLayerCount > 0 && layerSelectionContainsLocked(settings, selectedActionKeys);
+  const selectedLayerBounds = selectedLayerCount > 1 ? selectionBoundsForOverlay(settings, selectedActionKeys) : null;
   const sourceErrorCount = Object.values(sourceStatus).filter((status) => status.error).length;
   const totalCells = Math.round(settings.graphWidth * settings.graphHeight);
   const visibleLayerCount = settings.sourceImages.length + settings.cellPaints.length + settings.graphShapes.length + settings.clipartImages.length;
@@ -5313,7 +5601,6 @@ export function EditorClient({ project }: { project: Project }) {
       const visible = allHidden;
       return {
         ...current,
-        fillRegions: {},
         sourceImages: current.sourceImages.map((source) => (selected.has(sourceLayerKey(source.id)) ? { ...source, visible } : source)),
         cellPaints: current.cellPaints.map((cell) => (selected.has(drawingLayerKey("cell", cell.id)) ? { ...cell, visible } : cell)),
         graphShapes: current.graphShapes.map((shape) => (selected.has(drawingLayerKey("shape", shape.id)) ? { ...shape, visible } : shape)),
@@ -5329,11 +5616,13 @@ export function EditorClient({ project }: { project: Project }) {
     const duplicatedKeys: SelectableLayerKey[] = [];
     setSettingsWithHistory((current) => {
       const selected = new Set(keys);
+      const fillRegionScopeRemaps: { from: string; to: string }[] = [];
       const sourceCopies = current.sourceImages
         .filter((source) => selected.has(sourceLayerKey(source.id)) && !source.locked)
         .map((source) => {
           const id = drawingId("source");
           const key = sourceLayerKey(id);
+          fillRegionScopeRemaps.push({ from: fillRegionLayerScope("source", source.id), to: fillRegionLayerScope("source", id) });
           duplicatedKeys.push(key);
           nextPrimary = key;
           return {
@@ -5385,6 +5674,7 @@ export function EditorClient({ project }: { project: Project }) {
         .map((clipart) => {
           const id = drawingId("clipart");
           const key = drawingLayerKey("clipart", id);
+          fillRegionScopeRemaps.push({ from: fillRegionLayerScope("clipart", clipart.id), to: fillRegionLayerScope("clipart", id) });
           duplicatedKeys.push(key);
           nextPrimary = key;
           return {
@@ -5400,7 +5690,7 @@ export function EditorClient({ project }: { project: Project }) {
       if (!sourceCopies.length && !cellCopies.length && !shapeCopies.length && !clipartCopies.length) return current;
       return {
         ...current,
-        fillRegions: {},
+        fillRegions: copyFillRegionOverrides(current.fillRegions, fillRegionScopeRemaps),
         sourceImages: [...current.sourceImages, ...sourceCopies],
         cellPaints: [...current.cellPaints, ...cellCopies],
         graphShapes: [...current.graphShapes, ...shapeCopies],
@@ -5490,6 +5780,45 @@ export function EditorClient({ project }: { project: Project }) {
     setNotice({ tone: "ok", text: "Ungrouped selected layers." });
   }
 
+  function resizeSelectedLayerBounds(size: { width?: number; height?: number }) {
+    const keys = selectedLayerKeysForAction();
+    if (keys.length < 2) return;
+    setSettingsWithHistory((current) => {
+      if (layerSelectionContainsLocked(current, keys)) return current;
+      const starts = layerStartsForSelection(current, keys);
+      const bounds = selectionBoundsForLayerStarts(current, starts);
+      if (!bounds) return current;
+      const nextBounds = {
+        ...bounds,
+        width: size.width === undefined ? bounds.width : Math.max(0.25, size.width),
+        height: size.height === undefined ? bounds.height : Math.max(0.25, size.height),
+      };
+      const resized = resizeLayerSelection(current, starts, bounds, nextBounds);
+      return resized.changed ? deriveGraphSettings(resized.next) : current;
+    });
+  }
+
+  function transformSelectedLayers(transform: { type: "flip"; axis: "x" | "y" } | { type: "rotate"; direction: -1 | 1 }) {
+    const keys = selectedLayerKeysForAction();
+    if (keys.length < 2) return;
+    setSettingsWithHistory((current) => {
+      if (layerSelectionContainsLocked(current, keys)) return current;
+      const starts = layerStartsForSelection(current, keys);
+      const bounds = selectionBoundsForLayerStarts(current, starts);
+      if (!bounds) return current;
+      const transformed = transformLayerSelection(current, starts, bounds, transform);
+      return transformed.changed ? deriveGraphSettings(transformed.next) : current;
+    });
+  }
+
+  function rotateSelectedLayers(direction: -1 | 1) {
+    transformSelectedLayers({ type: "rotate", direction });
+  }
+
+  function flipSelectedLayers(axis: "x" | "y") {
+    transformSelectedLayers({ type: "flip", axis });
+  }
+
   function copySelectedLayers(): boolean {
     const keys = selectedLayerKeysForAction();
     if (!keys.length) return false;
@@ -5529,9 +5858,11 @@ export function EditorClient({ project }: { project: Project }) {
     const pastedKeys: SelectableLayerKey[] = [];
     let nextPrimary: SelectableLayerKey | null = null;
     setSettingsWithHistory((current) => {
+      const fillRegionScopeRemaps: { from: string; to: string }[] = [];
       const sourceCopies = clip.sources.map((source) => {
         const id = drawingId("source");
         const key = sourceLayerKey(id);
+        fillRegionScopeRemaps.push({ from: fillRegionLayerScope("source", source.id), to: fillRegionLayerScope("source", id) });
         pastedKeys.push(key);
         nextPrimary = key;
         return {
@@ -5580,6 +5911,7 @@ export function EditorClient({ project }: { project: Project }) {
       const clipartCopies = clip.cliparts.map((clipart) => {
         const id = drawingId("clipart");
         const key = drawingLayerKey("clipart", id);
+        fillRegionScopeRemaps.push({ from: fillRegionLayerScope("clipart", clipart.id), to: fillRegionLayerScope("clipart", id) });
         pastedKeys.push(key);
         nextPrimary = key;
         return {
@@ -5599,7 +5931,7 @@ export function EditorClient({ project }: { project: Project }) {
       }));
       return {
         ...current,
-        fillRegions: {},
+        fillRegions: copyFillRegionOverrides(current.fillRegions, fillRegionScopeRemaps),
         sourceImages: [...current.sourceImages, ...sourceCopies],
         cellPaints: [...current.cellPaints, ...cellCopies],
         graphShapes: [...current.graphShapes, ...shapeCopies],
@@ -5618,14 +5950,24 @@ export function EditorClient({ project }: { project: Project }) {
     if (!keys.length) return;
     if (!options.skipConfirm && !window.confirm(`Delete ${keys.length} selected layer${keys.length === 1 ? "" : "s"} from this project?`)) return;
     const selected = new Set(keys);
-    setSettingsWithHistory((current) => ({
-      ...current,
-      fillRegions: {},
-      sourceImages: current.sourceImages.filter((source) => !selected.has(sourceLayerKey(source.id)) || source.locked),
-      cellPaints: current.cellPaints.filter((cell) => !selected.has(drawingLayerKey("cell", cell.id)) || cell.locked),
-      graphShapes: current.graphShapes.filter((shape) => !selected.has(drawingLayerKey("shape", shape.id)) || shape.locked),
-      clipartImages: current.clipartImages.filter((clipart) => !selected.has(drawingLayerKey("clipart", clipart.id)) || clipart.locked),
-    }));
+    setSettingsWithHistory((current) => {
+      const removedScopes = [
+        ...current.sourceImages
+          .filter((source) => selected.has(sourceLayerKey(source.id)) && !source.locked)
+          .map((source) => fillRegionLayerScope("source", source.id)),
+        ...current.clipartImages
+          .filter((clipart) => selected.has(drawingLayerKey("clipart", clipart.id)) && !clipart.locked)
+          .map((clipart) => fillRegionLayerScope("clipart", clipart.id)),
+      ];
+      return {
+        ...current,
+        fillRegions: removeFillRegionOverridesForScopes(current.fillRegions, removedScopes),
+        sourceImages: current.sourceImages.filter((source) => !selected.has(sourceLayerKey(source.id)) || source.locked),
+        cellPaints: current.cellPaints.filter((cell) => !selected.has(drawingLayerKey("cell", cell.id)) || cell.locked),
+        graphShapes: current.graphShapes.filter((shape) => !selected.has(drawingLayerKey("shape", shape.id)) || shape.locked),
+        clipartImages: current.clipartImages.filter((clipart) => !selected.has(drawingLayerKey("clipart", clipart.id)) || clipart.locked),
+      };
+    });
     setSelectedSourceId(null);
     setSelectedDrawingLayerId(null);
     setSelectedLayerKeys([]);
@@ -5759,8 +6101,8 @@ export function EditorClient({ project }: { project: Project }) {
             ))}
           </select>
         </label>
-        <NumberField label="Left padding" value={clipart.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { x: value })} />
-        <NumberField label="Top padding" value={clipart.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { y: value })} />
+        <NumberField label="Left padding" value={clipart.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep readOnly onChange={() => undefined} />
+        <NumberField label="Top padding" value={clipart.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep readOnly onChange={() => undefined} />
         <ColorPresetField label="Stroke" value={clipart.strokeColor} onChange={(value) => updateClipartImage(clipart.id, { strokeColor: value })} />
         <ColorPresetField label="Fill" value={clipart.fillColor} onChange={(value) => updateClipartImage(clipart.id, { fillColor: value })} allowTransparent />
         <div className="grid grid-cols-4 gap-1 col-span-2">
@@ -5807,10 +6149,10 @@ export function EditorClient({ project }: { project: Project }) {
         <NumberField label={shapeUsesSingleSize(shape.kind) ? "Size (CM)" : "Width (CM)"} value={shapePhysicalWidthCm(shape)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={shape.locked} onChange={(value) => updateGraphShapePhysicalWidthCm(shape.id, value)} />
         <NumberField label={shapeUsesSingleSize(shape.kind) ? "Size (CM)" : "Height (CM)"} value={shapePhysicalHeightCm(shape)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={shape.locked} onChange={(value) => updateGraphShapePhysicalHeightCm(shape.id, value)} />
         <NumberField label="Stroke width" value={shape.strokeWidth} min={1} max={24} disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { strokeWidth: value })} />
-        <NumberField label="Left padding (cells)" value={shape.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: value })} />
-        <NumberField label="Right padding (cells)" value={drawingRightPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { x: settings.graphWidth - shape.width - value })} />
-        <NumberField label="Top padding (cells)" value={shape.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: value })} />
-        <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { y: settings.graphHeight - shape.height - value })} />
+        <NumberField label="Left padding (cells)" value={shape.x} min={-1000} max={1000} step={1} allowDecimalInput wholeStep readOnly onChange={() => undefined} />
+        <NumberField label="Right padding (cells)" value={drawingRightPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep readOnly onChange={() => undefined} />
+        <NumberField label="Top padding (cells)" value={shape.y} min={-1000} max={1000} step={1} allowDecimalInput wholeStep readOnly onChange={() => undefined} />
+        <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(shape)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep readOnly onChange={() => undefined} />
         <ColorPresetField label="Line" value={shape.strokeColor} onChange={(value) => updateGraphShape(shape.id, { strokeColor: value })} />
         {fillMode === "filled" ? <ColorPresetField label="Fill" value={shape.fillColor} onChange={(value) => updateGraphShape(shape.id, { fillColor: value })} allowTransparent /> : null}
         {supportsSides ? (
@@ -5847,10 +6189,10 @@ export function EditorClient({ project }: { project: Project }) {
       <div className="grid min-w-0 grid-cols-2 gap-2 border-t border-[var(--editor-line)] bg-[var(--editor-panel-2)] p-3">
         <NumberField label="Width (cells)" value={cell.width} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { width: value })} />
         <NumberField label="Height (cells)" value={cell.height} min={0.01} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { height: value })} />
-        <NumberField label="Left padding (cells)" value={cell.x} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: value })} />
-        <NumberField label="Right padding (cells)" value={drawingRightPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { x: settings.graphWidth - cell.width - value })} />
-        <NumberField label="Top padding (cells)" value={cell.y} min={0} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: value })} />
-        <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { y: settings.graphHeight - cell.height - value })} />
+        <NumberField label="Left padding (cells)" value={cell.x} min={0} max={1000} step={1} allowDecimalInput wholeStep readOnly onChange={() => undefined} />
+        <NumberField label="Right padding (cells)" value={drawingRightPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep readOnly onChange={() => undefined} />
+        <NumberField label="Top padding (cells)" value={cell.y} min={0} max={1000} step={1} allowDecimalInput wholeStep readOnly onChange={() => undefined} />
+        <NumberField label="Bottom padding (cells)" value={drawingBottomPadding(cell)} min={-1000} max={1000} step={1} allowDecimalInput wholeStep readOnly onChange={() => undefined} />
         <NumberField label="Line size" value={cell.lineWidth} min={1} max={24} disabled={cell.locked} onChange={(value) => updateCellPaint(cell.id, { lineWidth: value })} />
         <ColorPresetField label="Line" value={cell.lineColor} onChange={(value) => updateCellPaint(cell.id, { lineColor: value })} />
         <ColorPresetField label="Fill" value={cell.fillColor} onChange={(value) => updateCellPaint(cell.id, { fillColor: value })} allowTransparent />
@@ -6005,14 +6347,28 @@ export function EditorClient({ project }: { project: Project }) {
         <section className={`${leftPanelTab === "layers" ? "" : "hidden"} border-b border-[var(--editor-line)] bg-[var(--editor-panel)]`}>
           <div className="flex h-10 items-center justify-between border-b border-[var(--editor-line)] px-3">
             <h2 className="text-[13px] font-bold uppercase tracking-wide text-[var(--editor-text)]">Layers</h2>
-            <label className={`grid h-8 w-8 place-items-center rounded text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add layer image">
-              {uploadingSources ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}
-              <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
-                const files = Array.from(event.target.files ?? []);
-                event.target.value = "";
-                if (files.length) void uploadSourceImages(files, "Images added to the end.");
-              }} />
-            </label>
+            <div className="flex items-center gap-1">
+              <label className="inline-flex h-8 items-center gap-1 rounded px-1.5 text-[11px] font-semibold text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)]" title="Select or clear every layer">
+                <input
+                  type="checkbox"
+                  checked={allLayersSelected}
+                  ref={(element) => {
+                    if (element) element.indeterminate = someLayersSelected;
+                  }}
+                  onChange={(event) => setAllLayerCheckboxes(event.target.checked)}
+                  className="h-3.5 w-3.5 cursor-pointer accent-[var(--editor-accent)]"
+                />
+                <span>All</span>
+              </label>
+              <label className={`grid h-8 w-8 place-items-center rounded text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] ${uploadingSources ? "cursor-wait opacity-60" : "cursor-pointer"}`} title="Add layer image">
+                {uploadingSources ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <Plus size={18} aria-hidden="true" />}
+                <input type="file" accept={IMAGE_ACCEPT} multiple disabled={uploadingSources} className="sr-only" onChange={(event) => {
+                  const files = Array.from(event.target.files ?? []);
+                  event.target.value = "";
+                  if (files.length) void uploadSourceImages(files, "Images added to the end.");
+                }} />
+              </label>
+            </div>
           </div>
           {hasSelectedLayer ? renderLayerActionToolbar() : null}
           {visibleLayerCount ? (
@@ -6030,7 +6386,8 @@ export function EditorClient({ project }: { project: Project }) {
                         onDrop={handleLayerDrop("source", source.id)}
                         className={`editor-layer-virtual-row ${selected ? "bg-[var(--editor-accent)] text-[var(--on-brand)]" : hidden ? "bg-[var(--editor-panel)] text-[var(--editor-text)] opacity-60" : "bg-[var(--editor-panel)] text-[var(--editor-text)]"}`}
                       >
-                        <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                        <div className="grid h-[62px] grid-cols-[20px_26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                          {renderLayerSelectionCheckbox(key, selected, source.name)}
                           <button type="button" onClick={() => toggleSourceVisibility(source.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
                           <button type="button" onClick={(event) => selectSourceLayer(source.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="h-11 w-11">
                             {renderSourceThumbnail(source, "h-full w-full")}
@@ -6076,7 +6433,8 @@ export function EditorClient({ project }: { project: Project }) {
                             onDrop={handleLayerDrop("clipart", clipart.id)}
                             className={`editor-layer-virtual-row ${selected ? "bg-[var(--editor-accent)] text-[var(--on-brand)]" : hidden ? "bg-[var(--editor-panel)] text-[var(--editor-text)] opacity-60" : "bg-[var(--editor-panel)] text-[var(--editor-text)]"}`}
                           >
-                            <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                            <div className="grid h-[62px] grid-cols-[20px_26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                              {renderLayerSelectionCheckbox(key, selected, clipart.name)}
                               <button type="button" onClick={() => toggleDrawingVisibility("clipart", clipart.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={hidden ? "Show clipart" : "Hide clipart"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
                               <button type="button" onClick={(event) => selectClipartLayer(clipart.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="h-11 w-11">
                                 {renderClipartThumbnail(clipart, "h-full w-full")}
@@ -6103,7 +6461,8 @@ export function EditorClient({ project }: { project: Project }) {
                             onDrop={handleLayerDrop("shape", shape.id)}
                             className={`editor-layer-virtual-row ${selected ? "bg-[var(--editor-accent)] text-[var(--on-brand)]" : hidden ? "bg-[var(--editor-panel)] text-[var(--editor-text)] opacity-60" : "bg-[var(--editor-panel)] text-[var(--editor-text)]"}`}
                           >
-                            <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                            <div className="grid h-[62px] grid-cols-[20px_26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                              {renderLayerSelectionCheckbox(key, selected, shape.name)}
                               <button type="button" onClick={() => toggleDrawingVisibility("shape", shape.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={hidden ? "Show generated image" : "Hide generated image"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
                               <button type="button" onClick={(event) => selectGeneratedShape(shape.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="h-11 w-11">
                                 {renderShapeThumbnail(shape, "h-full w-full")}
@@ -6135,7 +6494,8 @@ export function EditorClient({ project }: { project: Project }) {
                     onDrop={handleLayerDrop("cell", cell.id)}
                     className={`editor-layer-virtual-row ${selected ? "bg-[var(--editor-accent)] text-[var(--on-brand)]" : hidden ? "bg-[var(--editor-panel)] text-[var(--editor-text)] opacity-60" : "bg-[var(--editor-panel)] text-[var(--editor-text)]"}`}
                   >
-                    <div className="grid h-[62px] grid-cols-[26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                    <div className="grid h-[62px] grid-cols-[20px_26px_44px_minmax(0,1fr)_44px_28px_28px] items-center gap-2 px-3">
+                      {renderLayerSelectionCheckbox(key, selected, cell.name)}
                       <button type="button" onClick={() => toggleDrawingVisibility("cell", cell.id)} className={selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"} title={hidden ? "Show layer" : "Hide layer"}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
                       <button type="button" onClick={(event) => selectCellLayer(cell.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="h-11 w-11">
                         {renderCellThumbnail(cell, "h-full w-full")}
@@ -6458,14 +6818,14 @@ export function EditorClient({ project }: { project: Project }) {
         <span>Add to layer selection</span><kbd className="rounded bg-[var(--editor-panel-2)] px-1.5 py-0.5 font-mono text-[var(--editor-text)]">Shift/Ctrl click</kbd>
       </div>
       <p className="mt-3 text-[11px] leading-5 text-[var(--editor-text-dim)]">
-        Shortcut help and auto-save interval are browser-local productivity preferences for this v1.
+        Shortcut help is browser-local for this v1.
       </p>
     </div>
   ) : null;
 
   const pageBreakGuideWidth = Math.max(1, canvasViewportGuide.width);
   const pageBreakGuideHeight = Math.max(1, canvasViewportGuide.height);
-  const selectedGroupBounds = selectedLayerCount > 1 ? selectionBoundsForOverlay(settings, selectedActionKeys) : null;
+  const selectedGroupBounds = selectedLayerBounds;
   const selectedGroupBox =
     selectedGroupBounds && !showOriginal
       ? {
@@ -6524,6 +6884,7 @@ export function EditorClient({ project }: { project: Project }) {
           height: Math.max(1, Math.round(Math.abs(selectedClipartLayer.height) * GRAPH_MAJOR_CELL_PIXELS * zoom)),
         }
       : null;
+  const showSelectionResizeHandles = resizeHandleTarget === "selection" || dragStateRef.current?.kind === "resize-selection";
   const showSourceSideResizeHandles = resizeHandleTarget === "source" || dragStateRef.current?.kind === "resize-source";
   const showShapeSideResizeHandles = resizeHandleTarget === "shape" || dragStateRef.current?.kind === "resize-shape";
   const sourceResizeHandleVisible = (_handle: SourceResizeHandle, showSideHandles: boolean) => showSideHandles;
@@ -6533,8 +6894,6 @@ export function EditorClient({ project }: { project: Project }) {
     : selectedFillRegion
       ? "Fill region selected"
       : "No layer selected";
-  const autoSaveIntervalLabel = AUTO_SAVE_INTERVAL_OPTIONS.find((option) => option.value === autoSaveIntervalMs)?.label ?? "30 sec";
-  const autoSaveStatusLabel = autoSaveEnabled ? autoSaveIntervalLabel : "Off";
   const activeEditorTool: EditorToolId = canvasTool === "hand"
     ? "pan"
     : canvasTool === "fill"
@@ -6580,7 +6939,7 @@ export function EditorClient({ project }: { project: Project }) {
     const pointerX = event.clientX - stageRect.left;
     const pointerY = event.clientY - stageRect.top;
     const boundarySize = 12;
-    const isAtBoundary = (box: typeof selectedSourceBox | typeof selectedShapeBox) => {
+    const isAtBoundary = (box: { left: number; top: number; width: number; height: number } | null) => {
       if (!box) return false;
       const right = box.left + box.width;
       const bottom = box.top + box.height;
@@ -6593,11 +6952,13 @@ export function EditorClient({ project }: { project: Project }) {
       return Math.min(Math.abs(pointerX - box.left), Math.abs(pointerX - right), Math.abs(pointerY - box.top), Math.abs(pointerY - bottom)) <= boundarySize;
     };
 
-    const nextTarget: ResizeHandleTarget = isAtBoundary(selectedSourceBox)
-      ? "source"
-      : isAtBoundary(selectedShapeBox)
-        ? "shape"
-        : null;
+    const nextTarget: ResizeHandleTarget = isAtBoundary(selectedGroupBox) && !selectedLayerContainsLocked
+      ? "selection"
+      : isAtBoundary(selectedSourceBox)
+        ? "source"
+        : isAtBoundary(selectedShapeBox)
+          ? "shape"
+          : null;
     setResizeHandleTarget((current) => (current === nextTarget ? current : nextTarget));
   }
 
@@ -6908,7 +7269,27 @@ export function EditorClient({ project }: { project: Project }) {
                 </div>
               ) : null}
               {selectedGroupBox ? (
-                <div className={CANVAS_SELECTION_BOX_CLASS} style={selectedGroupBox} />
+                <div className={CANVAS_SELECTION_BOX_CLASS} style={selectedGroupBox}>
+                  {SOURCE_RESIZE_HANDLES.map((handle) => {
+                    const handleVisible = sourceResizeHandleVisible(handle, showSelectionResizeHandles);
+                    return (
+                      <button
+                        key={handle}
+                        type="button"
+                        aria-label={`Resize selected layers ${handle}`}
+                        disabled={selectedLayerContainsLocked}
+                        onPointerDown={(event) => beginSelectionResize(event, handle)}
+                        onPointerMove={dragGraph}
+                        onPointerUp={endGraphDrag}
+                        onPointerCancel={endGraphDrag}
+                        tabIndex={handleVisible ? 0 : -1}
+                        className={sourceResizeHandleClass(handle, selectedLayerContainsLocked, handleVisible)}
+                      >
+                        <span className={sourceResizeHandleIconClass(handle)}>{sourceResizeHandleIcon(handle)}</span>
+                      </button>
+                    );
+                  })}
+                </div>
               ) : null}
               {!selectedGroupBox && selectedShapeBox && selectedShapeLayer ? (
                 <div
@@ -6977,7 +7358,6 @@ export function EditorClient({ project }: { project: Project }) {
         dimensions={`${settings.graphWidth} x ${settings.graphHeight} cells`}
         selection={selectedLayerStatusLabel}
         zoom={zoom}
-        autoSave={autoSaveStatusLabel}
         online={isOnline}
       />
     </section>
@@ -7049,35 +7429,8 @@ export function EditorClient({ project }: { project: Project }) {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h3>Productivity</h3>
-                    <p>Browser-local shortcuts and auto-save preference.</p>
+                    <p>Keyboard shortcuts for the editor.</p>
                   </div>
-                </div>
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={autoSaveEnabled}
-                    className={`editor-workspace-menu__autosave-toggle ${autoSaveEnabled ? "is-enabled" : ""}`}
-                    onClick={() => updateAutoSaveEnabled(!autoSaveEnabled)}
-                  >
-                    <span>Auto-save</span>
-                    <span className="editor-workspace-menu__autosave-state">
-                      <i aria-hidden="true" />
-                      {autoSaveEnabled ? "On" : "Off"}
-                    </span>
-                  </button>
-                  <label className="grid gap-1.5">
-                    <span>Interval</span>
-                    <select
-                      value={String(autoSaveIntervalMs)}
-                      disabled={!autoSaveEnabled}
-                      onChange={(event) => updateAutoSaveInterval(Number(event.target.value))}
-                    >
-                      {AUTO_SAVE_INTERVAL_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
-                  </label>
                 </div>
                 <button type="button" onClick={() => setShowShortcutsPanel((value) => !value)} className="mt-3">
                   <Keyboard size={15} aria-hidden="true" />
@@ -7190,13 +7543,18 @@ export function EditorClient({ project }: { project: Project }) {
             placingClipartAssetId={placingClipartAssetId}
             placingGeneratedShape={placingGeneratedShape}
             selectedLayerCount={selectedLayerCount}
+            selectedLayerBounds={selectedLayerBounds ? { width: selectedLayerBounds.width, height: selectedLayerBounds.height } : null}
             selectedLayerLocked={selectedLayerLocked}
+            selectedLayerResizeDisabled={selectedLayerContainsLocked}
             selectedLayerHidden={selectedLayerHidden}
             deleteSelectedLayer={() => deleteSelectedLayer()}
             toggleSelectedLayerLock={toggleSelectedLayerLock}
             toggleSelectedLayerVisibility={toggleSelectedLayerVisibility}
             duplicateSelectedLayers={duplicateSelectedLayers}
             nudgeSelectedLayer={nudgeSelectedSource}
+            resizeSelectedLayerBounds={resizeSelectedLayerBounds}
+            rotateSelectedLayers={rotateSelectedLayers}
+            flipSelectedLayers={flipSelectedLayers}
             draftShapeKind={draftShapeKind}
             draftShapeWidthCm={draftShapeWidthCm}
             draftShapeHeightCm={draftShapeHeightCm}

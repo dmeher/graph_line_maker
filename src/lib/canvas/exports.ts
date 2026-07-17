@@ -20,6 +20,75 @@ const OUTSIDE_LABEL_FALLBACK_TOLERANCE_PX = Math.round(GRAPH_MAJOR_CELL_PIXELS *
 const MAX_TOTAL_PDF_PAGES = 240;
 const LEFT_RIGHT_OUTSIDE_Y_OFFSET = 0.45;
 const OUTSIDE_GRID_NUMBER_COLOR = "#000000";
+const COMPANY_HALLMARK_PATH = "/brand/company-hallmark.jpeg";
+const COMPANY_HALLMARK_ASPECT_RATIO = 9 / 16;
+const COMPANY_HALLMARK_ROTATION_DEGREES = -90;
+const COMPANY_HALLMARK_PAGE_PADDING_MM = 4;
+const COMPANY_HALLMARK_GRAPH_GAP_MM = 3;
+const COMPANY_HALLMARK_MAX_WIDTH_MM = 70;
+
+export type CompanyHallmarkPlacement = {
+  xMm: number;
+  yMm: number;
+  widthMm: number;
+  heightMm: number;
+};
+
+/** Places the hallmark on export page two without ever covering the graph tile. */
+export function companyHallmarkPlacement(
+  tile: PdfExportTile,
+  pageWidthMm: number,
+  pageHeightMm: number,
+): CompanyHallmarkPlacement | null {
+  if (tile.index !== 1) return null;
+  const padding = COMPANY_HALLMARK_PAGE_PADDING_MM;
+  const graphRight = tile.destinationXMm + tile.destinationWidthMm;
+  const graphBottom = tile.destinationYMm + tile.destinationHeightMm;
+  const candidates = [
+    { x: padding, y: padding, width: tile.destinationXMm - padding - COMPANY_HALLMARK_GRAPH_GAP_MM, height: pageHeightMm - padding * 2 },
+    { x: graphRight + COMPANY_HALLMARK_GRAPH_GAP_MM, y: padding, width: pageWidthMm - graphRight - padding - COMPANY_HALLMARK_GRAPH_GAP_MM, height: pageHeightMm - padding * 2 },
+    { x: padding, y: padding, width: pageWidthMm - padding * 2, height: tile.destinationYMm - padding - COMPANY_HALLMARK_GRAPH_GAP_MM },
+    { x: padding, y: graphBottom + COMPANY_HALLMARK_GRAPH_GAP_MM, width: pageWidthMm - padding * 2, height: pageHeightMm - graphBottom - padding - COMPANY_HALLMARK_GRAPH_GAP_MM },
+  ]
+    .filter((candidate) => candidate.width > 0 && candidate.height > 0)
+    .sort((a, b) => b.width * b.height - a.width * a.height);
+  const area = candidates[0];
+  if (!area) return null;
+
+  const widthMm = Math.min(COMPANY_HALLMARK_MAX_WIDTH_MM, area.width, area.height * COMPANY_HALLMARK_ASPECT_RATIO);
+  const heightMm = widthMm / COMPANY_HALLMARK_ASPECT_RATIO;
+  if (widthMm < 18 || heightMm < 10) return null;
+  return {
+    xMm: area.x + (area.width - widthMm) / 2,
+    yMm: area.y + (area.height - heightMm) / 2,
+    widthMm,
+    heightMm,
+  };
+}
+
+async function loadCompanyHallmarkPdfBytes() {
+  try {
+    const response = await fetch(new URL(COMPANY_HALLMARK_PATH, window.location.origin));
+    if (!response.ok) return null;
+    const bitmap = await createImageBitmap(await response.blob());
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.height;
+    canvas.height = bitmap.width;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      bitmap.close();
+      return null;
+    }
+    context.translate(0, bitmap.width);
+    context.rotate((COMPANY_HALLMARK_ROTATION_DEGREES * Math.PI) / 180);
+    context.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+  } catch {
+    return null;
+  }
+}
 
 function isDrawableCanvas(canvas: HTMLCanvasElement | null | undefined) {
   return Boolean(canvas && Number.isFinite(canvas.width) && Number.isFinite(canvas.height) && canvas.width > 0 && canvas.height > 0);
@@ -297,6 +366,7 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
       settings.showNumbers && settings.gridNumberPlacement === "outside" ? getOutsideGridNumberLines(settings) : null;
     const graphWidthPx = Math.max(1, Math.round(canvas.width));
     const graphHeightPx = Math.max(1, Math.round(canvas.height));
+    const companyHallmarkBytes = plan.totalPages > 1 ? await loadCompanyHallmarkPdfBytes() : null;
     function createPdf() {
       const nextPdf = new jsPDF({ orientation: plan.orientation, unit: "mm", format: [plan.pageWidthMm, plan.pageHeightMm] });
       nextPdf.viewerPreferences({ PrintScaling: "None" });
@@ -332,6 +402,10 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
       if (outsideGridNumberLines) {
         addOutsideGridNumbersToPdfPage(pdf, tile, outsideGridNumberLines, graphWidthPx, graphHeightPx);
       }
+      const hallmark = companyHallmarkBytes && companyHallmarkPlacement(tile, plan.pageWidthMm, plan.pageHeightMm);
+      if (hallmark) {
+        pdf.addImage(companyHallmarkBytes, "PNG", hallmark.xMm, hallmark.yMm, hallmark.widthMm, hallmark.heightMm);
+      }
       drawPdfCutGuides(pdf, tile.cutGuideTopYMm, tile.cutGuideBottomYMm, plan.pageWidthMm, plan.pageHeightMm);
       pagesInCurrentFile += 1;
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
@@ -364,6 +438,7 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
   printWindow.opener = null;
   const graphWidthPx = Math.max(1, Math.round(canvas.width));
   const graphHeightPx = Math.max(1, Math.round(canvas.height));
+  const companyHallmarkUrl = new URL(COMPANY_HALLMARK_PATH, window.location.origin).href;
 
   const objectUrls: string[] = [];
   const pages: string[] = [];
@@ -383,7 +458,11 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
             graphHeightPx,
           )
         : "";
-      pages.push(`<section class="page"><img src="${imageUrl}" alt="" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" />${gridNumberSpans}${cutGuides}</section>`);
+      const hallmark = companyHallmarkPlacement(tile, plan.pageWidthMm, plan.pageHeightMm);
+      const hallmarkImage = hallmark
+        ? `<span class="company-hallmark" style="left:${hallmark.xMm}mm;top:${hallmark.yMm}mm;width:${hallmark.widthMm}mm;height:${hallmark.heightMm}mm"><img src="${companyHallmarkUrl}" alt="" style="left:${(hallmark.widthMm - hallmark.heightMm) / 2}mm;top:${(hallmark.heightMm - hallmark.widthMm) / 2}mm;width:${hallmark.heightMm}mm;height:${hallmark.widthMm}mm" /></span>`
+        : "";
+      pages.push(`<section class="page"><img src="${imageUrl}" alt="" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" />${hallmarkImage}${gridNumberSpans}${cutGuides}</section>`);
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
   }
 
@@ -410,6 +489,8 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
       page-break-after: auto;
     }
     img { display: block; position: absolute; }
+    .company-hallmark { position: absolute; z-index: 1; overflow: visible; }
+    .company-hallmark img { transform: rotate(-90deg); transform-origin: center; object-fit: contain; }
     .cut-guide {
       position: absolute;
       left: 0;

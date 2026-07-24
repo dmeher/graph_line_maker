@@ -60,7 +60,8 @@ import {
 import { MAX_WORKING_SOURCE_PIXELS, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
 import { detectPreviewPolicy, workingImagePixelCap } from "@/lib/canvas/preview-policy";
 import { disposeCanvasProcessingWorker, pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
-import { clearCanvasProcessingCaches, findContentBounds, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
+import { clearCanvasProcessingCaches, findContentBounds, flattenGraphForOutput, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
+import { GraphGridOverlay } from "@/components/editor/graph-grid-overlay";
 import { removeBackgroundImageData } from "@/lib/canvas/background-removal";
 import { graphPixelToSourcePixel, type ContentBounds, type PlacementTransform } from "@/lib/editor/erase-geometry";
 import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_SOURCE_IMAGES, MAX_UPLOAD_BYTES, ORIGINAL_IMAGES_BUCKET, isAllowedImageFile, isPdfFile } from "@/lib/constants";
@@ -1256,7 +1257,6 @@ export function EditorClient({ project }: { project: Project }) {
   const [draftClipartFillColor, setDraftClipartFillColor] = useState<CanvasFillColor>(TRANSPARENT_FILL_COLOR);
   const [generatedImagesCollapsed, setGeneratedImagesCollapsed] = useState(true);
   const [layerChooser, setLayerChooser] = useState<LayerChooser>(null);
-  const [canvasViewportGuide, setCanvasViewportGuide] = useState({ left: 0, top: 0, width: 1, height: 1 });
   const [leftPanelWidth, setLeftPanelWidth] = useState(320);
   const [rightPanelWidth, setRightPanelWidth] = useState(360);
   const [resizingPanelSide, setResizingPanelSide] = useState<"left" | "right" | null>(null);
@@ -1295,6 +1295,10 @@ export function EditorClient({ project }: { project: Project }) {
   const sourceWorkingSigRef = useRef<Map<string, string>>(new Map());
   const clipartCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const processedCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Transparent artwork-only canvas (no grid/backdrop) used as the preview base;
+  // the grid is a crisp SVG overlay. processedCanvasRef stays the flattened image
+  // (backdrop + grid + artwork) that export/save/PNG paths consume unchanged.
+  const artworkCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const canvasScrollRef = useRef<HTMLDivElement | null>(null);
@@ -4184,6 +4188,7 @@ export function EditorClient({ project }: { project: Project }) {
     sourceWorkingCanvasesRef.current = new Map();
     sourceWorkingSigRef.current = new Map();
     processedCanvasRef.current = null;
+    artworkCanvasRef.current = null;
     setProcessing(false);
     revokeObjectUrls(sourcePreviewObjectUrlsRef.current.values());
     sourcePreviewObjectUrlsRef.current = new Map();
@@ -4531,7 +4536,12 @@ export function EditorClient({ project }: { project: Project }) {
           if (cancelled) return;
           lastProcessedSignatureRef.current = processingSignature;
           processedRevisionRef.current += 1;
-          processedCanvasRef.current = result.canvas;
+          artworkCanvasRef.current = result.canvas;
+          // Rebuild the flattened image (backdrop + grid + artwork) so export/save
+          // and the processed-PNG upload keep the exact output they had before the
+          // grid became a live SVG overlay. Skip during drag drafts; export/save
+          // wait for the settled full render, which flattens.
+          if (!dragActive) processedCanvasRef.current = flattenGraphForOutput(result.canvas, renderSettings);
           fillRegionMapRef.current = result.fillRegionMap;
           fillRegionIdByMapIdRef.current = new Map(result.fillRegions.map((region) => [region.mapId, region.id] as const));
           drawPreview(result.canvas);
@@ -5424,7 +5434,9 @@ export function EditorClient({ project }: { project: Project }) {
       setNotice({ tone: "info", text: "Finishing the canvas update before exporting." });
       return;
     }
-    const canvas = processedCanvasRef.current;
+    // PDF/print draw the grid as crisp vectors over the transparent artwork,
+    // so they take the artwork-only canvas (not the flattened, grid-baked one).
+    const canvas = artworkCanvasRef.current;
     if (!canvas) return;
     const finishExport = startGraphPerformanceStage("export", { format: "pdf", width: canvas.width, height: canvas.height });
     void import("@/lib/canvas/exports")
@@ -5441,7 +5453,8 @@ export function EditorClient({ project }: { project: Project }) {
       setNotice({ tone: "info", text: "Finishing the canvas update before printing." });
       return;
     }
-    const canvas = processedCanvasRef.current;
+    // Print draws a crisp vector grid over the transparent artwork.
+    const canvas = artworkCanvasRef.current;
     if (!canvas) return;
     const finishExport = startGraphPerformanceStage("export", { format: "print", width: canvas.width, height: canvas.height });
     void import("@/lib/canvas/exports")
@@ -6664,6 +6677,10 @@ export function EditorClient({ project }: { project: Project }) {
   const printHeightCm = imageHeightCm;
   const graphPreviewWidth = Math.max(1, previewCanvasSize.width * zoom);
   const graphPreviewHeight = Math.max(1, previewCanvasSize.height * zoom);
+  // The artwork canvas is smoothly scaled at every zoom so the artwork stays
+  // high-resolution-looking (not blocky). Grid crispness is handled separately by
+  // the vector SVG overlay, so the old zoom>1 "pixelated" mode is no longer needed.
+  const previewImageRendering: "auto" | "pixelated" = "auto";
   const outsideNumberMargin = settings.showNumbers && settings.gridNumberPlacement === "outside" ? 34 : 0;
   const outsideHorizontalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? cellNumberLabels(settings.graphWidth) : [];
   const outsideVerticalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? cellNumberLabels(settings.graphHeight) : [];
@@ -6692,58 +6709,6 @@ export function EditorClient({ project }: { project: Project }) {
     settings.printPaperSize,
     settings.printVerticalAlignment,
     settings.showPageBreaks,
-  ]);
-
-  useEffect(() => {
-    const scroller = canvasScrollRef.current;
-    const stage = graphStageRef.current;
-    if (!scroller || !stage) return;
-
-    let frame = 0;
-    const updateGuide = () => {
-      frame = 0;
-      const nextGuide = {
-        left: scroller.scrollLeft - stage.offsetLeft,
-        top: scroller.scrollTop - stage.offsetTop,
-        width: Math.max(1, scroller.clientWidth),
-        height: Math.max(1, scroller.clientHeight),
-      };
-      setCanvasViewportGuide((current) =>
-        current.left === nextGuide.left &&
-        current.top === nextGuide.top &&
-        current.width === nextGuide.width &&
-        current.height === nextGuide.height
-          ? current
-          : nextGuide,
-      );
-    };
-    const scheduleGuideUpdate = () => {
-      if (frame) return;
-      frame = window.requestAnimationFrame(updateGuide);
-    };
-
-    updateGuide();
-    scroller.addEventListener("scroll", scheduleGuideUpdate, { passive: true });
-    window.addEventListener("resize", scheduleGuideUpdate);
-    const resizeObserver = new ResizeObserver(scheduleGuideUpdate);
-    resizeObserver.observe(scroller);
-    resizeObserver.observe(stage);
-
-    return () => {
-      scroller.removeEventListener("scroll", scheduleGuideUpdate);
-      window.removeEventListener("resize", scheduleGuideUpdate);
-      resizeObserver.disconnect();
-      if (frame) window.cancelAnimationFrame(frame);
-    };
-  }, [
-    graphPreviewHeight,
-    graphPreviewWidth,
-    leftPanelWidth,
-    outsideNumberMargin,
-    rightPanelWidth,
-    settingsPanelCollapsed,
-    sourcePanelCollapsed,
-    zoom,
   ]);
 
   const desktopGridColumns =
@@ -6831,8 +6796,6 @@ export function EditorClient({ project }: { project: Project }) {
     </div>
   ) : null;
 
-  const pageBreakGuideWidth = Math.max(1, canvasViewportGuide.width);
-  const pageBreakGuideHeight = Math.max(1, canvasViewportGuide.height);
   const selectedGroupBounds = selectedLayerBounds;
   const selectedGroupBox =
     selectedGroupBounds && !showOriginal
@@ -7133,6 +7096,34 @@ export function EditorClient({ project }: { project: Project }) {
                 }
               }}
             >
+              {/* Paper backdrop, then (for "back" grid) the crisp SVG grid below the
+                  transparent artwork canvas. DOM order = paint order for these
+                  z-auto layers, so later overlays (labels, guides, drag, selection)
+                  keep stacking above without z-index juggling. */}
+              <div
+                className="pointer-events-none absolute rounded bg-[var(--artboard-bg)] shadow-sm"
+                aria-hidden="true"
+                style={{
+                  left: `${outsideNumberMargin}px`,
+                  top: `${outsideNumberMargin}px`,
+                  width: `${graphPreviewWidth}px`,
+                  height: `${graphPreviewHeight}px`,
+                }}
+              />
+              {settings.gridLineLayer === "back" ? (
+                <GraphGridOverlay
+                  graphPixelWidth={previewCanvasSize.width}
+                  graphPixelHeight={previewCanvasSize.height}
+                  displayWidth={graphPreviewWidth}
+                  displayHeight={graphPreviewHeight}
+                  gridLineColor={settings.gridLineColor}
+                  gridLineThickness={settings.gridLineThickness}
+                  majorGridEvery={settings.majorGridEvery}
+                  gridLineStyle={settings.gridLineStyle}
+                  gridPattern={settings.gridPattern}
+                  style={{ left: `${outsideNumberMargin}px`, top: `${outsideNumberMargin}px` }}
+                />
+              ) : null}
               <canvas
                 ref={previewCanvasRef}
                 onPointerDown={beginCanvasPointer}
@@ -7144,17 +7135,31 @@ export function EditorClient({ project }: { project: Project }) {
                 onDragOver={handleGeneratedShapeDragOver}
                 onDrop={handleGeneratedShapeDrop}
                 title="Drag image to move it; double-click a fill area to choose its color; arrow keys move selected image by 0.1cm; Space or Ctrl plus drag pans the view"
-                className="absolute left-0 top-0 rounded bg-[var(--artboard-bg)] shadow-sm"
+                className="absolute left-0 top-0 rounded"
                 style={{
                   left: `${outsideNumberMargin}px`,
                   top: `${outsideNumberMargin}px`,
                   width: `${graphPreviewWidth}px`,
                   height: `${graphPreviewHeight}px`,
                   cursor: previewCanvasCursor,
-                  imageRendering: "auto",
+                  imageRendering: previewImageRendering,
                   touchAction: "none",
                 }}
               />
+              {settings.gridLineLayer !== "back" ? (
+                <GraphGridOverlay
+                  graphPixelWidth={previewCanvasSize.width}
+                  graphPixelHeight={previewCanvasSize.height}
+                  displayWidth={graphPreviewWidth}
+                  displayHeight={graphPreviewHeight}
+                  gridLineColor={settings.gridLineColor}
+                  gridLineThickness={settings.gridLineThickness}
+                  majorGridEvery={settings.majorGridEvery}
+                  gridLineStyle={settings.gridLineStyle}
+                  gridPattern={settings.gridPattern}
+                  style={{ left: `${outsideNumberMargin}px`, top: `${outsideNumberMargin}px` }}
+                />
+              ) : null}
               {dragPreviewStyle ? (
                 <canvas
                   ref={dragPreviewCanvasRef}
@@ -7163,7 +7168,7 @@ export function EditorClient({ project }: { project: Project }) {
                   style={{
                     ...dragPreviewStyle,
                     transformOrigin: "center",
-                    imageRendering: "auto",
+                    imageRendering: previewImageRendering,
                   }}
                 />
               ) : null}
@@ -7222,9 +7227,9 @@ export function EditorClient({ project }: { project: Project }) {
                       key={`page-y-${sourceY}`}
                       className="absolute border-t-2 border-dotted border-[var(--editor-muted)]"
                       style={{
-                        left: canvasViewportGuide.left,
+                        left: outsideNumberMargin,
                         top: outsideNumberMargin + sourceY * zoom,
-                        width: pageBreakGuideWidth,
+                        width: graphPreviewWidth,
                       }}
                     >
                       <span className="absolute right-2 -top-5 rounded bg-[var(--editor-panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--editor-text-dim)] shadow-sm">
@@ -7237,9 +7242,9 @@ export function EditorClient({ project }: { project: Project }) {
                       key={`page-x-${sourceX}`}
                       className="absolute border-l-2 border-dotted border-[var(--editor-muted)]"
                       style={{
-                        height: pageBreakGuideHeight,
+                        height: graphPreviewHeight,
                         left: outsideNumberMargin + sourceX * zoom,
-                        top: canvasViewportGuide.top,
+                        top: outsideNumberMargin,
                       }}
                     >
                       <span className="absolute left-1 top-2 rounded bg-[var(--editor-panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--editor-text-dim)] shadow-sm">

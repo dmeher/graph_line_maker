@@ -1,5 +1,16 @@
 import { DEFAULT_PRINT_PAPER_SIZE, GRAPH_MAJOR_CELL_PIXELS, PRINT_PAPER_SIZES } from "@/lib/graph-paper";
 import { createPdfExportPlan, MAX_PAGES_PER_PDF_FILE } from "@/lib/canvas/pdf-layout";
+import {
+  GRID_BUCKET_ORDER,
+  GRID_BUCKET_OPACITY,
+  GRID_BUCKET_WIDTH_UNITS,
+  gridBucketForIndex,
+  gridLineCount,
+  gridLinePositionPx,
+  gridUnitMm,
+  majorEveryMinorFor,
+  type GridBucket,
+} from "@/lib/canvas/grid-style";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 import type { PdfExportTile } from "@/lib/canvas/pdf-layout";
 
@@ -18,6 +29,10 @@ const OUTSIDE_LABEL_LEFT_X = 8;
 const OUTSIDE_LABEL_RIGHT_X = 10;
 const OUTSIDE_LABEL_FALLBACK_TOLERANCE_PX = Math.round(GRAPH_MAJOR_CELL_PIXELS * 0.9);
 const MAX_TOTAL_PDF_PAGES = 240;
+// Cut guides sit just outside the graph edge so the dotted line brackets the
+// graph immediately above/below the boundary grid line without overlapping it —
+// only a hair's-width gap, while still running the full page width.
+const CUT_GUIDE_GAP_MM = 0.5;
 const LEFT_RIGHT_OUTSIDE_Y_OFFSET = 0.45;
 const OUTSIDE_GRID_NUMBER_COLOR = "#000000";
 const COMPANY_HALLMARK_PATH = "/brand/company-hallmark.jpeg";
@@ -254,6 +269,103 @@ function createPrintGridNumberSpans(
   return spans.join("");
 }
 
+function hexToRgbTuple(hex: string): [number, number, number] {
+  const clean = (hex || "").replace("#", "");
+  const value = clean.length === 3 ? clean.split("").map((character) => character + character).join("") : clean;
+  const int = Number.parseInt(value.slice(0, 6), 16);
+  if (!Number.isFinite(int)) return [220, 38, 38];
+  return [(int >> 16) & 255, (int >> 8) & 255, int & 255];
+}
+
+type TileGridGroup = { bucket: GridBucket; widthMm: number; opacity: number; vertical: number[]; horizontal: number[] };
+
+/**
+ * Grid lines for one export/print tile, in tile-local millimetres (0..width/height
+ * of the tile's placed region). Widths use the shared grid-style weights so the
+ * printed/PDF grid matches the editor preview exactly, and — because they are drawn
+ * as vectors at physical mm widths — they stay crisp at any print scale instead of
+ * blurring like the old baked-raster grid. Lines are grouped by weight bucket to
+ * keep PDF state changes and SVG nodes minimal. (The dot pattern is exported as its
+ * equivalent line grid.)
+ */
+function tileGridGroups(tile: PdfExportTile, settings: GraphSettings, canvasWidth: number, canvasHeight: number) {
+  const base = Math.max(1, Math.min(10, Math.round(settings.gridLineThickness || 1)));
+  const unitMm = gridUnitMm(settings.cellSizeCm ?? 1);
+  const majorEveryMinor = majorEveryMinorFor(settings.majorGridEvery ?? 1);
+  const xScale = tile.sourceWidth > 0 ? tile.destinationWidthMm / tile.sourceWidth : 0;
+  const yScale = tile.sourceHeight > 0 ? tile.destinationHeightMm / tile.sourceHeight : 0;
+  const columns = gridLineCount(canvasWidth);
+  const rows = gridLineCount(canvasHeight);
+
+  const byBucket = new Map<GridBucket, TileGridGroup>();
+  const ensure = (bucket: GridBucket) => {
+    let group = byBucket.get(bucket);
+    if (!group) {
+      group = {
+        bucket,
+        widthMm: GRID_BUCKET_WIDTH_UNITS[bucket] * base * unitMm,
+        opacity: GRID_BUCKET_OPACITY[bucket],
+        vertical: [],
+        horizontal: [],
+      };
+      byBucket.set(bucket, group);
+    }
+    return group;
+  };
+
+  for (let index = 0; index <= columns; index += 1) {
+    const px = gridLinePositionPx(index);
+    if (px < tile.sourceX - 0.5 || px > tile.sourceX + tile.sourceWidth + 0.5) continue;
+    ensure(gridBucketForIndex(index, majorEveryMinor)).vertical.push((px - tile.sourceX) * xScale);
+  }
+  for (let index = 0; index <= rows; index += 1) {
+    const px = gridLinePositionPx(index);
+    if (px < tile.sourceY - 0.5 || px > tile.sourceY + tile.sourceHeight + 0.5) continue;
+    ensure(gridBucketForIndex(index, majorEveryMinor)).horizontal.push((px - tile.sourceY) * yScale);
+  }
+
+  const groups = GRID_BUCKET_ORDER.map((bucket) => byBucket.get(bucket)).filter((group): group is TileGridGroup => Boolean(group));
+  return { groups, widthMm: tile.destinationWidthMm, heightMm: tile.destinationHeightMm };
+}
+
+function drawGridLinesToPdfPage(
+  pdf: import("jspdf").jsPDF,
+  tile: PdfExportTile,
+  settings: GraphSettings,
+  canvasWidth: number,
+  canvasHeight: number,
+) {
+  const { groups, widthMm, heightMm } = tileGridGroups(tile, settings, canvasWidth, canvasHeight);
+  if (!groups.length) return;
+  const [red, green, blue] = hexToRgbTuple(settings.gridLineColor || "#dc2626");
+  pdf.setDrawColor(red, green, blue);
+  pdf.setLineCap("butt");
+  const x0 = tile.destinationXMm;
+  const y0 = tile.destinationYMm;
+  for (const group of groups) {
+    pdf.setGState(pdf.GState({ opacity: group.opacity }));
+    pdf.setLineWidth(group.widthMm);
+    for (const vertical of group.vertical) pdf.line(x0 + vertical, y0, x0 + vertical, y0 + heightMm);
+    for (const horizontal of group.horizontal) pdf.line(x0, y0 + horizontal, x0 + widthMm, y0 + horizontal);
+  }
+  pdf.setGState(pdf.GState({ opacity: 1 }));
+}
+
+function createPrintGridSvg(tile: PdfExportTile, settings: GraphSettings, canvasWidth: number, canvasHeight: number, zIndex: number) {
+  const { groups, widthMm, heightMm } = tileGridGroups(tile, settings, canvasWidth, canvasHeight);
+  if (!groups.length) return "";
+  const color = escapeHtml(settings.gridLineColor || "#dc2626");
+  const paths = groups
+    .map((group) => {
+      let d = "";
+      for (const vertical of group.vertical) d += `M${vertical} 0V${heightMm}`;
+      for (const horizontal of group.horizontal) d += `M0 ${horizontal}H${widthMm}`;
+      return `<path d="${d}" stroke="${color}" stroke-width="${group.widthMm}" stroke-opacity="${group.opacity}" fill="none" />`;
+    })
+    .join("");
+  return `<svg class="print-grid" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${widthMm}mm;height:${heightMm}mm;z-index:${zIndex}" viewBox="0 0 ${widthMm} ${heightMm}" preserveAspectRatio="none">${paths}</svg>`;
+}
+
 function canvasToObjectUrl(canvas: HTMLCanvasElement, type = "image/png") {
   return new Promise<string>((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -334,16 +446,15 @@ function uniqueCutGuideYPositions(topMm: number, bottomMm: number, pageHeightMm:
   return Array.from(new Set([safeTop, safeBottom].map((value) => Math.round(value * 1000) / 1000)));
 }
 
-function drawPdfCutGuides(
-  pdf: import("jspdf").jsPDF,
-  topMm: number,
-  bottomMm: number,
-  pageWidthMm: number,
-  pageHeightMm: number,
-) {
+function drawPdfCutGuides(pdf: import("jspdf").jsPDF, tile: PdfExportTile, pageWidthMm: number, pageHeightMm: number) {
+  pdf.setGState(pdf.GState({ opacity: 1 }));
   pdf.setDrawColor(51, 65, 85);
   pdf.setLineWidth(0.25);
   pdf.setLineDashPattern([1.5, 1.5], 0);
+  // Full page width, but offset just outside the graph edge so the dotted line
+  // brackets the graph above/below the boundary line instead of sitting on it.
+  const topMm = tile.cutGuideTopYMm - CUT_GUIDE_GAP_MM;
+  const bottomMm = tile.cutGuideBottomYMm + CUT_GUIDE_GAP_MM;
   for (const y of uniqueCutGuideYPositions(topMm, bottomMm, pageHeightMm)) {
     pdf.line(0, y, pageWidthMm, y);
   }
@@ -384,9 +495,17 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
       pagesInCurrentFile = 0;
     }
 
+    const [bgRed, bgGreen, bgBlue] = hexToRgbTuple(settings.backgroundColor || "#ffffff");
     for (const tile of plan.tiles) {
       if (plan.splitIntoFiles && pagesInCurrentFile >= MAX_PAGES_PER_PDF_FILE) saveCurrentPdf();
       if (pagesInCurrentFile > 0) pdf.addPage([plan.pageWidthMm, plan.pageHeightMm], plan.orientation);
+
+      // Paper backdrop, then vector grid behind the transparent artwork ("back"),
+      // so grid lines are drawn as crisp vectors instead of baked into the raster.
+      pdf.setGState(pdf.GState({ opacity: 1 }));
+      pdf.setFillColor(bgRed, bgGreen, bgBlue);
+      pdf.rect(tile.destinationXMm, tile.destinationYMm, tile.destinationWidthMm, tile.destinationHeightMm, "F");
+      if (settings.gridLineLayer === "back") drawGridLinesToPdfPage(pdf, tile, settings, canvas.width, canvas.height);
 
       const tileBytes = new Uint8Array(
         await (await canvasSliceToPngBlob(canvas, tile.sourceX, tile.sourceY, tile.sourceWidth, tile.sourceHeight)).arrayBuffer(),
@@ -399,6 +518,7 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
         tile.destinationWidthMm,
         tile.destinationHeightMm,
       );
+      if (settings.gridLineLayer !== "back") drawGridLinesToPdfPage(pdf, tile, settings, canvas.width, canvas.height);
       if (outsideGridNumberLines) {
         addOutsideGridNumbersToPdfPage(pdf, tile, outsideGridNumberLines, graphWidthPx, graphHeightPx);
       }
@@ -406,7 +526,7 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
       if (hallmark) {
         pdf.addImage(companyHallmarkBytes, "PNG", hallmark.xMm, hallmark.yMm, hallmark.widthMm, hallmark.heightMm);
       }
-      drawPdfCutGuides(pdf, tile.cutGuideTopYMm, tile.cutGuideBottomYMm, plan.pageWidthMm, plan.pageHeightMm);
+      drawPdfCutGuides(pdf, tile, plan.pageWidthMm, plan.pageHeightMm);
       pagesInCurrentFile += 1;
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
     }
@@ -439,6 +559,8 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
   const graphWidthPx = Math.max(1, Math.round(canvas.width));
   const graphHeightPx = Math.max(1, Math.round(canvas.height));
   const companyHallmarkUrl = new URL(COMPANY_HALLMARK_PATH, window.location.origin).href;
+  const backgroundColor = escapeHtml(settings.backgroundColor || "#ffffff");
+  const gridZIndex = settings.gridLineLayer === "back" ? 1 : 3;
 
   const objectUrls: string[] = [];
   const pages: string[] = [];
@@ -447,7 +569,7 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
         await canvasSliceToPngBlob(canvas, tile.sourceX, tile.sourceY, tile.sourceWidth, tile.sourceHeight),
       );
       objectUrls.push(imageUrl);
-      const cutGuides = uniqueCutGuideYPositions(tile.cutGuideTopYMm, tile.cutGuideBottomYMm, plan.pageHeightMm)
+      const cutGuides = uniqueCutGuideYPositions(tile.cutGuideTopYMm - CUT_GUIDE_GAP_MM, tile.cutGuideBottomYMm + CUT_GUIDE_GAP_MM, plan.pageHeightMm)
         .map((y) => `<span class="cut-guide" style="top:${y}mm"></span>`)
         .join("");
       const gridNumberSpans = outsideGridNumberLines
@@ -462,7 +584,11 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
       const hallmarkImage = hallmark
         ? `<span class="company-hallmark" style="left:${hallmark.xMm}mm;top:${hallmark.yMm}mm;width:${hallmark.widthMm}mm;height:${hallmark.heightMm}mm"><img src="${companyHallmarkUrl}" alt="" style="left:${(hallmark.widthMm - hallmark.heightMm) / 2}mm;top:${(hallmark.heightMm - hallmark.widthMm) / 2}mm;width:${hallmark.heightMm}mm;height:${hallmark.widthMm}mm" /></span>`
         : "";
-      pages.push(`<section class="page"><img src="${imageUrl}" alt="" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" />${hallmarkImage}${gridNumberSpans}${cutGuides}</section>`);
+      // Paper backdrop + crisp vector grid (SVG) behind/above the transparent
+      // artwork image, so grid lines print sharp at any scale instead of blurring.
+      const backdrop = `<span class="print-bg" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm;background:${backgroundColor}"></span>`;
+      const gridSvg = createPrintGridSvg(tile, settings, canvas.width, canvas.height, gridZIndex);
+      pages.push(`<section class="page">${backdrop}${gridSvg}<img class="print-art" src="${imageUrl}" alt="" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" />${hallmarkImage}${gridNumberSpans}${cutGuides}</section>`);
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
   }
 
@@ -489,13 +615,16 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
       page-break-after: auto;
     }
     img { display: block; position: absolute; }
-    .company-hallmark { position: absolute; z-index: 1; overflow: visible; }
+    .print-bg { position: absolute; z-index: 0; }
+    .print-grid { position: absolute; overflow: visible; }
+    .print-art { z-index: 2; }
+    .company-hallmark { position: absolute; z-index: 4; overflow: visible; }
     .company-hallmark img { transform: rotate(-90deg); transform-origin: center; object-fit: contain; }
     .cut-guide {
       position: absolute;
       left: 0;
       right: 0;
-      z-index: 2;
+      z-index: 5;
       height: 0;
       border-top: 0.25mm dotted rgba(51, 65, 85, 0.78);
     }
@@ -504,7 +633,7 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
       font-family: Arial, sans-serif;
       font-weight: 300;
       line-height: 1;
-      z-index: 3;
+      z-index: 6;
       pointer-events: none;
       white-space: nowrap;
       user-select: none;

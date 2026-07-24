@@ -1,6 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // Pin the workspace root to this project. A stray, empty package-lock.json in
+  // the parent `Coaching/` directory otherwise makes Next.js infer the wrong
+  // root and emit a multiple-lockfiles warning.
+  turbopack: {
+    root: __dirname,
+  },
   serverExternalPackages: ["@neplex/vectorizer"],
   // The editor E2E contract requires no framework overlay; the dev-tools badge
   // also overlaps the mobile bottom dock and intercepts taps.

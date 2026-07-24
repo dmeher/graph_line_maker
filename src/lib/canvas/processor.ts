@@ -1044,8 +1044,13 @@ function drawGraphPaperGrid(canvas: CanvasLike, settings: GraphSettings) {
   const rows = Math.max(1, Math.round(dimensions.outputHeight / minorHeight));
   const baseLineWidth = Math.max(1, Math.min(10, Math.round(settings.gridLineThickness || 1)));
   const minorLineWidth = settings.gridPattern === "dot" ? baseLineWidth : Math.max(1, baseLineWidth);
-  const midLineWidth = Math.max(1, baseLineWidth);
-  const majorLineWidth = Math.min(10, baseLineWidth + 0.5);
+  // Three-tier width hierarchy, kept in sync with GraphGridOverlay:
+  // minor (base) < 5th/10th mid (base + 1) < major cm line (base + 2). Keep every
+  // grid line an integer width so fillRect lands on whole pixels — a fractional
+  // width antialiases into a full pixel plus a half-covered neighbor, which reads
+  // as a faint second line.
+  const midLineWidth = Math.min(11, baseLineWidth + 1);
+  const majorLineWidth = Math.min(12, baseLineWidth + 2);
   const majorEvery = Math.max(1, Math.round(settings.majorGridEvery || DEFAULT_MAJOR_GRID_EVERY));
   const majorEveryMinor = Math.max(1, majorEvery * GRAPH_SUBDIVISIONS);
   const gridColor = hexToRgb(settings.gridLineColor || DEFAULT_GRID_LINE_COLOR);
@@ -1114,6 +1119,30 @@ function drawGraphPaperGrid(canvas: CanvasLike, settings: GraphSettings) {
   }
 
   ctx.restore();
+}
+
+/**
+ * Composite output is drawn as transparent artwork only (fills + outline + manual
+ * shapes + inline numbers), with no background fill and no grid lines. The preview
+ * shows that artwork over a white paper backdrop and a crisp SVG grid overlay, so
+ * grid lines stay hairline-thin at any zoom. Export/save need the historical
+ * flattened image, so this helper rebuilds it: background + grid + artwork, in the
+ * same z-order the old baked composite used (identical for the default "back" grid).
+ */
+export function flattenGraphForOutput(artwork: HTMLCanvasElement, settings: GraphSettings): HTMLCanvasElement {
+  const width = Math.max(1, Math.round(artwork.width));
+  const height = Math.max(1, Math.round(artwork.height));
+  const output = document.createElement("canvas");
+  output.width = width;
+  output.height = height;
+  const context = output.getContext("2d");
+  if (!context) throw new Error("Canvas is not available.");
+  context.fillStyle = settings.backgroundColor || "#ffffff";
+  context.fillRect(0, 0, width, height);
+  if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
+  context.drawImage(artwork, 0, 0);
+  if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
+  return output;
 }
 
 function drawGridNumbers(canvas: CanvasLike, settings: GraphSettings) {
@@ -1317,14 +1346,12 @@ function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, optio
   if (!outputContext) throw new Error("Canvas is not available.");
 
   const displayRegions = regions.map((region) => ({ ...region, color: colorForRegion(settings, region) }));
-  outputContext.fillStyle = settings.backgroundColor || "#ffffff";
-  outputContext.fillRect(0, 0, output.width, output.height);
-  if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
+  // Transparent artwork only; the grid + paper backdrop are composited by the SVG
+  // overlay (preview) or flattenGraphForOutput (export/save).
   drawFillRegions(outputContext, fillRegionMap, displayRegions, output.width, output.height, settings, 0.8);
   const imageLineThickness = lineThicknessForSettings(settings);
   const outlineColor = outlineColorForSettings(settings);
   drawMaskLayer(outputContext, outlineMask, output.width, output.height, outlineColor, 255, 0.12 * imageLineThickness);
-  if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
   drawManualGraphArtwork(output, settings);
   drawGridNumbers(output, settings);
 
@@ -1457,12 +1484,10 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     }))
     .filter((region) => region.cellCount > 0);
 
-  outputContext.fillStyle = settings.backgroundColor || "#ffffff";
-  outputContext.fillRect(0, 0, output.width, output.height);
-  if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
+  // Transparent artwork only; grid + paper backdrop handled by the SVG overlay
+  // (preview) or flattenGraphForOutput (export/save).
   drawFillRegions(outputContext, fillRegionMap, visibleRegions, output.width, output.height, settings, 0.8);
   drawColoredMaskLayers(outputContext, outlineMask, outlineColorMap, outlineColorsByNumber, output.width, output.height, outlineColorForSettings(settings), 255, 0.12 * maxLineThickness);
-  if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
   drawManualGraphArtwork(output, settings);
   drawGridNumbers(output, settings);
 
@@ -1648,9 +1673,8 @@ export async function pixelateLayeredCanvasesAsync(
     }))
     .filter((region) => region.cellCount > 0);
 
-  outputContext.fillStyle = settings.backgroundColor || "#ffffff";
-  outputContext.fillRect(0, 0, output.width, output.height);
-  if (settings.gridLineLayer === "back") drawGraphPaperGrid(output, settings);
+  // Transparent artwork only; grid + paper backdrop handled by the SVG overlay
+  // (preview) or flattenGraphForOutput (export/save).
   drawFillRegions(outputContext, fillRegionMap, visibleRegions, output.width, output.height, settings, 0.8);
   drawColoredMaskLayers(
     outputContext,
@@ -1664,7 +1688,6 @@ export async function pixelateLayeredCanvasesAsync(
     0.12 * maxLineThickness,
     outlineCoverage,
   );
-  if (settings.gridLineLayer !== "back") drawGraphPaperGrid(output, settings);
   drawManualGraphArtwork(output, settings);
   drawGridNumbers(output, settings);
 

@@ -11,6 +11,12 @@ export const MAX_ERASE_STROKES_PER_LAYER = 80;
 export const MAX_ERASE_POINTS_PER_STROKE = 400;
 /** Cap total erase points per layer to keep the settings payload well under the 2 MB server-action limit. */
 export const MAX_ERASE_POINTS_PER_LAYER = 6000;
+/**
+ * How far outside the image a lasso vertex may sit, in UV units. Generous
+ * enough to trace across the whole graph, tight enough that legacy pixel-space
+ * coordinates are still recognised as corrupt rather than accepted.
+ */
+export const MAX_POLYGON_UV_OVERSHOOT = 4;
 /** Erase radius is stored as a fraction of the working canvas width (resolution independent). */
 export const MIN_ERASE_RADIUS_FRACTION = 0.001;
 export const MAX_ERASE_RADIUS_FRACTION = 0.5;
@@ -61,9 +67,20 @@ export function normalizeEraseStrokes(value: unknown): GraphEraseStroke[] {
   for (const raw of value) {
     if (strokes.length >= MAX_ERASE_STROKES_PER_LAYER) break;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
-    const record = raw as { points?: unknown; radius?: unknown };
+    const record = raw as { points?: unknown; radius?: unknown; shape?: unknown; fill?: unknown };
     if (!Array.isArray(record.points) || !record.points.length) continue;
     const radius = clampEraseRadius(record.radius);
+    // Anything other than an explicit "square"/"polygon" is a circle, which
+    // keeps strokes saved before those shapes existed rendering as before.
+    const shape = record.shape === "square" ? "square" : record.shape === "polygon" ? "polygon" : "circle";
+    // A lasso region may be traced anywhere on the graph, so its vertices can
+    // sit outside the image and are kept unclamped — canvas fill() clips the
+    // region to the layer, whereas clamping would distort the traced shape.
+    // Brush strokes are still painted inside the image and stay 0..1.
+    // The outer bound remains tight enough to reject legacy pixel-space drafts
+    // (values in the hundreds), which is what this guard originally caught.
+    const minCoord = shape === "polygon" ? -MAX_POLYGON_UV_OVERSHOOT : -0.001;
+    const maxCoord = shape === "polygon" ? 1 + MAX_POLYGON_UV_OVERSHOOT : 1.001;
     const points: { x: number; y: number }[] = [];
     let legacyStroke = false;
     for (const point of record.points) {
@@ -73,18 +90,25 @@ export function normalizeEraseStrokes(value: unknown): GraphEraseStroke[] {
       const px = Number((point as { x?: unknown }).x);
       const py = Number((point as { y?: unknown }).y);
       if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
-      if (px < -0.001 || px > 1.001 || py < -0.001 || py > 1.001) {
+      if (px < minCoord || px > maxCoord || py < minCoord || py > maxCoord) {
         legacyStroke = true;
         break;
       }
-      points.push({ x: roundEraseCoord(Math.max(0, Math.min(1, px))), y: roundEraseCoord(Math.max(0, Math.min(1, py))) });
+      points.push({
+        x: roundEraseCoord(Math.max(minCoord, Math.min(maxCoord, px))),
+        y: roundEraseCoord(Math.max(minCoord, Math.min(maxCoord, py))),
+      });
       totalPoints += 1;
     }
     if (legacyStroke) {
       totalPoints -= points.length;
       continue;
     }
-    if (points.length) strokes.push({ points, radius });
+    // A polygon needs three vertices to enclose anything.
+    if (shape === "polygon" && points.length < 3) continue;
+    // Fill applies only to closed regions; a brush stroke always erases.
+    const fill = shape === "polygon" && (record.fill === "#ffffff" || record.fill === "#000000") ? record.fill : undefined;
+    if (points.length) strokes.push(fill ? { points, radius, shape, fill } : { points, radius, shape });
     if (totalPoints >= MAX_ERASE_POINTS_PER_LAYER) break;
   }
   return strokes;
@@ -123,7 +147,9 @@ export function eraseStrokesSignature(strokes: GraphEraseStroke[] | undefined): 
   for (const stroke of strokes) {
     points += stroke.points.length;
     const tail = stroke.points[stroke.points.length - 1];
-    if (tail) last = `${tail.x.toFixed(4)},${tail.y.toFixed(4)}:${stroke.radius.toFixed(4)}`;
+    // Shape is part of the signature: switching brush shape changes the erased
+    // pixels, so a cached processed layer must not be reused across it.
+    if (tail) last = `${tail.x.toFixed(4)},${tail.y.toFixed(4)}:${stroke.radius.toFixed(4)}:${stroke.shape ?? "circle"}:${stroke.fill ?? "erase"}`;
   }
   return `${strokes.length}/${points}/${last}`;
 }

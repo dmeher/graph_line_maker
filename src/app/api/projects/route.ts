@@ -6,13 +6,26 @@ import {
   MAX_UPLOAD_BYTES,
   MAX_PROJECT_UPLOAD_TOTAL_BYTES,
   ORIGINAL_IMAGES_BUCKET,
+  getAllowedImageContentType,
   getImageExtension,
   isAllowedImageFile,
 } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
-import { assertProjectOwner, defaultGraphSettings, imagePath, normalizeGraphSettings, sourceImagePath } from "@/lib/projects";
+import {
+  MAX_THUMBNAIL_BYTES,
+  THUMBNAIL_CONTENT_TYPE,
+  assertProjectOwner,
+  defaultGraphSettings,
+  imagePath,
+  normalizeGraphSettings,
+  sourceImagePath,
+  thumbnailPathFor,
+} from "@/lib/projects";
+import { getObjectStore, mediaKey } from "@/lib/storage/media";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
+
+const UPLOAD_URL_TTL_SECONDS = 15 * 60;
 
 function getExtension(file: { name?: string; type?: string }) {
   const nameExtension = getImageExtension(file.name || "");
@@ -64,7 +77,12 @@ type UploadMetadata = {
 type PreparedUpload = UploadMetadata & {
   id: string;
   path: string;
-  token: string;
+  /** Presigned direct-to-R2 PUT URL; replaces the Supabase upload token. */
+  url: string;
+  contentType: string;
+  thumbPath: string;
+  thumbUrl: string;
+  thumbContentType: string;
 };
 
 function parseUploadMetadata(value: unknown): UploadMetadata[] {
@@ -91,7 +109,7 @@ function validateUploadMetadata(files: UploadMetadata[]) {
   return null;
 }
 
-function buildSettingsWithSources(uploadedImages: Array<{ id: string; name: string; path: string }>) {
+function buildSettingsWithSources(uploadedImages: Array<{ id: string; name: string; path: string; thumbPath: string | null }>) {
   const settings = settingsForImage();
   const sourceImages = uploadedImages.map((image, index) => ({
     ...image,
@@ -135,6 +153,7 @@ export async function POST(request: NextRequest) {
       if (validationError) return NextResponse.json({ message: validationError }, { status: 400 });
 
       const supabase = getSupabaseAdmin();
+      const store = getObjectStore();
       const settings = settingsForImage();
       const { data: project, error } = await supabase
         .from("projects")
@@ -158,11 +177,23 @@ export async function POST(request: NextRequest) {
           const path = index === 0
             ? imagePath(session.userId, project.id, "original", getExtension(file))
             : sourceImagePath(session.userId, project.id, id, getExtension(file));
-          const { data: signed, error: signError } = await supabase.storage
-            .from(ORIGINAL_IMAGES_BUCKET)
-            .createSignedUploadUrl(path, { upsert: true });
-          if (signError || !signed?.token) throw new Error(signError?.message || "Unable to prepare upload.");
-          return { ...file, id, path, token: signed.token };
+          const thumbPath = thumbnailPathFor(path);
+          // Content type and byte length are folded into the SigV4 signature,
+          // so the browser must send exactly these. That is the only bound a
+          // presigned PUT has — R2 offers no POST-policy equivalent.
+          const contentType = getAllowedImageContentType(file) || "application/octet-stream";
+          const [url, thumbUrl] = await Promise.all([
+            store.presignPut(mediaKey(ORIGINAL_IMAGES_BUCKET, path), {
+              contentType,
+              contentLength: file.size,
+              ttlSeconds: UPLOAD_URL_TTL_SECONDS,
+            }),
+            store.presignPut(mediaKey(ORIGINAL_IMAGES_BUCKET, thumbPath), {
+              contentType: THUMBNAIL_CONTENT_TYPE,
+              ttlSeconds: UPLOAD_URL_TTL_SECONDS,
+            }),
+          ]);
+          return { ...file, id, path, url, contentType, thumbPath, thumbUrl, thumbContentType: THUMBNAIL_CONTENT_TYPE };
         });
         return NextResponse.json({ ok: true, projectId: project.id, uploads });
       } catch (signError) {
@@ -193,28 +224,50 @@ export async function PATCH(request: NextRequest) {
     }
     await assertProjectOwner(projectId);
     const prefix = `${session.userId}/${projectId}/`;
-    const uploadedImages: Array<{ id: string; name: string; path: string }> = uploads.flatMap((item: unknown) => {
+    const uploadedImages: Array<{ id: string; name: string; path: string; thumbPath: string | null }> = uploads.flatMap((item: unknown) => {
       if (!item || typeof item !== "object") return [];
       const upload = item as Record<string, unknown>;
       const id = String(upload.id || "");
       const name = String(upload.name || "");
       const path = String(upload.path || "");
       if (!/^[a-zA-Z0-9-]{1,80}$/.test(id) || !name || !path.startsWith(prefix)) return [];
-      return [{ id, name, path }];
+      // Only ever trust the derived thumbnail location, never a client-supplied one.
+      const thumbPath = upload.thumbUploaded === true ? thumbnailPathFor(path) : null;
+      return [{ id, name, path, thumbPath }];
     });
     if (uploadedImages.length !== uploads.length || uploadedImages[0]?.id !== "original") {
       return NextResponse.json({ message: "Invalid uploaded file metadata." }, { status: 400 });
     }
 
     const supabase = getSupabaseAdmin();
-    await mapWithConcurrency(uploadedImages, 4, async (image) => {
-      const { data: exists, error } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).exists(image.path);
-      if (error || !exists) throw new Error(`Upload did not complete for ${image.name}.`);
+    const store = getObjectStore();
+    // A presigned PUT cannot cap its own body, so finalize is where the size
+    // contract is enforced; anything oversized is deleted rather than orphaned.
+    const verifiedImages = await mapWithConcurrency(uploadedImages, 4, async (image) => {
+      const key = mediaKey(ORIGINAL_IMAGES_BUCKET, image.path);
+      const head = await store.headObject(key);
+      if (!head) throw new Error(`Upload did not complete for ${image.name}.`);
+      if (head.contentLength > MAX_UPLOAD_BYTES) {
+        await store.deleteObjects([key]);
+        throw new Error(`${image.name} is larger than the allowed upload size.`);
+      }
+
+      let thumbPath: string | null = null;
+      if (image.thumbPath) {
+        const thumbKey = mediaKey(ORIGINAL_IMAGES_BUCKET, image.thumbPath);
+        const thumbHead = await store.headObject(thumbKey);
+        if (thumbHead && thumbHead.contentLength <= MAX_THUMBNAIL_BYTES) {
+          thumbPath = image.thumbPath;
+        } else if (thumbHead) {
+          await store.deleteObjects([thumbKey]);
+        }
+      }
+      return { ...image, thumbPath };
     });
-    const finalizedSettings = buildSettingsWithSources(uploadedImages);
+    const finalizedSettings = buildSettingsWithSources(verifiedImages);
     const { error } = await supabase
       .from("projects")
-      .update({ original_image_path: uploadedImages[0].path, settings: finalizedSettings })
+      .update({ original_image_path: verifiedImages[0].path, settings: finalizedSettings })
       .eq("id", projectId)
       .eq("user_id", session.userId);
     if (error) throw new Error(error.message);
@@ -234,7 +287,15 @@ export async function DELETE(request: NextRequest) {
     const prefix = `${session.userId}/${projectId}/`;
     const paths: string[] = (Array.isArray(body.paths) ? body.paths : []).map(String).filter((path: string) => path.startsWith(prefix));
     const supabase = getSupabaseAdmin();
-    if (paths.length) await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove(paths);
+    if (paths.length) {
+      // Remove each asset's derivative alongside it so cleanup cannot orphan thumbnails.
+      await getObjectStore().deleteObjects(
+        paths.flatMap((path) => [
+          mediaKey(ORIGINAL_IMAGES_BUCKET, path),
+          mediaKey(ORIGINAL_IMAGES_BUCKET, thumbnailPathFor(path)),
+        ]),
+      );
+    }
     const { error } = await supabase.from("projects").delete().eq("id", projectId).eq("user_id", session.userId);
     if (error) throw new Error(error.message);
     return NextResponse.json({ ok: true });

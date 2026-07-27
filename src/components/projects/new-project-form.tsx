@@ -40,13 +40,17 @@ import { QuickCropControls } from "@/components/projects/quick-crop-controls";
 import {
   ALLOWED_IMAGE_LABEL,
   IMAGE_ACCEPT,
-  ORIGINAL_IMAGES_BUCKET,
   MAX_PROJECT_UPLOAD_FILES,
   MAX_PROJECT_UPLOAD_TOTAL_BYTES,
   MAX_UPLOAD_BYTES,
   isAllowedImageFile,
   isPdfFile,
 } from "@/lib/constants";
+import {
+  SOURCE_THUMBNAIL_MAX_EDGE,
+  uploadWithThumbnail,
+  type PresignedUpload,
+} from "@/lib/storage/upload-client";
 import { cropQueueItemId, cropQueueStatus } from "@/lib/projects/crop-queue";
 import {
   DEFAULT_BACKGROUND_TOLERANCE,
@@ -669,17 +673,11 @@ export function NewProjectForm() {
         throw new Error(prepared.message || "Unable to prepare project upload.");
       }
       pendingProject = { projectId: prepared.projectId, paths: prepared.uploads.map((upload: { path: string }) => upload.path) };
-      const { getSupabaseBrowser } = await import("@/lib/supabase/browser");
-      const supabase = getSupabaseBrowser();
-      await mapWithConcurrency(prepared.uploads, 2, async (upload: { path: string; token: string }, index) => {
-        const file = uploadFiles[index];
-        const { error } = await supabase.storage
-          .from(ORIGINAL_IMAGES_BUCKET)
-          .uploadToSignedUrl(upload.path, upload.token, file, {
-            cacheControl: "3600",
-            contentType: file.type || undefined,
-          });
-        if (error) throw new Error(error.message);
+      // Direct browser-to-R2 PUTs. Nothing transits the Next.js server, so a
+      // 150 MB create request no longer has to fit in a serverless function.
+      const thumbUploads = await mapWithConcurrency(prepared.uploads, 2, async (upload: PresignedUpload, index) => {
+        const result = await uploadWithThumbnail(upload, uploadFiles[index], SOURCE_THUMBNAIL_MAX_EDGE);
+        return result.thumbUploaded;
       });
 
       const finalizeResponse = await fetch("/api/projects", {
@@ -687,10 +685,11 @@ export function NewProjectForm() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           projectId: prepared.projectId,
-          uploads: prepared.uploads.map((upload: { id: string; name: string; path: string }) => ({
+          uploads: prepared.uploads.map((upload: { id: string; name: string; path: string }, index: number) => ({
             id: upload.id,
             name: upload.name,
             path: upload.path,
+            thumbUploaded: thumbUploads[index] === true,
           })),
         }),
       });

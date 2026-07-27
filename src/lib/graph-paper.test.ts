@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  clampVectorizerSketchRemoval,
   CANVAS_BLACK,
   CANVAS_LIGHT_GREY,
   CANVAS_WHITE,
@@ -45,4 +46,19 @@ test("graph lines may additionally use red and green", () => {
 
 test("major grid lines default to every cell", () => {
   assert.equal(DEFAULT_MAJOR_GRID_EVERY, 1);
+});
+
+test("sketch removal strength is clamped and defaults to off", () => {
+  // Zero means off, so existing projects and fresh uploads render unchanged.
+  assert.equal(clampVectorizerSketchRemoval(undefined), 0);
+  assert.equal(clampVectorizerSketchRemoval(null), 0);
+  assert.equal(clampVectorizerSketchRemoval("not a number"), 0);
+  assert.equal(clampVectorizerSketchRemoval(0), 0);
+
+  assert.equal(clampVectorizerSketchRemoval(2), 2);
+  assert.equal(clampVectorizerSketchRemoval(2.4), 2);
+
+  // Erosion is destructive, so the ceiling is deliberately low.
+  assert.equal(clampVectorizerSketchRemoval(-5), 0);
+  assert.equal(clampVectorizerSketchRemoval(99), 6);
 });

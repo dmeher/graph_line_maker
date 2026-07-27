@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { preprocessImageDataForGraph } from "./image-preprocessing.ts";
-import { mergeLayerPixelMasks } from "./layer-mask-merge.ts";
+import { fillRegionNumberForRender, mergeLayerPixelMasks } from "./layer-mask-merge.ts";
 import type { GraphSettings } from "../types.ts";
 
 test("transparent pixels in a top layer preserve lower artwork", () => {
@@ -99,6 +99,37 @@ test("layer merging writes bounded local masks at their graph placement", () => 
     0, 0, 0, 0,
     0, 1, 0, 0,
     0, 0, 1, 0,
+  ]);
+});
+
+test("fractional vector outlines render over an adjacent fill without changing hit testing", () => {
+  const fillRegionMap = new Uint16Array([
+    0, 0, 0, 0,
+    0, 7, 0, 0,
+    0, 0, 0, 0,
+  ]);
+  const outlineMask = new Uint8Array([
+    0, 0, 0, 0,
+    0, 0, 1, 1,
+    0, 0, 0, 0,
+  ]);
+  const outlineCoverage = new Uint8Array([
+    0, 0, 0, 0,
+    0, 0, 128, 128,
+    0, 0, 0, 0,
+  ]);
+
+  assert.equal(fillRegionNumberForRender(fillRegionMap, outlineMask, outlineCoverage, 4, 3, 6), 7);
+  // The next soft edge cannot borrow the first one: only real fill-map pixels
+  // are candidates, so the render-only bridge never expands across a contour.
+  assert.equal(fillRegionNumberForRender(fillRegionMap, outlineMask, outlineCoverage, 4, 3, 7), 0);
+
+  outlineCoverage[6] = 255;
+  assert.equal(fillRegionNumberForRender(fillRegionMap, outlineMask, outlineCoverage, 4, 3, 6), 0);
+  assert.deepEqual(Array.from(fillRegionMap), [
+    0, 0, 0, 0,
+    0, 7, 0, 0,
+    0, 0, 0, 0,
   ]);
 });
 

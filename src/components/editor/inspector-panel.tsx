@@ -68,8 +68,11 @@ import {
   MAX_GRAPH_HEIGHT_CELLS,
   MAX_GRAPH_WIDTH_CELLS,
   MAX_VECTORIZER_INK_THRESHOLD,
+  MAX_VECTORIZER_SKETCH_REMOVAL,
   MAX_VECTORIZER_LINE_ADJUST,
   MIN_VECTORIZER_INK_THRESHOLD,
+  MIN_VECTORIZER_SKETCH_REMOVAL,
+  DEFAULT_VECTORIZER_SKETCH_REMOVAL,
   MIN_VECTORIZER_LINE_ADJUST,
   PRESET_GRAPH_LINE_COLORS,
   PRINT_HORIZONTAL_ALIGNMENT_KEYS,
@@ -99,7 +102,7 @@ import {
 
 type InspectorTab = "graph" | "source" | "draw" | "palette";
 type DrawTab = "shape" | "clipart";
-type DrawingTool = "image" | "cell" | "shape" | "background-remover" | "image-eraser";
+type DrawingTool = "image" | "cell" | "shape" | "background-remover" | "image-eraser" | "lasso";
 type CollapsibleKey = "parameters" | "drawing" | "outline" | "fill" | "selectedFill" | "graphLines";
 type SourceStatus = { ready: boolean; previewUrl: string | null; error: string | null };
 
@@ -246,11 +249,24 @@ const drawTabs: { id: DrawTab; label: string }[] = [
   { id: "clipart", label: "Clipart" },
 ];
 
-const drawingToolOptions: { id: DrawingTool; label: string }[] = [
+/**
+ * Line and Shape are both the shape tool; they differ only in which kind is
+ * armed. Splitting them in the UI keeps open paths (line/arrow) separate from
+ * closed shapes, which have Filled mode and per-side toggles that open paths
+ * cannot use. Cell painting is no longer offered as a drawing tool — existing
+ * cell layers still load, render, and stay editable.
+ */
+type DrawingToolChoice = "image" | "line" | "shape" | "lasso";
+
+const drawingToolOptions: { id: DrawingToolChoice; label: string }[] = [
   { id: "image", label: "Select" },
-  { id: "cell", label: "Cell" },
+  { id: "line", label: "Line" },
   { id: "shape", label: "Shape" },
+  { id: "lasso", label: "Lasso" },
 ];
+
+const OPEN_SHAPE_GENERATOR_KINDS: GeneratedShapeKind[] = ["line", "arrow"];
+const CLOSED_SHAPE_GENERATOR_KINDS: GeneratedShapeKind[] = ["square", "rectangle", "circle", "oval", "half-circle"];
 
 function shapeUsesSingleSize(kind: GraphShapeKind) {
   return kind === "square" || kind === "circle";
@@ -522,6 +538,18 @@ export function InspectorPanel(props: InspectorPanelProps) {
                 step={1}
                 disabled={selectedSource.locked}
                 onChange={(value) => updateSourceImage(selectedSource.id, { vectorizerInkThreshold: Math.round(value) })}
+              />
+              {/* Deletes interior hatching/shading so the shape becomes an empty
+                  fillable region. Raise only until the sketch lines disappear:
+                  past roughly half the outline thickness it erodes outlines too. */}
+              <NumberField
+                label="Remove sketch lines"
+                value={selectedSource.vectorizerSketchRemoval ?? DEFAULT_VECTORIZER_SKETCH_REMOVAL}
+                min={MIN_VECTORIZER_SKETCH_REMOVAL}
+                max={MAX_VECTORIZER_SKETCH_REMOVAL}
+                step={1}
+                disabled={selectedSource.locked}
+                onChange={(value) => updateSourceImage(selectedSource.id, { vectorizerSketchRemoval: Math.round(value) })}
               />
               <label className="grid min-w-0 gap-1.5">
                 <span className="text-xs font-semibold text-[#8592a6]">Fidelity</span>
@@ -815,9 +843,29 @@ export function InspectorPanel(props: InspectorPanelProps) {
             <InspectorGroup title="Drawing Tools" icon={<Eraser size={15} aria-hidden="true" />}>
               <InspectorSegmented
                 label="Canvas tool"
-                value={drawingTool}
+                value={
+                  drawingTool === "shape"
+                    ? (OPEN_SHAPE_GENERATOR_KINDS.includes(draftShapeKind) ? "line" : "shape")
+                    : drawingTool
+                }
                 options={drawingToolOptions.map((tool) => ({ value: tool.id, label: tool.label }))}
-                onChange={(value) => setDrawingTool(value as DrawingTool)}
+                onChange={(value) => {
+                  const choice = value as DrawingToolChoice;
+                  if (choice === "image" || choice === "lasso") {
+                    setDrawingTool(choice);
+                    return;
+                  }
+                  // Both choices arm the shape tool; the kind is what differs.
+                  // Only reset the kind when the current one is in the wrong
+                  // family, so re-picking a tool never discards a chosen shape.
+                  setDrawingTool("shape");
+                  if (choice === "line" && !OPEN_SHAPE_GENERATOR_KINDS.includes(draftShapeKind)) {
+                    setDraftShapeKind("line");
+                  }
+                  if (choice === "shape" && OPEN_SHAPE_GENERATOR_KINDS.includes(draftShapeKind)) {
+                    setDraftShapeKind("rectangle");
+                  }
+                }}
               />
               <p className="text-[12px] leading-5 text-[#9aa7ba]">
                 Hold Alt while moving a layer to temporarily disable grid/layer snapping.
@@ -883,7 +931,12 @@ export function InspectorPanel(props: InspectorPanelProps) {
             {drawTab === "shape" ? (
               <InspectorGroup title="Shape Generator" icon={<Shapes size={15} aria-hidden="true" />}>
                 <div className="grid grid-cols-2 gap-2">
-                  {GENERATED_SHAPE_KIND_KEYS.map((kind) => (
+                  {/* Show only the family the active tool draws, so Shape lists
+                      closed shapes and Line lists the open paths. */}
+                  {(OPEN_SHAPE_GENERATOR_KINDS.includes(draftShapeKind)
+                    ? OPEN_SHAPE_GENERATOR_KINDS
+                    : CLOSED_SHAPE_GENERATOR_KINDS
+                  ).map((kind) => (
                     <button
                       key={`draft-shape-${kind}`}
                       type="button"
@@ -925,12 +978,16 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   />
                 </div>
 
-                <InspectorSegmented
-                  label="Shape type"
-                  value={draftShapeFillMode}
-                  options={(["outline", "filled"] as ShapeFillMode[]).map((mode) => ({ value: mode, label: GENERATED_SHAPE_FILL_MODE_LABELS[mode] }))}
-                  onChange={(value) => setDraftShapeFillMode(value as ShapeFillMode)}
-                />
+                {/* Line and arrow are open paths: there is no interior to fill,
+                    so the Outline/Filled toggle does not apply to them. */}
+                {OPEN_SHAPE_GENERATOR_KINDS.includes(draftShapeKind) ? null : (
+                  <InspectorSegmented
+                    label="Shape type"
+                    value={draftShapeFillMode}
+                    options={(["outline", "filled"] as ShapeFillMode[]).map((mode) => ({ value: mode, label: GENERATED_SHAPE_FILL_MODE_LABELS[mode] }))}
+                    onChange={(value) => setDraftShapeFillMode(value as ShapeFillMode)}
+                  />
+                )}
 
                 {draftShapeFillMode === "outline" && shapeSupportsSides(draftShapeKind) ? (
                   <div className="grid grid-cols-4 gap-1">

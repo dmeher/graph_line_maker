@@ -16,7 +16,10 @@ function projectColors(project: ProjectSummary) {
 }
 
 function ProjectThumbnail({ project }: { project: ProjectSummary }) {
-  const previewUrl = project.processedImageUrl || project.originalImageUrl;
+  // Prefer the bounded WebP derivative. Cards used to render the full processed
+  // canvas PNG — up to 25 of them per page. Projects saved before derivatives
+  // existed have none and keep falling back until their next save.
+  const previewUrl = project.processedThumbUrl || project.processedImageUrl || project.originalImageUrl;
   if (previewUrl) {
     return (
       <img

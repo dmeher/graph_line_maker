@@ -1,5 +1,5 @@
 const CACHE_PREFIX = "graph-pixel-maker-";
-const CACHE_VERSION = `${CACHE_PREFIX}v41`;
+const CACHE_VERSION = `${CACHE_PREFIX}v42`;
 const MAX_CACHED_EDITOR_NAVIGATIONS = 20;
 const LOCAL_HOSTNAMES = ["localhost", "127.0.0.1", "::1"];
 const IS_LOCAL_DEVELOPMENT = LOCAL_HOSTNAMES.includes(self.location.hostname);

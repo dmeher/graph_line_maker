@@ -1,7 +1,7 @@
 import { hexToRgb, rgbToHex } from "@/lib/canvas/color";
 import { createGridNumberLabels } from "@/lib/canvas/grid-numbering";
 import { maskFromImageData, maskFromVectorizedImageData, type ImageDataLike } from "@/lib/canvas/ink-mask";
-import { mergeLayerPixelMasks } from "@/lib/canvas/layer-mask-merge";
+import { fillRegionNumberForRender, mergeLayerPixelMasks } from "@/lib/canvas/layer-mask-merge";
 import { isPdfSource, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
 import { createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
 import { createStableFillRegionId } from "@/lib/canvas/fill-region-identity";
@@ -13,6 +13,7 @@ import {
   GRAPH_MAJOR_CELL_PIXELS,
   GRAPH_SUBDIVISIONS,
   clampVectorizerInkThreshold,
+  clampVectorizerSketchRemoval,
   clampVectorizerLineAdjust,
   isFillColor,
   isGraphVectorizerFidelity,
@@ -176,6 +177,17 @@ function outlineColorForSettings(settings: GraphSettings, fallback?: GraphSettin
   return settings.outlineColor || settings.lineColor || fallback?.outlineColor || fallback?.lineColor || DEFAULT_OUTLINE_COLOR;
 }
 
+/**
+ * Always zero: mask dilation is deliberately disabled.
+ *
+ * Line weight is now applied inside the vectorizer via `vectorizerLineAdjust`
+ * (see /api/vectorize), which preserves smooth antialiased contours. Dilating
+ * the rasterized mask instead thickened lines into opaque square pixels, which
+ * is exactly what the vector path replaced.
+ *
+ * Kept as a function rather than inlined so the dilation path stays exercised
+ * and correct if per-layer thickness is ever reintroduced here.
+ */
 function lineThicknessForSettings(settings: GraphSettings) {
   void settings;
   return 0;
@@ -189,8 +201,9 @@ function vectorizerRequestKey(settings: GraphSettings, layerCacheKey: string | u
   if (!layerCacheKey) return null;
   const lineAdjust = clampVectorizerLineAdjust(settings.vectorizerLineAdjust);
   const inkThreshold = clampVectorizerInkThreshold(settings.vectorizerInkThreshold);
+  const sketchRemoval = clampVectorizerSketchRemoval(settings.vectorizerSketchRemoval);
   const fidelity = vectorizerFidelityForSettings(settings);
-  return `${layerCacheKey}:vectorizer:${width}x${height}:${lineAdjust}:${inkThreshold}:${fidelity}`;
+  return `${layerCacheKey}:vectorizer:${width}x${height}:${lineAdjust}:${inkThreshold}:${sketchRemoval}:${fidelity}`;
 }
 
 function rememberVectorizedSvg(key: string, svg: string) {
@@ -283,6 +296,7 @@ async function fetchVectorizedSvg(imageData: ImageDataLike, settings: GraphSetti
       formData.set("image", blob, "layer.png");
       formData.set("lineAdjust", String(clampVectorizerLineAdjust(settings.vectorizerLineAdjust)));
       formData.set("inkThreshold", String(clampVectorizerInkThreshold(settings.vectorizerInkThreshold)));
+      formData.set("sketchRemoval", String(clampVectorizerSketchRemoval(settings.vectorizerSketchRemoval)));
       formData.set("fidelity", vectorizerFidelityForSettings(settings));
 
       const response = await fetch("/api/vectorize", {
@@ -558,8 +572,19 @@ function buildArtworkMasksFromImageData(
   });
   const imageLineThickness = lineThicknessForSettings(settings);
   const outlineMask = expandMaskForLineSize(masks.outlineMask, width, height, imageLineThickness);
+  // A pixel added by dilation has no coverage of its own — it was not part of
+  // the traced contour — so sampling the source coverage at its index yields 0.
+  // Drawn at alpha 0 that pixel is invisible while still acting as a fill
+  // barrier, leaving a transparent gap along the thickened line. Dilated pixels
+  // are new solid ink, so they take full coverage.
+  //
+  // Every inked pixel from maskFromVectorizedImageData has alpha >= 1, so a set
+  // outline bit with zero source coverage can only have come from dilation.
   const outlineCoverage = vectorizedInkCoverage
-    ? Uint8Array.from(outlineMask, (value, pixel) => (value ? (vectorizedInkCoverage[pixel] ?? 255) : 0))
+    ? Uint8Array.from(outlineMask, (value, pixel) => {
+      if (!value) return 0;
+      return vectorizedInkCoverage[pixel] || 255;
+    })
     : null;
 
   const result = {
@@ -934,7 +959,8 @@ function drawFillRegions(
   width: number,
   height: number,
   settings: GraphSettings,
-  blurRadius: number,
+  outlineMask?: Uint8Array | null,
+  outlineCoverage?: Uint8Array | null,
 ) {
   const layer = createProcessingCanvas(width, height);
   const layerContext = getProcessingContext(layer, { willReadFrequently: true });
@@ -944,9 +970,19 @@ function drawFillRegions(
   const regionByNumber = new Map(regions.map((region) => [region.mapId, region] as const));
   const imageData = layerContext.createImageData(width, height);
   const data = imageData.data;
+  const useSoftOutlineFillUnderlay = Boolean(outlineMask && outlineCoverage);
 
   for (let pixel = 0, index = 0; pixel < fillRegionMap.length; pixel += 1, index += 4) {
-    const regionNumber = fillRegionMap[pixel];
+    let regionNumber = fillRegionMap[pixel];
+    if (
+      !regionNumber &&
+      useSoftOutlineFillUnderlay &&
+      outlineMask![pixel] &&
+      outlineCoverage![pixel] > 0 &&
+      outlineCoverage![pixel] < 255
+    ) {
+      regionNumber = fillRegionNumberForRender(fillRegionMap, outlineMask, outlineCoverage, width, height, pixel);
+    }
     if (!regionNumber) continue;
 
     const region = regionByNumber.get(regionNumber);
@@ -965,17 +1001,10 @@ function drawFillRegions(
   }
 
   layerContext.putImageData(imageData, 0, 0);
-  if (blurRadius <= 0) {
-    context.drawImage(layer, 0, 0);
-    return;
-  }
-
-  const softened = createProcessingCanvas(width, height);
-  const softenedContext = getProcessingContext(softened);
-  if (!softenedContext) throw new Error("Canvas is not available.");
-  softenedContext.filter = `blur(${blurRadius}px)`;
-  softenedContext.drawImage(layer, 0, 0);
-  context.drawImage(softened, 0, 0);
+  // The artwork canvas is transparent and sits over the paper backdrop. A
+  // blurred fill loses alpha at its boundary, exposing that white backdrop as a
+  // visible halo. Keep the fill mask crisp; the outline is drawn above it.
+  context.drawImage(layer, 0, 0);
 }
 
 function drawMaskLayer(
@@ -1348,7 +1377,7 @@ function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, optio
   const displayRegions = regions.map((region) => ({ ...region, color: colorForRegion(settings, region) }));
   // Transparent artwork only; the grid + paper backdrop are composited by the SVG
   // overlay (preview) or flattenGraphForOutput (export/save).
-  drawFillRegions(outputContext, fillRegionMap, displayRegions, output.width, output.height, settings, 0.8);
+  drawFillRegions(outputContext, fillRegionMap, displayRegions, output.width, output.height, settings);
   const imageLineThickness = lineThicknessForSettings(settings);
   const outlineColor = outlineColorForSettings(settings);
   drawMaskLayer(outputContext, outlineMask, output.width, output.height, outlineColor, 255, 0.12 * imageLineThickness);
@@ -1486,7 +1515,7 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
 
   // Transparent artwork only; grid + paper backdrop handled by the SVG overlay
   // (preview) or flattenGraphForOutput (export/save).
-  drawFillRegions(outputContext, fillRegionMap, visibleRegions, output.width, output.height, settings, 0.8);
+  drawFillRegions(outputContext, fillRegionMap, visibleRegions, output.width, output.height, settings);
   drawColoredMaskLayers(outputContext, outlineMask, outlineColorMap, outlineColorsByNumber, output.width, output.height, outlineColorForSettings(settings), 255, 0.12 * maxLineThickness);
   drawManualGraphArtwork(output, settings);
   drawGridNumbers(output, settings);
@@ -1675,7 +1704,16 @@ export async function pixelateLayeredCanvasesAsync(
 
   // Transparent artwork only; grid + paper backdrop handled by the SVG overlay
   // (preview) or flattenGraphForOutput (export/save).
-  drawFillRegions(outputContext, fillRegionMap, visibleRegions, output.width, output.height, settings, 0.8);
+  drawFillRegions(
+    outputContext,
+    fillRegionMap,
+    visibleRegions,
+    output.width,
+    output.height,
+    settings,
+    outlineMask,
+    outlineCoverage,
+  );
   drawColoredMaskLayers(
     outputContext,
     outlineMask,

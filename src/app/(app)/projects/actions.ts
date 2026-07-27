@@ -20,6 +20,7 @@ import {
   MAX_SOURCE_FILL_THRESHOLD,
   MAX_STROKE_GAP_CLOSE_PIXELS,
   MAX_VECTORIZER_INK_THRESHOLD,
+  MAX_VECTORIZER_SKETCH_REMOVAL,
   MAX_VECTORIZER_LINE_ADJUST,
   MAX_VECTORIZER_STROKE_WIDTH,
   MIN_IMAGE_LINE_THICKNESS,
@@ -27,6 +28,7 @@ import {
   MIN_SOURCE_FILL_THRESHOLD,
   MIN_STROKE_GAP_CLOSE_PIXELS,
   MIN_VECTORIZER_INK_THRESHOLD,
+  MIN_VECTORIZER_SKETCH_REMOVAL,
   MIN_VECTORIZER_LINE_ADJUST,
   MIN_VECTORIZER_STROKE_WIDTH,
   PRINT_HORIZONTAL_ALIGNMENT_KEYS,
@@ -39,7 +41,8 @@ import {
 } from "@/lib/graph-paper";
 import { MAX_CANVAS_DIMENSION, MAX_GRAPH_HEIGHT_CELLS, MAX_GRAPH_WIDTH_CELLS, inspectCanvasBudget } from "@/lib/canvas/performance-limits";
 import { isStoredFillRegionId } from "@/lib/canvas/fill-region-identity";
-import { assertProjectOwner, clipartImagePath, imagePath, normalizeGraphSettings, sourceImagePath } from "@/lib/projects";
+import { assertProjectOwner, clipartImagePath, imagePath, normalizeGraphSettings, sourceImagePath, thumbnailPathFor } from "@/lib/projects";
+import { getObjectStore, mediaKey } from "@/lib/storage/media";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
@@ -75,10 +78,16 @@ const groupIdSchema = z.string().min(1).max(80).nullable().optional();
 const eraseStrokeSchema = z.object({
   // Normalized UV coordinates across the source's working canvas; radius is a fraction of the canvas width.
   points: z
-    .array(z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }))
+    // Lasso regions may be traced beyond the image, so vertices are allowed a
+    // bounded overshoot outside 0..1; the normalizer keeps brush strokes tight.
+    .array(z.object({ x: z.number().min(-4).max(5), y: z.number().min(-4).max(5) }))
     .min(1)
     .max(400),
   radius: z.number().min(0.0005).max(0.5),
+  // Optional: strokes saved before the square brush existed are circles.
+  shape: z.union([z.literal("circle"), z.literal("square"), z.literal("polygon")]).optional(),
+  // Polygon regions only; absent means erase to transparent.
+  fill: z.union([z.literal("#ffffff"), z.literal("#000000")]).optional(),
 });
 const eraseStrokesSchema = z.array(eraseStrokeSchema).max(80).optional();
 const backgroundRemovalSchema = z
@@ -127,6 +136,10 @@ const sourceImageSchema = z.object({
   id: z.string().min(1).max(80),
   name: z.string().min(1).max(160),
   path: z.string().min(1).max(1024).nullable(),
+  // Optional: assets uploaded before derivatives existed have no thumbnail and
+  // fall back to the full-size image. Signed URLs are never accepted here —
+  // they are re-derived on read.
+  thumbPath: z.string().min(1).max(1024).nullable().optional(),
   width: z.number().min(0.01).max(1000),
   height: z.number().min(0.01).max(1000),
   measurementUnit: z.enum(["cm", "in"]),
@@ -140,6 +153,7 @@ const sourceImageSchema = z.object({
   imageColorQuantization: imageColorQuantizationSchema,
   vectorizerLineAdjust: vectorizerLineAdjustSchema,
   vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
+  vectorizerSketchRemoval: z.number().int().min(MIN_VECTORIZER_SKETCH_REMOVAL).max(MAX_VECTORIZER_SKETCH_REMOVAL).optional(),
   vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
   x: z.number().min(-1000).max(1000),
   y: z.number().min(-1000).max(1000),
@@ -158,6 +172,10 @@ const clipartAssetSchema = z.object({
   id: z.string().min(1).max(80),
   name: z.string().min(1).max(160),
   path: z.string().min(1).max(1024).nullable(),
+  // Optional: assets uploaded before derivatives existed have no thumbnail and
+  // fall back to the full-size image. Signed URLs are never accepted here —
+  // they are re-derived on read.
+  thumbPath: z.string().min(1).max(1024).nullable().optional(),
   mimeType: z.string().min(1).max(100),
   width: z.number().int().min(1).max(12000),
   height: z.number().int().min(1).max(12000),
@@ -183,6 +201,7 @@ const clipartImageSchema = z.object({
   imageColorQuantization: imageColorQuantizationSchema,
   vectorizerLineAdjust: vectorizerLineAdjustSchema,
   vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
+  vectorizerSketchRemoval: z.number().int().min(MIN_VECTORIZER_SKETCH_REMOVAL).max(MAX_VECTORIZER_SKETCH_REMOVAL).optional(),
   vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
   locked: z.boolean(),
   visible: z.boolean(),
@@ -227,6 +246,7 @@ const graphSettingsSchema = z.object({
   vectorizerStrokeColor: hexSchema,
   vectorizerLineAdjust: vectorizerLineAdjustSchema,
   vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
+  vectorizerSketchRemoval: z.number().int().min(MIN_VECTORIZER_SKETCH_REMOVAL).max(MAX_VECTORIZER_SKETCH_REMOVAL).optional(),
   vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
   gridLineColor: graphLineColorSchema,
   gridLineLayer: z.enum(GRAPH_LINE_LAYER_KEYS),
@@ -350,7 +370,6 @@ export async function deleteProject(formData: FormData) {
   const supabase = getSupabaseAdmin();
   const settings = normalizeGraphSettings(owner.settings);
 
-  const removals: Promise<unknown>[] = [];
   const originalPaths = Array.from(
     new Set(
       [
@@ -360,9 +379,22 @@ export async function deleteProject(formData: FormData) {
       ].filter((path): path is string => Boolean(path)),
     ),
   );
-  if (originalPaths.length) removals.push(supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove(originalPaths));
-  if (owner.processed_image_path) removals.push(supabase.storage.from(PROCESSED_IMAGES_BUCKET).remove([owner.processed_image_path]));
-  await Promise.all(removals);
+  // Every asset's thumbnail lives beside it and must go with it, or the bucket
+  // accumulates derivatives whose originals no longer exist.
+  const keys = [
+    ...originalPaths.flatMap((path) => [
+      mediaKey(ORIGINAL_IMAGES_BUCKET, path),
+      mediaKey(ORIGINAL_IMAGES_BUCKET, thumbnailPathFor(path)),
+    ]),
+    ...(owner.processed_image_path
+      ? [
+        mediaKey(PROCESSED_IMAGES_BUCKET, owner.processed_image_path),
+        mediaKey(PROCESSED_IMAGES_BUCKET, thumbnailPathFor(owner.processed_image_path)),
+      ]
+      : []),
+  ];
+  // One batched DeleteObjects call replaces the previous per-bucket round trips.
+  if (keys.length) await getObjectStore().deleteObjects(keys);
 
   const { error } = await supabase.from("projects").delete().eq("id", projectId).eq("user_id", session.userId);
   if (error) throw new Error(error.message);
@@ -418,12 +450,23 @@ export async function duplicateProject(formData: FormData) {
     );
   }
 
+  const store = getObjectStore();
   const copiedPaths: string[] = [];
   try {
     await mapWithConcurrency(Array.from(copyTargets.entries()), 2, async ([sourcePath, targetPath]) => {
-      const { error: copyError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).copy(sourcePath, targetPath);
-      if (copyError) throw new Error(copyError.message);
+      await store.copyObject(
+        mediaKey(ORIGINAL_IMAGES_BUCKET, sourcePath),
+        mediaKey(ORIGINAL_IMAGES_BUCKET, targetPath),
+      );
       copiedPaths.push(targetPath);
+      // A missing thumbnail is not fatal: legacy assets predate derivatives and
+      // the UI falls back to the full-size image.
+      await store
+        .copyObject(
+          mediaKey(ORIGINAL_IMAGES_BUCKET, thumbnailPathFor(sourcePath)),
+          mediaKey(ORIGINAL_IMAGES_BUCKET, thumbnailPathFor(targetPath)),
+        )
+        .catch(() => undefined);
     });
     const duplicateSettings = normalizeGraphSettings({
       ...settings,
@@ -450,7 +493,14 @@ export async function duplicateProject(formData: FormData) {
       .eq("user_id", session.userId);
     if (updateError) throw new Error(updateError.message);
   } catch (copyError) {
-    if (copiedPaths.length) await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove(copiedPaths);
+    if (copiedPaths.length) {
+      await store.deleteObjects(
+        copiedPaths.flatMap((path) => [
+          mediaKey(ORIGINAL_IMAGES_BUCKET, path),
+          mediaKey(ORIGINAL_IMAGES_BUCKET, thumbnailPathFor(path)),
+        ]),
+      );
+    }
     await supabase.from("projects").delete().eq("id", duplicate.id).eq("user_id", session.userId);
     throw copyError;
   }

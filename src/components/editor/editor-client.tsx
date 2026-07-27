@@ -64,7 +64,14 @@ import { clearCanvasProcessingCaches, findContentBounds, flattenGraphForOutput, 
 import { GraphGridOverlay } from "@/components/editor/graph-grid-overlay";
 import { removeBackgroundImageData } from "@/lib/canvas/background-removal";
 import { graphPixelToSourcePixel, type ContentBounds, type PlacementTransform } from "@/lib/editor/erase-geometry";
-import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_SOURCE_IMAGES, MAX_UPLOAD_BYTES, ORIGINAL_IMAGES_BUCKET, isAllowedImageFile, isPdfFile } from "@/lib/constants";
+import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_SOURCE_IMAGES, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
+import {
+  CARD_THUMBNAIL_MAX_EDGE,
+  SOURCE_THUMBNAIL_MAX_EDGE,
+  createThumbnailBlob,
+  uploadWithThumbnail,
+  type PresignedUpload,
+} from "@/lib/storage/upload-client";
 import {
   createEditorSessionDraft,
   hasEditorSessionDraft,
@@ -139,12 +146,15 @@ import {
   DEFAULT_VECTORIZER_STROKE_WIDTH,
   DEFAULT_VECTORIZER_LINE_ADJUST,
   DEFAULT_VECTORIZER_INK_THRESHOLD,
+  DEFAULT_VECTORIZER_SKETCH_REMOVAL,
   DEFAULT_VECTORIZER_FIDELITY,
   GRAPH_MAJOR_CELL_PIXELS,
   GRAPH_VECTORIZER_FIDELITY_KEYS,
   MAX_VECTORIZER_INK_THRESHOLD,
+  MAX_VECTORIZER_SKETCH_REMOVAL,
   MAX_VECTORIZER_LINE_ADJUST,
   MIN_VECTORIZER_INK_THRESHOLD,
+  MIN_VECTORIZER_SKETCH_REMOVAL,
   MIN_VECTORIZER_LINE_ADJUST,
   PRESET_GRAPH_COLORS,
   PRINT_PAPER_SIZES,
@@ -154,6 +164,7 @@ import {
   clampSourceFillThreshold,
   clampStrokeGapClosePixels,
   clampVectorizerInkThreshold,
+  clampVectorizerSketchRemoval,
   clampVectorizerLineAdjust,
   clampVectorizerStrokeWidth,
   normalizeGraphImageTraceEngine,
@@ -178,7 +189,7 @@ import {
   isTransparentFillColor,
 } from "@/lib/graph-paper";
 import type { CanvasColor, CanvasFillColor } from "@/lib/graph-paper";
-import type { GraphBackgroundRemoval, GraphCellLineSide, GraphCellPaint, GraphClipartAsset, GraphClipartImage, GraphEraseStroke, GraphLayerGroup, GraphSettings, GraphShapeDrawing, GraphShapeKind, GraphSourceImage, PaletteColor, Project } from "@/lib/types";
+import type { GraphBackgroundRemoval, GraphCellLineSide, GraphCellPaint, GraphClipartAsset, GraphClipartImage, GraphEraseBrushShape, GraphEraseRegionFill, GraphEraseStroke, GraphLayerGroup, GraphSettings, GraphShapeDrawing, GraphShapeKind, GraphSourceImage, PaletteColor, Project } from "@/lib/types";
 import { createDebouncedAction } from "@/lib/utils/debounce";
 import { bytesToSize } from "@/lib/utils/format";
 import { estimateCanvasBytes, startGraphPerformanceStage } from "@/lib/performance/marks";
@@ -204,7 +215,10 @@ type DrawTab = "shape" | "clipart";
 type Notice = { tone: "ok" | "error" | "info"; text: string };
 type CollapsibleKey = "parameters" | "drawing" | "outline" | "fill" | "selectedFill" | "graphLines";
 type FloatingPalette = { regionId: string; x: number; y: number } | null;
-type DrawingTool = "image" | "cell" | "shape" | "background-remover" | "image-eraser";
+type DrawingTool = "image" | "cell" | "shape" | "background-remover" | "image-eraser" | "lasso";
+
+/** A vertex of an in-progress lasso region, in graph cell coordinates. */
+type LassoVertex = { x: number; y: number };
 type CanvasTool = "pointer" | "hand" | "fill";
 type DrawingLayerKey = `cell:${string}` | `shape:${string}` | `clipart:${string}`;
 type LayerKind = "source" | "cell" | "shape" | "clipart";
@@ -308,6 +322,8 @@ type UploadedSourceImage = {
   name: string;
   path: string;
   url?: string | null;
+  thumbPath?: string | null;
+  thumbUrl?: string | null;
 };
 type SourceImagesUploadResponse = {
   images?: unknown;
@@ -318,6 +334,8 @@ type UploadedClipartAsset = {
   name: string;
   path: string;
   url?: string | null;
+  thumbPath?: string | null;
+  thumbUrl?: string | null;
   mimeType: string;
   createdAt: string;
 };
@@ -402,6 +420,8 @@ function buildProcessingSignature(settings: GraphSettings) {
     settings.vectorizerStrokeColor,
     settings.vectorizerLineAdjust,
     settings.vectorizerInkThreshold,
+
+    settings.vectorizerSketchRemoval,
     settings.vectorizerFidelity,
     settings.gridLineColor,
     settings.gridLineLayer,
@@ -420,13 +440,13 @@ function buildProcessingSignature(settings: GraphSettings) {
     settings.sourceImages
       .map(
         (source) =>
-          `${source.id}:${source.x}:${source.y}:${source.width}:${source.height}:${source.topPadding}:${source.bottomPadding}:${source.rotationDegrees}:${source.flipX}:${source.flipY}:${source.locked}:${source.visible}:${source.imageLineThickness}:${source.sourceFillThreshold}:${source.sourceFillMinStrokePixels}:${source.strokeGapClosePixels}:${source.imageAutoEnhance}:${source.imageDenoiseLevel}:${source.imageEdgeDetection}:${source.imageColorQuantization}:${source.vectorizerLineAdjust}:${source.vectorizerInkThreshold}:${source.vectorizerFidelity}:${eraseStrokesSignature(source.eraseStrokes)}:${backgroundRemovalSignature(source.backgroundRemoval)}`,
+          `${source.id}:${source.x}:${source.y}:${source.width}:${source.height}:${source.topPadding}:${source.bottomPadding}:${source.rotationDegrees}:${source.flipX}:${source.flipY}:${source.locked}:${source.visible}:${source.imageLineThickness}:${source.sourceFillThreshold}:${source.sourceFillMinStrokePixels}:${source.strokeGapClosePixels}:${source.imageAutoEnhance}:${source.imageDenoiseLevel}:${source.imageEdgeDetection}:${source.imageColorQuantization}:${source.vectorizerLineAdjust}:${source.vectorizerInkThreshold}:${source.vectorizerSketchRemoval}:${source.vectorizerFidelity}:${eraseStrokesSignature(source.eraseStrokes)}:${backgroundRemovalSignature(source.backgroundRemoval)}`,
       )
       .join("|"),
     settings.cellPaints.map((paint) => `${paint.id}:${paint.x}:${paint.y}:${paint.width}:${paint.height}:${paint.sides.join(",")}:${paint.lineColor}:${paint.fillColor}:${paint.lineWidth}:${paint.rotationDegrees}:${paint.flipX}:${paint.flipY}:${paint.visible}`).join("|"),
     settings.graphShapes.map((shape) => `${shape.id}:${shape.kind}:${shape.x}:${shape.y}:${shape.width}:${shape.height}:${shape.strokeColor}:${shape.fillColor}:${shape.strokeWidth}:${shape.sides.join(",")}:${shape.rotationDegrees}:${shape.flipX}:${shape.flipY}:${shape.visible}`).join("|"),
     settings.clipartAssets.map((asset) => `${asset.id}:${asset.path ?? ""}:${asset.url ?? ""}:${asset.dataUrl ?? ""}`).join("|"),
-    settings.clipartImages.map((clipart) => `${clipart.id}:${clipart.assetId}:${clipart.x}:${clipart.y}:${clipart.width}:${clipart.height}:${clipart.strokeColor}:${clipart.fillColor}:${clipart.imageLineThickness}:${clipart.sourceFillThreshold}:${clipart.sourceFillMinStrokePixels}:${clipart.strokeGapClosePixels}:${clipart.imageAutoEnhance}:${clipart.imageDenoiseLevel}:${clipart.imageEdgeDetection}:${clipart.imageColorQuantization}:${clipart.vectorizerLineAdjust}:${clipart.vectorizerInkThreshold}:${clipart.vectorizerFidelity}:${clipart.rotationDegrees}:${clipart.flipX}:${clipart.flipY}:${clipart.visible}:${eraseStrokesSignature(clipart.eraseStrokes)}:${backgroundRemovalSignature(clipart.backgroundRemoval)}`).join("|"),
+    settings.clipartImages.map((clipart) => `${clipart.id}:${clipart.assetId}:${clipart.x}:${clipart.y}:${clipart.width}:${clipart.height}:${clipart.strokeColor}:${clipart.fillColor}:${clipart.imageLineThickness}:${clipart.sourceFillThreshold}:${clipart.sourceFillMinStrokePixels}:${clipart.strokeGapClosePixels}:${clipart.imageAutoEnhance}:${clipart.imageDenoiseLevel}:${clipart.imageEdgeDetection}:${clipart.imageColorQuantization}:${clipart.vectorizerLineAdjust}:${clipart.vectorizerInkThreshold}:${clipart.vectorizerSketchRemoval}:${clipart.vectorizerFidelity}:${clipart.rotationDegrees}:${clipart.flipX}:${clipart.flipY}:${clipart.visible}:${eraseStrokesSignature(clipart.eraseStrokes)}:${backgroundRemovalSignature(clipart.backgroundRemoval)}`).join("|"),
   ].join("|");
 }
 
@@ -589,6 +609,8 @@ function normalizeSourceImagesForEditor(
     | "strokeGapClosePixels"
     | "vectorizerLineAdjust"
     | "vectorizerInkThreshold"
+
+    | "vectorizerSketchRemoval"
     | "vectorizerFidelity"
   >,
 ) {
@@ -614,6 +636,8 @@ function normalizeSourceImagesForEditor(
       const imageColorQuantization = normalizeImageColorQuantization(source.imageColorQuantization);
       const vectorizerLineAdjust = clampVectorizerLineAdjust(source.vectorizerLineAdjust ?? defaults.vectorizerLineAdjust);
       const vectorizerInkThreshold = clampVectorizerInkThreshold(source.vectorizerInkThreshold ?? defaults.vectorizerInkThreshold);
+
+      const vectorizerSketchRemoval = clampVectorizerSketchRemoval(source.vectorizerSketchRemoval ?? defaults.vectorizerSketchRemoval);
       const vectorizerFidelity = normalizeVectorizerFidelity(source.vectorizerFidelity ?? defaults.vectorizerFidelity);
       const x = clampSourceX(source.x, graphWidth, width);
       const topPadding = clampPaddingCells(source.topPadding, graphHeight, 0);
@@ -644,6 +668,8 @@ function normalizeSourceImagesForEditor(
           imageColorQuantization,
           vectorizerLineAdjust,
           vectorizerInkThreshold,
+
+          vectorizerSketchRemoval,
           vectorizerFidelity,
           x,
           y,
@@ -800,6 +826,8 @@ function normalizeClipartImagesForEditor(
     | "strokeGapClosePixels"
     | "vectorizerLineAdjust"
     | "vectorizerInkThreshold"
+
+    | "vectorizerSketchRemoval"
     | "vectorizerFidelity"
   >,
 ): GraphSettings["clipartImages"] {
@@ -830,6 +858,8 @@ function normalizeClipartImagesForEditor(
           imageColorQuantization: normalizeImageColorQuantization(clipart.imageColorQuantization),
           vectorizerLineAdjust: clampVectorizerLineAdjust(clipart.vectorizerLineAdjust ?? defaults.vectorizerLineAdjust),
           vectorizerInkThreshold: clampVectorizerInkThreshold(clipart.vectorizerInkThreshold ?? defaults.vectorizerInkThreshold),
+
+          vectorizerSketchRemoval: clampVectorizerSketchRemoval(clipart.vectorizerSketchRemoval ?? defaults.vectorizerSketchRemoval),
           vectorizerFidelity: normalizeVectorizerFidelity(clipart.vectorizerFidelity ?? defaults.vectorizerFidelity),
           locked: Boolean(clipart.locked),
           visible: typeof clipart.visible === "boolean" ? clipart.visible : true,
@@ -921,6 +951,8 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
   const vectorizerStrokeColor = normalizeCanvasColor(settings.vectorizerStrokeColor, outlineColor);
   const vectorizerLineAdjust = clampVectorizerLineAdjust(settings.vectorizerLineAdjust);
   const vectorizerInkThreshold = clampVectorizerInkThreshold(settings.vectorizerInkThreshold);
+
+  const vectorizerSketchRemoval = clampVectorizerSketchRemoval(settings.vectorizerSketchRemoval);
   const vectorizerFidelity = normalizeVectorizerFidelity(settings.vectorizerFidelity);
   const gridLineColor = normalizeGraphLineColor(settings.gridLineColor, DEFAULT_GRID_LINE_COLOR);
   const gridLineLayer = isGraphLineLayer(settings.gridLineLayer) ? settings.gridLineLayer : DEFAULT_GRAPH_LINE_LAYER;
@@ -950,6 +982,8 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
     strokeGapClosePixels,
     vectorizerLineAdjust,
     vectorizerInkThreshold,
+
+    vectorizerSketchRemoval,
     vectorizerFidelity,
   });
   const imagePadding = 0;
@@ -966,6 +1000,8 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
     strokeGapClosePixels,
     vectorizerLineAdjust,
     vectorizerInkThreshold,
+
+    vectorizerSketchRemoval,
     vectorizerFidelity,
   });
 
@@ -1008,6 +1044,8 @@ function deriveGraphSettings(settings: GraphSettings): GraphSettings {
     vectorizerStrokeColor,
     vectorizerLineAdjust,
     vectorizerInkThreshold,
+
+    vectorizerSketchRemoval,
     vectorizerFidelity,
     gridLineColor,
     gridLineLayer,
@@ -1064,6 +1102,8 @@ function editorDefaultGraphSettings(current: GraphSettings): GraphSettings {
     vectorizerStrokeColor: DEFAULT_VECTORIZER_STROKE_COLOR,
     vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
     vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+
+    vectorizerSketchRemoval: DEFAULT_VECTORIZER_SKETCH_REMOVAL,
     vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
     gridLineColor: DEFAULT_GRID_LINE_COLOR,
     gridLineLayer: DEFAULT_GRAPH_LINE_LAYER,
@@ -1129,6 +1169,8 @@ function initialEditorSettings(project: Project) {
         imageColorQuantization: DEFAULT_IMAGE_COLOR_QUANTIZATION,
         vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
         vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+
+        vectorizerSketchRemoval: DEFAULT_VECTORIZER_SKETCH_REMOVAL,
         vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
         x: defaultSourceX(settings.graphWidth, settings.imageWidth),
         y: 0,
@@ -1157,6 +1199,8 @@ function sourceSettings(settings: GraphSettings, source: GraphSourceImage) {
     imageColorQuantization: source.imageColorQuantization,
     vectorizerLineAdjust: source.vectorizerLineAdjust,
     vectorizerInkThreshold: source.vectorizerInkThreshold,
+
+    vectorizerSketchRemoval: source.vectorizerSketchRemoval,
     vectorizerFidelity: source.vectorizerFidelity,
     imageWidth: settings.graphWidth,
     imageHeight: settings.graphHeight,
@@ -1174,6 +1218,8 @@ function clipartSettings(settings: GraphSettings, clipart: GraphClipartImage) {
     vectorizerStrokeColor: clipart.strokeColor,
     vectorizerLineAdjust: clipart.vectorizerLineAdjust,
     vectorizerInkThreshold: clipart.vectorizerInkThreshold,
+
+    vectorizerSketchRemoval: clipart.vectorizerSketchRemoval,
     vectorizerFidelity: clipart.vectorizerFidelity,
     sourceFillThreshold: clipart.sourceFillThreshold,
     sourceFillMinStrokePixels: clipart.sourceFillMinStrokePixels,
@@ -1229,17 +1275,27 @@ export function EditorClient({ project }: { project: Project }) {
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("image");
   /** Image-eraser brush radius in source pixels. */
   const [imageEraserRadius, setImageEraserRadius] = useState(16);
+  const [imageEraserShape, setImageEraserShape] = useState<GraphEraseBrushShape>("circle");
+  // Lasso: committed vertices plus the pointer position, so the preview can
+  // rubber-band the pending edge back to the cursor.
+  const [lassoVertices, setLassoVertices] = useState<LassoVertex[]>([]);
+  const [lassoCursor, setLassoCursor] = useState<LassoVertex | null>(null);
+  const [lassoFill, setLassoFill] = useState<GraphEraseRegionFill | "erase">("erase");
   const [imageEraserCursor, setImageEraserCursor] = useState<ImageEraserCursor>(null);
   const imageEraserRadiusRef = useRef(imageEraserRadius);
   imageEraserRadiusRef.current = imageEraserRadius;
+  const imageEraserShapeRef = useRef(imageEraserShape);
+  imageEraserShapeRef.current = imageEraserShape;
   const [canvasTool, setCanvasTool] = useState<CanvasTool>("pointer");
   const [canvasPan, setCanvasPan] = useState({ x: 0, y: 0 });
   const [renderKey, setRenderKey] = useState(0);
   const [cellPaintSides, setCellPaintSides] = useState<GraphCellLineSide[]>(CELL_LINE_SIDE_KEYS);
   const [cellPaintFillEnabled, setCellPaintFillEnabled] = useState(false);
   const [cellPaintLineEnabled, setCellPaintLineEnabled] = useState(true);
-  const [shapeKind, setShapeKind] = useState<GraphShapeKind>("rectangle");
-  const [draftShapeKind, setDraftShapeKind] = useState<GeneratedShapeKind>("rectangle");
+  // Single source of truth for the shape kind. The Shape Generator panel and
+  // the canvas drag-draw tool previously held separate states, so picking Line
+  // in the generator left drag-draw still producing rectangles.
+  const [draftShapeKind, setDraftShapeKind] = useState<GeneratedShapeKind>("line");
   const [draftShapeWidthCm, setDraftShapeWidthCm] = useState(4);
   const [draftShapeHeightCm, setDraftShapeHeightCm] = useState(3);
   const [draftShapeFillMode, setDraftShapeFillMode] = useState<ShapeFillMode>("outline");
@@ -2292,6 +2348,8 @@ export function EditorClient({ project }: { project: Project }) {
             imageColorQuantization: patch.imageColorQuantization === undefined || !isGraphImageColorQuantization(patch.imageColorQuantization) ? clipart.imageColorQuantization : patch.imageColorQuantization,
             vectorizerLineAdjust: patch.vectorizerLineAdjust === undefined ? clipart.vectorizerLineAdjust : clampVectorizerLineAdjust(patch.vectorizerLineAdjust),
             vectorizerInkThreshold: patch.vectorizerInkThreshold === undefined ? clipart.vectorizerInkThreshold : clampVectorizerInkThreshold(patch.vectorizerInkThreshold),
+
+            vectorizerSketchRemoval: patch.vectorizerSketchRemoval === undefined ? clipart.vectorizerSketchRemoval : clampVectorizerSketchRemoval(patch.vectorizerSketchRemoval),
             vectorizerFidelity: patch.vectorizerFidelity === undefined || !isGraphVectorizerFidelity(patch.vectorizerFidelity) ? clipart.vectorizerFidelity : patch.vectorizerFidelity,
             rotationDegrees: patch.rotationDegrees === undefined ? clipart.rotationDegrees : normalizeRotationDegrees(patch.rotationDegrees),
           };
@@ -2354,6 +2412,8 @@ export function EditorClient({ project }: { project: Project }) {
         | "imageColorQuantization"
         | "vectorizerLineAdjust"
         | "vectorizerInkThreshold"
+
+        | "vectorizerSketchRemoval"
         | "vectorizerFidelity"
         | "x"
         | "y"
@@ -2408,6 +2468,8 @@ export function EditorClient({ project }: { project: Project }) {
             imageColorQuantization: patch.imageColorQuantization === undefined || !isGraphImageColorQuantization(patch.imageColorQuantization) ? source.imageColorQuantization : patch.imageColorQuantization,
             vectorizerLineAdjust: patch.vectorizerLineAdjust === undefined ? source.vectorizerLineAdjust : clampVectorizerLineAdjust(patch.vectorizerLineAdjust),
             vectorizerInkThreshold: patch.vectorizerInkThreshold === undefined ? source.vectorizerInkThreshold : clampVectorizerInkThreshold(patch.vectorizerInkThreshold),
+
+            vectorizerSketchRemoval: patch.vectorizerSketchRemoval === undefined ? source.vectorizerSketchRemoval : clampVectorizerSketchRemoval(patch.vectorizerSketchRemoval),
             vectorizerFidelity: patch.vectorizerFidelity === undefined || !isGraphVectorizerFidelity(patch.vectorizerFidelity) ? source.vectorizerFidelity : patch.vectorizerFidelity,
             rotationDegrees: patch.rotationDegrees === undefined ? source.rotationDegrees : normalizeRotationDegrees(patch.rotationDegrees),
             x: patch.x === undefined ? (patch.width ? clampSourceX(source.x, current.graphWidth, width) : source.x) : clampSourceX(patch.x, current.graphWidth, width),
@@ -2434,6 +2496,8 @@ export function EditorClient({ project }: { project: Project }) {
       imageColorQuantization: source.imageColorQuantization,
       vectorizerLineAdjust: source.vectorizerLineAdjust,
       vectorizerInkThreshold: source.vectorizerInkThreshold,
+
+      vectorizerSketchRemoval: source.vectorizerSketchRemoval,
       vectorizerFidelity: source.vectorizerFidelity,
     };
     setSettingsWithHistory((current) => ({
@@ -2974,6 +3038,8 @@ export function EditorClient({ project }: { project: Project }) {
           imageColorQuantization: current.imageColorQuantization,
           vectorizerLineAdjust: current.vectorizerLineAdjust,
           vectorizerInkThreshold: current.vectorizerInkThreshold,
+
+          vectorizerSketchRemoval: current.vectorizerSketchRemoval,
           vectorizerFidelity: current.vectorizerFidelity,
           locked: false,
           visible: true,
@@ -3133,23 +3199,37 @@ export function EditorClient({ project }: { project: Project }) {
     return { placement, bounds };
   }
 
+  function updateLassoCursor(event: ReactPointerEvent<HTMLCanvasElement>) {
+    if (drawingTool !== "lasso" || !lassoVertices.length) {
+      if (lassoCursor) setLassoCursor(null);
+      return;
+    }
+    const point = graphPointAtPointer(event);
+    setLassoCursor(point ? { x: point.x, y: point.y } : null);
+  }
+
   function updateImageEraserCursor(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (drawingTool !== "image-eraser" || showOriginal) {
       setImageEraserCursor(null);
       return;
     }
     const point = graphPointAtPointer(event);
-    const sourceHit = point ? layerHitsAtPoint(point.x, point.y).find((hit) => hit.type === "source") : null;
-    if (!point || !sourceHit || sourceHit.type !== "source") {
+    if (!point) {
       setImageEraserCursor(null);
       return;
     }
-    const details = placementForSource(sourceHit.layout.source);
-    if (!details?.bounds.width || !details.bounds.height) {
-      setImageEraserCursor(null);
-      return;
-    }
-    const scale = Math.min(details.placement.drawWidth / details.bounds.width, details.placement.drawHeight / details.bounds.height);
+
+    // The brush stays visible anywhere inside the graph, not only over the
+    // image. Hiding it whenever the pointer left the layer made the brush
+    // vanish exactly when the user was lining up a stroke at an image edge.
+    // Scale from the layer that would actually be erased, so the ring is a
+    // truthful preview; with no target, fall back to unscaled zoom.
+    const sourceHit = layerHitsAtPoint(point.x, point.y).find((hit) => hit.type === "source");
+    const scaleSource = sourceHit?.type === "source" ? sourceHit.layout.source : resolveEraseTargetSource(point);
+    const details = scaleSource ? placementForSource(scaleSource) : null;
+    const scale = details?.bounds.width && details.bounds.height
+      ? Math.min(details.placement.drawWidth / details.bounds.width, details.placement.drawHeight / details.bounds.height)
+      : 1;
     const radius = Math.max(4, imageEraserRadiusRef.current * scale * zoom);
     const next = {
       x: outsideNumberMargin + point.x * GRAPH_MAJOR_CELL_PIXELS * zoom,
@@ -3182,6 +3262,91 @@ export function EditorClient({ project }: { project: Project }) {
     dragState.eraseCanvasHeight = pristine.height;
     if (selectedSourceId !== target.id) selectSourceLayer(target.id);
     eraseImageAtPointer(event, dragState);
+  }
+
+  /**
+   * How near the first vertex a click must land to close the region, expressed
+   * in centimetres and converted to cells, since a cell is only 1 cm at the
+   * default cell size. The floor keeps it clickable on a very fine grid.
+   */
+  const LASSO_CLOSE_DISTANCE_CM = 0.3;
+  const lassoCloseDistanceCells = Math.max(0.5, LASSO_CLOSE_DISTANCE_CM / Math.max(0.01, settings.cellSizeCm || 1));
+
+  function cancelLasso() {
+    setLassoVertices([]);
+    setLassoCursor(null);
+  }
+
+  /**
+   * Commits the traced region to the target source's erase strokes.
+   *
+   * Vertices are mapped through the same placement inverse the brush uses, then
+   * stored as normalized UV so the region stays aligned when the working canvas
+   * is downscaled. A vertex that falls outside the image aborts the whole
+   * region rather than being clamped, which would silently distort its shape.
+   */
+  function commitLassoRegion(vertices: LassoVertex[]) {
+    if (vertices.length < 3) {
+      setNotice({ tone: "info", text: "Place at least three points before closing." });
+      return;
+    }
+    const target = resolveEraseTargetSource(vertices[0]);
+    if (!target) {
+      setNotice({ tone: "info", text: "Add or select an image layer to erase." });
+      return;
+    }
+    const details = placementForSource(target);
+    const pristine = sourceCanvasesRef.current.get(target.id);
+    // Previously a silent return, which was indistinguishable from the click
+    // simply not registering.
+    if (!details || !pristine?.width || !pristine.height) {
+      setNotice({ tone: "error", text: "That image is still loading. Try again in a moment." });
+      return;
+    }
+
+    const points: LassoVertex[] = [];
+    for (const vertex of vertices) {
+      const sourcePoint = graphPixelToSourcePixel(
+        vertex.x * GRAPH_MAJOR_CELL_PIXELS,
+        vertex.y * GRAPH_MAJOR_CELL_PIXELS,
+        details.placement,
+        details.bounds,
+      );
+      // Vertices may sit anywhere on the graph, including outside the image.
+      // They are kept unclamped so the traced shape is preserved exactly;
+      // canvas fill() clips the region to the layer when it is applied.
+      points.push({ x: sourcePoint.x / pristine.width, y: sourcePoint.y / pristine.height });
+    }
+
+    const fill = lassoFill === "erase" ? undefined : lassoFill;
+    setSettingsWithHistory((current) => {
+      const index = current.sourceImages.findIndex((source) => source.id === target.id);
+      if (index < 0) return current;
+      const source = current.sourceImages[index];
+      const strokes = [
+        ...(source.eraseStrokes ?? []),
+        // Radius is unused by a polygon but the stroke shape requires one.
+        fill
+          ? { points, radius: 0.01, shape: "polygon" as const, fill }
+          : { points, radius: 0.01, shape: "polygon" as const },
+      ];
+      const sourceImages = current.sourceImages.slice();
+      sourceImages[index] = { ...source, eraseStrokes: normalizeEraseStrokes(strokes) };
+      return deriveGraphSettings({ ...current, sourceImages });
+    });
+    cancelLasso();
+  }
+
+  function handleLassoPointerDown(event: ReactPointerEvent<HTMLElement>) {
+    const point = graphPointAtPointer(event);
+    if (!point) return;
+    const first = lassoVertices[0];
+    // Clicking back on the first vertex encloses the region.
+    if (first && lassoVertices.length >= 3 && Math.hypot(point.x - first.x, point.y - first.y) <= lassoCloseDistanceCells) {
+      commitLassoRegion(lassoVertices);
+      return;
+    }
+    setLassoVertices((current) => [...current, { x: point.x, y: point.y }]);
   }
 
   function eraseImageAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
@@ -3224,12 +3389,12 @@ export function EditorClient({ project }: { project: Project }) {
       if (!dragState.historyRecorded) {
         pushUndoSettings(current);
         dragState.historyRecorded = true;
-        strokes.push({ points: [rounded], radius });
+        strokes.push({ points: [rounded], radius, shape: imageEraserShapeRef.current });
       } else if (strokes.length && !startNewStroke) {
         const activeStroke = strokes[strokes.length - 1];
         strokes[strokes.length - 1] = { ...activeStroke, points: [...activeStroke.points, rounded] };
       } else {
-        strokes.push({ points: [rounded], radius });
+        strokes.push({ points: [rounded], radius, shape: imageEraserShapeRef.current });
       }
       const nextStrokes = normalizeEraseStrokes(strokes);
       const sourceImages = current.sourceImages.slice();
@@ -3261,8 +3426,8 @@ export function EditorClient({ project }: { project: Project }) {
           ...current.graphShapes,
           {
             id,
-            name: `${GRAPH_SHAPE_KIND_LABELS[shapeKind]} ${current.graphShapes.length + 1}`,
-            kind: shapeKind,
+            name: `${GRAPH_SHAPE_KIND_LABELS[draftShapeKind]} ${current.graphShapes.length + 1}`,
+            kind: draftShapeKind,
             x: cellX,
             y: cellY,
             width: 1,
@@ -3309,6 +3474,13 @@ export function EditorClient({ project }: { project: Project }) {
           width = size;
           height = size;
         }
+      } else if (!event.altKey) {
+        // Lines and arrows snap to the dominant axis, so a drag produces a
+        // clean 0deg or 90deg segment instead of a slightly skewed diagonal.
+        // Alt frees the angle, matching the Alt-disables-snapping convention
+        // used when moving layers.
+        if (Math.abs(rawWidth) >= Math.abs(rawHeight)) height = 0;
+        else width = 0;
       }
       const next = deriveGraphSettings({
         ...current,
@@ -3425,6 +3597,14 @@ export function EditorClient({ project }: { project: Project }) {
     if (!viewportDrag && placingGeneratedShape) {
       event.preventDefault();
       placeGeneratedShapeFromClientPoint(event.clientX, event.clientY);
+      return;
+    }
+
+    // The lasso places discrete vertices on click rather than starting a drag,
+    // so it returns before any drag state is set up.
+    if (!viewportDrag && canvasTool === "pointer" && drawingTool === "lasso") {
+      event.preventDefault();
+      handleLassoPointerDown(event);
       return;
     }
 
@@ -4095,6 +4275,7 @@ export function EditorClient({ project }: { project: Project }) {
 
   function moveCanvasPointer(event: ReactPointerEvent<HTMLCanvasElement>) {
     updateImageEraserCursor(event);
+    updateLassoCursor(event);
     if (canvasPointersRef.current.has(event.pointerId)) {
       canvasPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
     }
@@ -4297,6 +4478,50 @@ export function EditorClient({ project }: { project: Project }) {
       for (const stroke of strokes) {
         if (!stroke.points.length) continue;
         const radiusPx = Math.max(0.5, stroke.radius * scaleX);
+
+        if (stroke.shape === "polygon") {
+          // Vertices of a closed region, not a path to stamp along. Erasing is
+          // the destination-out default; a fill paints over the artwork
+          // instead, so it needs source-over restored for this stroke only.
+          context.save();
+          if (stroke.fill) {
+            context.globalCompositeOperation = "source-over";
+            context.fillStyle = stroke.fill;
+          }
+          context.beginPath();
+          context.moveTo(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY);
+          for (let index = 1; index < stroke.points.length; index += 1) {
+            context.lineTo(stroke.points[index].x * scaleX, stroke.points[index].y * scaleY);
+          }
+          context.closePath();
+          context.fill();
+          context.restore();
+          continue;
+        }
+
+        if (stroke.shape === "square") {
+          // Canvas strokes only offer round/butt/square *caps*, not a square
+          // brush footprint along a path, so stamp axis-aligned squares densely
+          // enough that consecutive stamps overlap and leave no gaps.
+          const size = radiusPx * 2;
+          const stamp = (x: number, y: number) => context.fillRect(x - radiusPx, y - radiusPx, size, size);
+          const step = Math.max(1, radiusPx / 2);
+
+          stamp(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY);
+          for (let index = 1; index < stroke.points.length; index += 1) {
+            const fromX = stroke.points[index - 1].x * scaleX;
+            const fromY = stroke.points[index - 1].y * scaleY;
+            const toX = stroke.points[index].x * scaleX;
+            const toY = stroke.points[index].y * scaleY;
+            const distance = Math.hypot(toX - fromX, toY - fromY);
+            const steps = Math.max(1, Math.ceil(distance / step));
+            for (let s = 1; s <= steps; s += 1) {
+              stamp(fromX + ((toX - fromX) * s) / steps, fromY + ((toY - fromY) * s) / steps);
+            }
+          }
+          continue;
+        }
+
         if (stroke.points.length === 1) {
           context.beginPath();
           context.arc(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY, radiusPx, 0, Math.PI * 2);
@@ -4727,6 +4952,8 @@ export function EditorClient({ project }: { project: Project }) {
           imageColorQuantization: replacedSource?.imageColorQuantization ?? current.imageColorQuantization,
           vectorizerLineAdjust: replacedSource?.vectorizerLineAdjust ?? current.vectorizerLineAdjust,
           vectorizerInkThreshold: replacedSource?.vectorizerInkThreshold ?? current.vectorizerInkThreshold,
+
+          vectorizerSketchRemoval: replacedSource?.vectorizerSketchRemoval ?? current.vectorizerSketchRemoval,
           vectorizerFidelity: replacedSource?.vectorizerFidelity ?? current.vectorizerFidelity,
           x: replacedSource ? replacedSource.x : defaultSourceX(current.graphWidth, width),
           y,
@@ -4809,20 +5036,23 @@ export function EditorClient({ project }: { project: Project }) {
         return handleUploadFailure(prepared.message || "Unable to prepare source uploads.");
       }
       pendingPaths = prepared.uploads.map((upload: { path: string }) => upload.path);
-      const { getSupabaseBrowser } = await import("@/lib/supabase/browser");
-      const supabase = getSupabaseBrowser();
-      await mapWithConcurrency(prepared.uploads, 2, async (upload: { path: string; token: string }, index) => {
-        const file = uploadItems[index].file;
-        const { error } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).uploadToSignedUrl(upload.path, upload.token, file, {
-          cacheControl: "3600",
-          contentType: file.type || undefined,
-        });
-        if (error) throw new Error(error.message);
+      // Direct browser-to-R2 PUTs, plus a bounded WebP derivative for the
+      // library grid so it stops pulling full-resolution originals.
+      const thumbUploads = await mapWithConcurrency(prepared.uploads, 2, async (upload: PresignedUpload, index) => {
+        const result = await uploadWithThumbnail(upload, uploadItems[index].file, SOURCE_THUMBNAIL_MAX_EDGE);
+        return result.thumbUploaded;
       });
       response = await fetch(`/api/projects/${project.id}/source-images`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ uploads: prepared.uploads.map((upload: { id: string; name: string; path: string }) => ({ id: upload.id, name: upload.name, path: upload.path })) }),
+        body: JSON.stringify({
+          uploads: prepared.uploads.map((upload: { id: string; name: string; path: string }, index: number) => ({
+            id: upload.id,
+            name: upload.name,
+            path: upload.path,
+            thumbUploaded: thumbUploads[index] === true,
+          })),
+        }),
       });
     } catch (error) {
       if (pendingPaths.length) {
@@ -4857,7 +5087,16 @@ export function EditorClient({ project }: { project: Project }) {
       ...settingsRef.current,
       sourceImages: settingsRef.current.sourceImages.map((source) => {
         const uploaded = uploadedById.get(source.id);
-        return uploaded ? { ...source, name: uploaded.name || source.name, path: uploaded.path || source.path, url: uploaded.url || source.url } : source;
+        return uploaded
+          ? {
+            ...source,
+            name: uploaded.name || source.name,
+            path: uploaded.path || source.path,
+            url: uploaded.url || source.url,
+            thumbPath: uploaded.thumbPath ?? source.thumbPath ?? null,
+            thumbUrl: uploaded.thumbUrl ?? source.thumbUrl ?? null,
+          }
+          : source;
       }),
     });
     settingsRef.current = nextSettings;
@@ -4969,25 +5208,22 @@ export function EditorClient({ project }: { project: Project }) {
           throw new Error(signedPayload.message || "Unable to prepare clipart uploads.");
         }
         pendingClipartPaths = signedPayload.uploads.map((upload: { path: string }) => upload.path);
-        const { getSupabaseBrowser } = await import("@/lib/supabase/browser");
-        const supabase = getSupabaseBrowser();
-        await mapWithConcurrency(signedPayload.uploads, 2, async (upload: { path: string; token: string }, index) => {
-          const file = prepared[index].file;
-          const { error } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).uploadToSignedUrl(upload.path, upload.token, file, {
-            cacheControl: "3600",
-            contentType: file.type || undefined,
-          });
-          if (error) throw new Error(error.message);
+        // Direct browser-to-R2 PUTs. The 256px derivative is what the library
+        // grid renders, instead of the full-resolution original it used to pull.
+        const thumbUploads = await mapWithConcurrency(signedPayload.uploads, 2, async (upload: PresignedUpload, index) => {
+          const result = await uploadWithThumbnail(upload, prepared[index].file, SOURCE_THUMBNAIL_MAX_EDGE);
+          return result.thumbUploaded;
         });
         const response = await fetch(`/api/projects/${project.id}/cliparts`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            uploads: signedPayload.uploads.map((upload: { id: string; name: string; path: string; mimeType: string }) => ({
+            uploads: signedPayload.uploads.map((upload: { id: string; name: string; path: string; mimeType: string }, index: number) => ({
               id: upload.id,
               name: upload.name,
               path: upload.path,
               mimeType: upload.mimeType,
+              thumbUploaded: thumbUploads[index] === true,
             })),
           }),
         });
@@ -5015,6 +5251,10 @@ export function EditorClient({ project }: { project: Project }) {
           name: normalizeClipartName(asset.name, preparedItem?.name || "Clipart"),
           path: asset.path || null,
           url: asset.url || preparedItem?.url || null,
+          thumbPath: asset.thumbPath ?? null,
+          // Before finalize completes the local object URL is the only preview
+          // available, so fall back to it rather than showing nothing.
+          thumbUrl: asset.thumbUrl ?? preparedItem?.url ?? null,
           dataUrl: null,
           mimeType: asset.mimeType || preparedItem?.file.type || "image/png",
           width: preparedItem?.width ?? 1,
@@ -5175,6 +5415,32 @@ export function EditorClient({ project }: { project: Project }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [sourceCropMode]);
 
+  // Escape abandons the in-progress region; Backspace steps back one vertex so
+  // a misplaced point does not force starting over.
+  useEffect(() => {
+    if (drawingTool !== "lasso" || !lassoVertices.length) return;
+    function onKey(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelLasso();
+        return;
+      }
+      if (event.key === "Backspace") {
+        event.preventDefault();
+        setLassoVertices((current) => current.slice(0, -1));
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commitLassoRegion(lassoVertices);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawingTool, lassoVertices.length]);
+
   async function autoTrimSourceCrop() {
     if (!cropSourcePreviewUrl) return;
     cropDetectionUsedRef.current = true;
@@ -5270,6 +5536,20 @@ export function EditorClient({ project }: { project: Project }) {
     });
     if (response.ok) {
       lastUploadedProcessedRevisionRef.current = revision;
+      // Dashboard cards render this derivative instead of the full canvas PNG.
+      // Best effort: a failure just leaves the card falling back to full size.
+      try {
+        const thumbnail = await createThumbnailBlob(blob, CARD_THUMBNAIL_MAX_EDGE);
+        if (thumbnail) {
+          await fetch(`/api/projects/${project.id}/processed-image?variant=thumbnail`, {
+            method: "PUT",
+            headers: { "Content-Type": "image/webp" },
+            body: thumbnail,
+          });
+        }
+      } catch {
+        // Ignored: the processed image itself is already saved.
+      }
       return { ok: true as const };
     }
     const payload = await response.json().catch(() => ({}));
@@ -6114,6 +6394,7 @@ export function EditorClient({ project }: { project: Project }) {
         <NumberField label="Height (CM)" value={roundMeasure(clipart.height * settings.cellSizeCm)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={clipart.locked} onChange={(value) => updateClipartPhysicalHeightCm(clipart.id, value)} />
         <NumberField label="Line adjustment" value={clipart.vectorizerLineAdjust} min={MIN_VECTORIZER_LINE_ADJUST} max={MAX_VECTORIZER_LINE_ADJUST} step={0.5} allowDecimalInput disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { vectorizerLineAdjust: value })} />
         <NumberField label="Ink threshold" value={clipart.vectorizerInkThreshold} min={MIN_VECTORIZER_INK_THRESHOLD} max={MAX_VECTORIZER_INK_THRESHOLD} step={1} disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { vectorizerInkThreshold: Math.round(value) })} />
+        <NumberField label="Remove sketch lines" value={clipart.vectorizerSketchRemoval ?? DEFAULT_VECTORIZER_SKETCH_REMOVAL} min={MIN_VECTORIZER_SKETCH_REMOVAL} max={MAX_VECTORIZER_SKETCH_REMOVAL} step={1} disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { vectorizerSketchRemoval: Math.round(value) })} />
         <label className="grid min-w-0 gap-1.5">
           <span className="text-xs font-semibold text-[var(--editor-text-dim)]">Fidelity</span>
           <select value={clipart.vectorizerFidelity} disabled={clipart.locked} onChange={(event) => updateClipartImage(clipart.id, { vectorizerFidelity: event.target.value as GraphClipartImage["vectorizerFidelity"] })} className="h-10 w-full min-w-0 rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)] px-3 text-sm outline-none focus:border-[var(--editor-accent)] focus:ring-2 focus:ring-[var(--editor-accent-soft)] disabled:opacity-60">
@@ -6584,7 +6865,10 @@ export function EditorClient({ project }: { project: Project }) {
               {settings.clipartAssets.length ? (
                 <div className="max-h-72 overflow-y-auto scrollbar-thin rounded-lg border border-[var(--editor-line-soft)] bg-[var(--editor-panel)] p-1">
                   {settings.clipartAssets.map((asset) => {
-                    const previewUrl = asset.url ?? asset.dataUrl ?? null;
+                    // A 40x40 box: prefer the bounded WebP derivative. This grid
+                    // renders up to MAX_CLIPART_ASSETS entries and used to pull
+                    // the full-resolution original for every one of them.
+                    const previewUrl = asset.thumbUrl ?? asset.url ?? asset.dataUrl ?? null;
                     const selected = selectedClipartAsset?.id === asset.id;
                     return (
                       <button
@@ -6859,7 +7143,7 @@ export function EditorClient({ project }: { project: Project }) {
   const showSourceSideResizeHandles = resizeHandleTarget === "source" || dragStateRef.current?.kind === "resize-source";
   const showShapeSideResizeHandles = resizeHandleTarget === "shape" || dragStateRef.current?.kind === "resize-shape";
   const sourceResizeHandleVisible = (_handle: SourceResizeHandle, showSideHandles: boolean) => showSideHandles;
-  const previewCanvasCursor = isDraggingGraph ? "grabbing" : drawingTool === "image-eraser" ? "none" : canvasTool === "hand" ? "grab" : canvasTool === "fill" ? "crosshair" : SELECT_POINTER_CURSOR;
+  const previewCanvasCursor = isDraggingGraph ? "grabbing" : drawingTool === "image-eraser" ? "none" : drawingTool === "lasso" ? "crosshair" : canvasTool === "hand" ? "grab" : canvasTool === "fill" ? "crosshair" : SELECT_POINTER_CURSOR;
   const selectedLayerStatusLabel = selectedLayerCount
     ? `${selectedLayerCount} layer${selectedLayerCount === 1 ? "" : "s"} selected`
     : selectedFillRegion
@@ -6896,12 +7180,30 @@ export function EditorClient({ project }: { project: Project }) {
       tool === "draw" ? "cell" : tool === "shape" ? "shape" : tool === "background-remover" ? "background-remover" : tool === "image-eraser" ? "image-eraser" : "image";
     setDrawingTool(nextDrawingTool);
     if (nextDrawingTool !== "image-eraser") setImageEraserCursor(null);
+    // This path never selects the lasso, so any in-progress region is abandoned.
+    setLassoVertices([]);
+    setLassoCursor(null);
     if (nextDrawingTool !== "image") setInspectorTab("draw");
   }, []);
 
+  /**
+   * Choosing a kind in the Shape Generator also arms the canvas shape tool, so
+   * picking "Line" and dragging draws a line. Without this the drawing tool
+   * stayed on whatever was active — typically Cell — and the drag painted grid
+   * squares while the panel showed Line as selected.
+   */
+  function selectDraftShapeKind(kind: GeneratedShapeKind) {
+    setDraftShapeKind(kind);
+    selectEditorTool("shape");
+  }
+
   function updateResizeHandleHover(event: ReactPointerEvent<HTMLElement>) {
     const stage = graphStageRef.current;
-    if (!stage || showOriginal) {
+    // Resize/crop handles belong to the select tool only. Showing them while
+    // erasing, drawing cells, drawing shapes, or removing a background put
+    // crop-looking guides under the pointer in modes where they do nothing.
+    const inSelectMode = canvasTool === "pointer" && drawingTool === "image";
+    if (!stage || showOriginal || !inSelectMode) {
       setResizeHandleTarget((current) => (current ? null : current));
       return;
     }
@@ -6971,6 +7273,66 @@ export function EditorClient({ project }: { project: Project }) {
           }}
           className="ui-canvas-bg relative min-h-0 overflow-auto p-8"
         >
+          {drawingTool === "lasso" && !showOriginal ? (
+            <div className="pointer-events-none sticky top-0 z-30 -mx-8 -mt-8 mb-4 flex justify-center px-8 pt-2">
+              <div className="editor-context-toolbar pointer-events-auto">
+                <span className="editor-context-toolbar__title"><Scissors size={14} aria-hidden="true" />Lasso region</span>
+                <label className="editor-context-toolbar__field">
+                  Apply
+                  <select value={lassoFill} onChange={(event) => setLassoFill(event.target.value as GraphEraseRegionFill | "erase")}>
+                    <option value="erase">Erase</option>
+                    <option value="#ffffff">Fill white</option>
+                    <option value="#000000">Fill black</option>
+                  </select>
+                </label>
+                <span className="editor-context-toolbar__field">
+                  {lassoVertices.length
+                    ? `${lassoVertices.length} point${lassoVertices.length === 1 ? "" : "s"} — click the first to close`
+                    : "Click to place points"}
+                </span>
+                {/* Explicit close, so applying the region never depends on
+                    landing a click precisely on the first vertex. */}
+                <button
+                  type="button"
+                  className="editor-context-toolbar__btn"
+                  onClick={() => commitLassoRegion(lassoVertices)}
+                  disabled={lassoVertices.length < 3}
+                >
+                  <Check size={13} aria-hidden="true" />Close region
+                </button>
+                <button
+                  type="button"
+                  className="editor-context-toolbar__btn"
+                  onClick={cancelLasso}
+                  disabled={!lassoVertices.length}
+                >
+                  <RotateCcw size={13} aria-hidden="true" />Cancel
+                </button>
+                <button type="button" className="editor-context-toolbar__btn editor-context-toolbar__btn--primary" onClick={() => selectEditorTool("select")}>
+                  <Check size={13} aria-hidden="true" />Done
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {drawingTool === "shape" && !showOriginal ? (
+            <div className="pointer-events-none sticky top-0 z-30 -mx-8 -mt-8 mb-4 flex justify-center px-8 pt-2">
+              <div className="editor-context-toolbar pointer-events-auto">
+                <span className="editor-context-toolbar__title"><SquarePen size={14} aria-hidden="true" />Draw shape</span>
+                {/* Read-only status. The kind is chosen in the Shape Generator
+                    panel; duplicating the picker here is what let the two get
+                    out of sync. */}
+                <span className="editor-context-toolbar__field">
+                  {GRAPH_SHAPE_KIND_LABELS[draftShapeKind]}
+                </span>
+                {draftShapeKind === "line" || draftShapeKind === "arrow" ? (
+                  <span className="editor-context-toolbar__field">Hold Alt for a free angle</span>
+                ) : null}
+                <button type="button" className="editor-context-toolbar__btn editor-context-toolbar__btn--primary" onClick={() => selectEditorTool("select")}>
+                  <Check size={13} aria-hidden="true" />Done
+                </button>
+              </div>
+            </div>
+          ) : null}
           {(drawingTool === "image-eraser" || drawingTool === "background-remover") && !showOriginal ? (
             <div className="pointer-events-none sticky top-0 z-30 -mx-8 -mt-8 mb-4 flex justify-center px-8 pt-2">
               <div className="editor-context-toolbar pointer-events-auto">
@@ -6981,6 +7343,16 @@ export function EditorClient({ project }: { project: Project }) {
                       Brush
                       <input type="range" min={2} max={80} step={1} value={imageEraserRadius} onChange={(event) => setImageEraserRadius(Number(event.target.value))} />
                       <output>{imageEraserRadius}px</output>
+                    </label>
+                    <label className="editor-context-toolbar__field">
+                      Shape
+                      <select
+                        value={imageEraserShape}
+                        onChange={(event) => setImageEraserShape(event.target.value as GraphEraseBrushShape)}
+                      >
+                        <option value="circle">Circle</option>
+                        <option value="square">Square</option>
+                      </select>
                     </label>
                     <button type="button" className="editor-context-toolbar__btn" onClick={() => { const target = selectedSource ?? primarySource; if (target) clearSourceErasing(target.id); }} disabled={!(selectedSource ?? primarySource)?.eraseStrokes?.length}>
                       <RotateCcw size={13} aria-hidden="true" />Restore
@@ -7172,9 +7544,60 @@ export function EditorClient({ project }: { project: Project }) {
                   }}
                 />
               ) : null}
+              {drawingTool === "lasso" && lassoVertices.length ? (
+                (() => {
+                  // Graph cells -> stage pixels, matching the eraser ring's mapping.
+                  const toStage = (vertex: LassoVertex) => ({
+                    x: outsideNumberMargin + vertex.x * GRAPH_MAJOR_CELL_PIXELS * zoom,
+                    y: outsideNumberMargin + vertex.y * GRAPH_MAJOR_CELL_PIXELS * zoom,
+                  });
+                  const placed = lassoVertices.map(toStage);
+                  // The pending edge follows the cursor until the region closes.
+                  const rubberBand = lassoCursor ? [...placed, toStage(lassoCursor)] : placed;
+                  const first = placed[0];
+                  return (
+                    <svg className="pointer-events-none absolute inset-0 z-30 h-full w-full overflow-visible" aria-hidden="true">
+                      <polyline
+                        points={rubberBand.map((p) => `${p.x},${p.y}`).join(" ")}
+                        fill="rgba(34,211,238,0.12)"
+                        stroke="rgb(103,232,249)"
+                        strokeWidth={2}
+                        strokeDasharray="6 4"
+                      />
+                      {placed.map((p, index) => (
+                        <circle
+                          key={`lasso-vertex-${index}`}
+                          cx={p.x}
+                          cy={p.y}
+                          r={index === 0 ? 6 : 4}
+                          fill={index === 0 ? "rgb(34,211,238)" : "rgb(15,23,42)"}
+                          stroke="rgb(103,232,249)"
+                          strokeWidth={2}
+                        />
+                      ))}
+                      {/* Halo on the first vertex once closing is possible. */}
+                      {/* Halo drawn at the true close radius, so the target
+                          area is exactly what the click test accepts. */}
+                      {first && placed.length >= 3 ? (
+                        <circle
+                          cx={first.x}
+                          cy={first.y}
+                          r={Math.max(10, lassoCloseDistanceCells * GRAPH_MAJOR_CELL_PIXELS * zoom)}
+                          fill="rgba(34,211,238,0.12)"
+                          stroke="rgba(34,211,238,0.6)"
+                          strokeWidth={2}
+                          strokeDasharray="4 3"
+                        />
+                      ) : null}
+                    </svg>
+                  );
+                })()
+              ) : null}
               {drawingTool === "image-eraser" && imageEraserCursor ? (
                 <div
-                  className="pointer-events-none absolute z-30 rounded-full border-2 border-cyan-300 bg-cyan-300/15 shadow-[0_0_0_1px_rgba(2,6,23,0.92),0_0_12px_rgba(34,211,238,0.65)]"
+                  className={`pointer-events-none absolute z-30 border-2 border-cyan-300 bg-cyan-300/15 shadow-[0_0_0_1px_rgba(2,6,23,0.92),0_0_12px_rgba(34,211,238,0.65)] ${
+                    imageEraserShape === "square" ? "rounded-[2px]" : "rounded-full"
+                  }`}
                   aria-hidden="true"
                   style={{
                     left: imageEraserCursor.x - imageEraserCursor.radius,
@@ -7577,7 +8000,7 @@ export function EditorClient({ project }: { project: Project }) {
             draftShapeStrokeColor={draftShapeStrokeColor}
             draftShapeFillColor={draftShapeFillColor}
             draftShapePreviewDimensions={draftShapePreviewDimensions}
-            setDraftShapeKind={setDraftShapeKind}
+            setDraftShapeKind={selectDraftShapeKind}
             setDraftShapeWidthCm={setDraftShapeWidthCm}
             setDraftShapeHeightCm={setDraftShapeHeightCm}
             setDraftShapeFillMode={setDraftShapeFillMode}

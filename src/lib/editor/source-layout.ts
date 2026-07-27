@@ -235,6 +235,7 @@ export function sourceProcessingCacheKey(source: GraphSourceImage, layout: Pick<
     source.imageColorQuantization,
     source.vectorizerLineAdjust,
     source.vectorizerInkThreshold,
+    source.vectorizerSketchRemoval,
     source.vectorizerFidelity,
     eraseStrokesSignature(source.eraseStrokes),
     backgroundRemovalSignature(source.backgroundRemoval),

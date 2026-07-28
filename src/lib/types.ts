@@ -170,6 +170,8 @@ export type GraphShapeDrawing = {
   strokeColor: string;
   fillColor: string;
   strokeWidth: number;
+  /** Defaults to solid for shapes saved before configurable stroke styles. */
+  strokeStyle?: GraphGridLineStyle;
   sides: GraphCellLineSide[];
   locked: boolean;
   visible: boolean;

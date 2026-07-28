@@ -414,6 +414,7 @@ function normalizeGraphShapes(value: unknown) {
       const fillColor = normalizeCanvasFillColor(record.fillColor);
       const strokeWidthValue = Number(record.strokeWidth);
       const strokeWidth = Math.max(1, Math.min(24, Number.isFinite(strokeWidthValue) ? Math.round(strokeWidthValue) : 3));
+      const strokeStyle = isGraphGridLineStyle(record.strokeStyle) ? record.strokeStyle : DEFAULT_GRID_LINE_STYLE;
       const rawSides = Array.isArray(record.sides) ? record.sides : [...CELL_LINE_SIDE_KEYS];
       const sides = Array.from(
         new Set(
@@ -435,6 +436,7 @@ function normalizeGraphShapes(value: unknown) {
           strokeColor,
           fillColor,
           strokeWidth,
+          strokeStyle,
           sides: sides.length ? sides : [...CELL_LINE_SIDE_KEYS],
           locked: Boolean(record.locked),
           visible: typeof record.visible === "boolean" ? record.visible : true,

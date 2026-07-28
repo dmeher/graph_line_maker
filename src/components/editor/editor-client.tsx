@@ -30,6 +30,7 @@ import {
   Lock,
   Loader2,
   Maximize2,
+  MousePointer2,
   MoveDiagonal2,
   MoveHorizontal,
   MoveVertical,
@@ -102,10 +103,18 @@ import {
   snapRectToLayerGuides,
   snapCellToGrid,
   stackEndCell,
+  transformLayerOrientation,
   type LayerSnapBox,
   type LayerSnapGuide,
   type SourceLayout,
 } from "@/lib/editor/source-layout";
+import {
+  alignLineEndpointToCellAxis,
+  hasIntentionalDrag,
+  measureGeneratedOpenPathHit,
+  oneCellBoundsAtGraphPoint,
+  type GeneratedOpenPathHitResult,
+} from "@/lib/editor/drawing-geometry";
 import {
   DEFAULT_BACKGROUND_TOLERANCE,
   MAX_BACKGROUND_TOLERANCE,
@@ -150,6 +159,7 @@ import {
   DEFAULT_VECTORIZER_INK_THRESHOLD,
   DEFAULT_VECTORIZER_SKETCH_REMOVAL,
   DEFAULT_VECTORIZER_FIDELITY,
+  GRAPH_GRID_LINE_STYLE_KEYS,
   GRAPH_MAJOR_CELL_PIXELS,
   GRAPH_VECTORIZER_FIDELITY_KEYS,
   MAX_VECTORIZER_INK_THRESHOLD,
@@ -190,13 +200,46 @@ import {
   isPrintVerticalAlignment,
   isTransparentFillColor,
 } from "@/lib/graph-paper";
-import type { CanvasColor, CanvasFillColor } from "@/lib/graph-paper";
+import type { CanvasColor, CanvasFillColor, GraphGridLineStyle } from "@/lib/graph-paper";
 import type { GraphBackgroundRemoval, GraphCellLineSide, GraphCellPaint, GraphClipartAsset, GraphClipartImage, GraphEraseBrushShape, GraphEraseRegionFill, GraphEraseStroke, GraphLayerGroup, GraphSettings, GraphShapeDrawing, GraphShapeKind, GraphSourceImage, PaletteColor, Project } from "@/lib/types";
 import { createDebouncedAction } from "@/lib/utils/debounce";
 import { bytesToSize } from "@/lib/utils/format";
 import { estimateCanvasBytes, startGraphPerformanceStage } from "@/lib/performance/marks";
-import { InspectorPanel } from "./inspector-panel";
-import { EditorCommandBar, EditorStatusBar, EditorToolRail, EditorViewControls, type EditorToolId } from "./editor-chrome";
+import {
+  ACTIVE_COMMAND_CANVAS_POD_IDS,
+  COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
+  COMMAND_CANVAS_LAYOUT_STORAGE_KEY,
+  COMMAND_CANVAS_POD_IDS,
+  clampCommandCanvasPodPosition,
+  clampCommandCanvasPodSize,
+  createDefaultCommandCanvasLayout,
+  deserializeCommandCanvasLayout,
+  detectCommandCanvasDockSnap,
+  placeCommandCanvasPod,
+  quantizeCommandCanvasCoordinate,
+  resolveCommandCanvasPodPlacement,
+  serializeCommandCanvasLayout,
+  type CommandCanvasCommand,
+  type CommandCanvasLayout,
+  type CommandCanvasPoint,
+  type PodDock,
+  type PodId,
+} from "@/lib/editor/command-canvas";
+import { InspectorPanel, type SelectionConsoleModel } from "./inspector-panel";
+import {
+  CommandCanvasCommandPalette,
+  CommandCanvasCompactViewTrigger,
+  CommandCanvasNavigator,
+  CommandCanvasPod,
+  CommandCanvasSelectionStrip,
+  EditorCanvasLoader,
+  EditorCommandBar,
+  EditorNavigatorStatus,
+  EditorStatusBar,
+  EditorToolRail,
+  type CommandCanvasResizeEdge,
+  type EditorToolId,
+} from "./editor-chrome";
 import { InspectorFieldGrid, InspectorMetricGrid } from "./inspector-controls";
 import { ColorPresetField, InspectorDisclosure, NumberField, ShapePreviewSvg } from "./inspector/inspector-fields";
 import {
@@ -211,14 +254,15 @@ import {
   type ShapeFillMode,
 } from "./inspector/inspector-constants";
 
-type MobileTab = "source" | "canvas" | "controls";
+type MobileTab = "source" | "tools" | "canvas" | "view" | "controls" | "export";
 type EditorLeftPanelTab = "layers" | "library";
 type InspectorTab = "graph" | "source" | "draw" | "palette";
 type DrawTab = "shape" | "clipart";
 type Notice = { tone: "ok" | "error" | "info"; text: string };
 type CollapsibleKey = "parameters" | "drawing" | "outline" | "fill" | "selectedFill" | "graphLines";
 type FloatingPalette = { regionId: string; x: number; y: number } | null;
-type DrawingTool = "image" | "cell" | "shape" | "background-remover" | "image-eraser" | "lasso";
+type DrawingTool = "image" | "line" | "shape" | "background-remover" | "image-eraser" | "lasso";
+type ClosedGeneratedShapeKind = Exclude<GeneratedShapeKind, "line" | "arrow">;
 
 /** A vertex of an in-progress lasso region, in graph cell coordinates. */
 type LassoVertex = { x: number; y: number };
@@ -242,10 +286,41 @@ type LayerChooser = {
   y: number;
   choices: LayerChoice[];
 } | null;
+type CommandCanvasPodDrag = {
+  podId: PodId;
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  startX: number;
+  startY: number;
+  width: number;
+  height: number;
+  element: HTMLElement;
+  point: CommandCanvasPoint;
+  snapDock: Exclude<PodDock, "floating"> | null;
+};
+type CommandCanvasPodResize = {
+  podId: PodId;
+  edge: Extract<CommandCanvasResizeEdge, "bottom-left" | "bottom-right">;
+  pointerId: number;
+  startClientX: number;
+  startClientY: number;
+  startWidth: number;
+  startHeight: number;
+  element: HTMLElement;
+  size: {
+    width: number;
+    height: number;
+  };
+};
 type LayerHit =
-  | (LayerChoice & { type: "source"; layout: SourceLayout })
-  | (LayerChoice & { type: "shape"; shape: GraphShapeDrawing })
-  | (LayerChoice & { type: "clipart"; clipart: GraphClipartImage });
+  (
+    | (LayerChoice & { type: "source"; layout: SourceLayout })
+    | (LayerChoice & { type: "shape"; shape: GraphShapeDrawing })
+    | (LayerChoice & { type: "clipart"; clipart: GraphClipartImage })
+  ) & {
+    openPathHit?: GeneratedOpenPathHitResult;
+  };
 type SourceStatus = {
   ready: boolean;
   previewUrl: string | null;
@@ -254,12 +329,6 @@ type SourceStatus = {
 type SettingsHistory = {
   undo: SettingsHistoryCommand<GraphSettings>[];
   redo: SettingsHistoryCommand<GraphSettings>[];
-};
-type PanelResizeState = {
-  side: "left" | "right";
-  pointerId: number;
-  startClientX: number;
-  startWidth: number;
 };
 type CanvasPinchState = {
   distance: number;
@@ -272,7 +341,7 @@ type CanvasPinchState = {
 const SOURCE_RESIZE_HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const;
 type SourceResizeHandle = (typeof SOURCE_RESIZE_HANDLES)[number];
 const CANVAS_SELECTION_BOX_CLASS =
-  "pointer-events-none absolute z-20 rounded-[2px] border-2 border-cyan-300 bg-cyan-300/10 shadow-[0_0_0_1px_rgba(2,6,23,0.92),0_0_0_4px_rgba(255,255,255,0.92),0_0_18px_rgba(34,211,238,0.58)]";
+  "command-canvas-selection-frame pointer-events-none absolute z-20 rounded-[2px] border-2 border-cyan-300 bg-cyan-300/10 shadow-[0_0_0_1px_rgba(2,6,23,0.92),0_0_0_3px_rgba(255,255,255,0.82),0_0_14px_rgba(34,211,238,0.48)]";
 const SELECT_POINTER_CURSOR =
   "url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='24'%20height='24'%20viewBox='0%200%2024%2024'%3E%3Cpath%20d='M5.5%204.8%2018.4%2010.3c.78.34.75%201.46-.04%201.77l-5.32%202.08a1.45%201.45%200%200%200-.81.81l-2.04%205.13c-.32.81-1.47.81-1.78-.01L5.5%204.8Z'%20fill='%23ffffff'%20stroke='%23000000'%20stroke-width='1.4'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E\") 6 5, default";
 type DragState = {
@@ -300,6 +369,7 @@ type DragState = {
   rectHeight: number;
   moved: boolean;
   historyRecorded: boolean;
+  interactionStarted?: boolean;
   startGraphX?: number;
   startGraphY?: number;
   shapeId?: string;
@@ -358,8 +428,29 @@ const ManualCropper = dynamic(() => import("@/components/projects/manual-cropper
 const MAX_SETTINGS_HISTORY = 80;
 const EDITOR_PREVIEW_POLICY = detectPreviewPolicy();
 const MAX_SETTINGS_HISTORY_ESTIMATED_BYTES = EDITOR_PREVIEW_POLICY.historyBytes;
-const MIN_SIDE_PANEL_WIDTH = 280;
-const MAX_SIDE_PANEL_WIDTH = 560;
+const COMMAND_CANVAS_POD_MIN_SIZES: Record<PodId, { width: number; height: number }> = {
+  tools: { width: 56, height: 300 },
+  scene: { width: 260, height: 220 },
+  selection: { width: 260, height: 176 },
+  navigator: { width: 260, height: 88 },
+  focus: { width: 340, height: 340 },
+};
+const COMMAND_CANVAS_POD_DEFAULT_SIZES: Record<PodId, { width: number; height: number }> = {
+  tools: { width: 68, height: 500 },
+  scene: { width: 400, height: 860 },
+  selection: { width: 296, height: 176 },
+  navigator: { width: 356, height: 116 },
+  focus: { width: 430, height: 730 },
+};
+const COMMAND_CANVAS_POD_MAX_SIZES: Record<PodId, { width: number; height: number }> = {
+  tools: { width: 320, height: 720 },
+  scene: { width: 560, height: 760 },
+  selection: { width: 560, height: 420 },
+  navigator: { width: 560, height: 116 },
+  focus: { width: 720, height: 900 },
+};
+const COMMAND_CANVAS_VIEWPORT_HEIGHT_PODS = new Set<PodId>(["scene", "focus"]);
+const ACTIVE_COMMAND_CANVAS_PODS = new Set<PodId>(ACTIVE_COMMAND_CANVAS_POD_IDS);
 const PREVIEW_PROCESSING_DEBOUNCE_MS = 250;
 const DRAG_PROCESSING_IDLE_DEBOUNCE_MS = 300;
 const DRAG_PROCESSING_MAX_WAIT_MS = 1000;
@@ -447,7 +538,7 @@ function buildProcessingSignature(settings: GraphSettings) {
       )
       .join("|"),
     settings.cellPaints.map((paint) => `${paint.id}:${paint.x}:${paint.y}:${paint.width}:${paint.height}:${paint.sides.join(",")}:${paint.lineColor}:${paint.fillColor}:${paint.lineWidth}:${paint.rotationDegrees}:${paint.flipX}:${paint.flipY}:${paint.visible}`).join("|"),
-    settings.graphShapes.map((shape) => `${shape.id}:${shape.kind}:${shape.x}:${shape.y}:${shape.width}:${shape.height}:${shape.strokeColor}:${shape.fillColor}:${shape.strokeWidth}:${shape.sides.join(",")}:${shape.rotationDegrees}:${shape.flipX}:${shape.flipY}:${shape.visible}`).join("|"),
+    settings.graphShapes.map((shape) => `${shape.id}:${shape.kind}:${shape.x}:${shape.y}:${shape.width}:${shape.height}:${shape.strokeColor}:${shape.fillColor}:${shape.strokeWidth}:${shape.strokeStyle ?? "solid"}:${shape.sides.join(",")}:${shape.rotationDegrees}:${shape.flipX}:${shape.flipY}:${shape.visible}`).join("|"),
     settings.clipartAssets.map((asset) => `${asset.id}:${asset.path ?? ""}:${asset.url ?? ""}:${asset.dataUrl ?? ""}`).join("|"),
     settings.clipartImages.map((clipart) => `${clipart.id}:${clipart.assetId}:${clipart.x}:${clipart.y}:${clipart.width}:${clipart.height}:${clipart.strokeColor}:${clipart.fillColor}:${clipart.imageLineThickness}:${clipart.sourceFillThreshold}:${clipart.sourceFillMinStrokePixels}:${clipart.strokeGapClosePixels}:${clipart.imageAutoEnhance}:${clipart.imageDenoiseLevel}:${clipart.imageEdgeDetection}:${clipart.imageColorQuantization}:${clipart.vectorizerLineAdjust}:${clipart.vectorizerInkThreshold}:${clipart.vectorizerSketchRemoval}:${clipart.vectorizerFidelity}:${clipart.rotationDegrees}:${clipart.flipX}:${clipart.flipY}:${clipart.visible}:${eraseStrokesSignature(clipart.eraseStrokes)}:${backgroundRemovalSignature(clipart.backgroundRemoval)}`).join("|"),
   ].join("|");
@@ -524,19 +615,6 @@ function revokeObjectUrls(urls: Iterable<string>) {
 
 function clampImageOffset(value: number) {
   return Math.max(-MAX_CANVAS_DIMENSION, Math.min(MAX_CANVAS_DIMENSION, Math.round(value)));
-}
-
-function responsiveSidePanelMaxWidth(side: "left" | "right") {
-  if (typeof window === "undefined") return MAX_SIDE_PANEL_WIDTH;
-  const viewportWidth = window.innerWidth;
-  if (viewportWidth < 1280) return side === "left" ? 292 : 330;
-  if (viewportWidth < 1440) return side === "left" ? 288 : 368;
-  return Math.max(368, Math.min(MAX_SIDE_PANEL_WIDTH, (viewportWidth - 644) / 2));
-}
-
-function clampSidePanelWidth(value: number, side: "left" | "right") {
-  const viewportLimit = responsiveSidePanelMaxWidth(side);
-  return Math.round(Math.max(MIN_SIDE_PANEL_WIDTH, Math.min(viewportLimit, value)));
 }
 
 function isDrawableCanvas(canvas: HTMLCanvasElement | null | undefined): canvas is HTMLCanvasElement {
@@ -786,6 +864,7 @@ function normalizeGraphShapes(value: GraphSettings["graphShapes"] | undefined): 
           strokeColor: normalizeCanvasColor(shape.strokeColor),
           fillColor: normalizeCanvasFillColor(shape.fillColor),
           strokeWidth: Math.max(1, Math.min(24, Math.round(Number(shape.strokeWidth) || 3))),
+          strokeStyle: isGraphGridLineStyle(shape.strokeStyle) ? shape.strokeStyle : DEFAULT_GRID_LINE_STYLE,
           sides: sides.length ? sides : [...CELL_LINE_SIDE_KEYS],
           locked: Boolean(shape.locked),
           visible: typeof shape.visible === "boolean" ? shape.visible : true,
@@ -1253,7 +1332,11 @@ export function EditorClient({ project }: { project: Project }) {
   const [hasSessionDraft, setHasSessionDraft] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
   const [sourceReady, setSourceReady] = useState(false);
+  const [sourceLoadSettled, setSourceLoadSettled] = useState(false);
   const [clipartReady, setClipartReady] = useState(true);
+  const [clipartLoadSettled, setClipartLoadSettled] = useState(false);
+  const [initialCanvasReadyProjectId, setInitialCanvasReadyProjectId] = useState<string | null>(null);
+  const initialCanvasReady = initialCanvasReadyProjectId === project.id;
   const [sourceStatus, setSourceStatus] = useState<Record<string, SourceStatus>>({});
   const [sourceCropMode, setSourceCropMode] = useState(false);
   const [sourceCropArea, setSourceCropArea] = useState<CropPixels | null>(null);
@@ -1268,6 +1351,7 @@ export function EditorClient({ project }: { project: Project }) {
   const [sourceCropInteractionMode, setSourceCropInteractionMode] = useState<"crop" | "pan">("crop");
   const [sourceCropBackgroundRemoval, setSourceCropBackgroundRemoval] = useState<GraphBackgroundRemoval | undefined>(undefined);
   const [processing, setProcessing] = useState(false);
+  const [failedProcessingSignature, setFailedProcessingSignature] = useState<string | null>(null);
   const [fillRegions, setFillRegions] = useState<FillRegion[]>([]);
   const [selectedFillRegionId, setSelectedFillRegionId] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -1312,12 +1396,14 @@ export function EditorClient({ project }: { project: Project }) {
   // the canvas drag-draw tool previously held separate states, so picking Line
   // in the generator left drag-draw still producing rectangles.
   const [draftShapeKind, setDraftShapeKind] = useState<GeneratedShapeKind>("line");
+  const [armedShapeKind, setArmedShapeKind] = useState<ClosedGeneratedShapeKind | null>(null);
   const [draftShapeWidthCm, setDraftShapeWidthCm] = useState(4);
   const [draftShapeHeightCm, setDraftShapeHeightCm] = useState(3);
   const [draftShapeFillMode, setDraftShapeFillMode] = useState<ShapeFillMode>("outline");
   const [draftShapeSides, setDraftShapeSides] = useState<GraphCellLineSide[]>(CELL_LINE_SIDE_KEYS);
   const [draftShapeStrokeWidth, setDraftShapeStrokeWidth] = useState(3);
   const [draftShapeStrokeColor, setDraftShapeStrokeColor] = useState(DEFAULT_OUTLINE_COLOR);
+  const [draftShapeStrokeStyle, setDraftShapeStrokeStyle] = useState<GraphGridLineStyle>("solid");
   const [draftShapeFillColor, setDraftShapeFillColor] = useState<CanvasFillColor>(DEFAULT_BACKGROUND_COLOR);
   const [placingGeneratedShape, setPlacingGeneratedShape] = useState(false);
   const [selectedClipartAssetId, setSelectedClipartAssetId] = useState<string | null>(null);
@@ -1329,9 +1415,7 @@ export function EditorClient({ project }: { project: Project }) {
   const [draftClipartFillColor, setDraftClipartFillColor] = useState<CanvasFillColor>(TRANSPARENT_FILL_COLOR);
   const [generatedImagesCollapsed, setGeneratedImagesCollapsed] = useState(true);
   const [layerChooser, setLayerChooser] = useState<LayerChooser>(null);
-  const [leftPanelWidth, setLeftPanelWidth] = useState(280);
-  const [rightPanelWidth, setRightPanelWidth] = useState(368);
-  const [resizingPanelSide, setResizingPanelSide] = useState<"left" | "right" | null>(null);
+  const [resizingCommandCanvasPodId, setResizingCommandCanvasPodId] = useState<PodId | null>(null);
   const [uploadingSources, setUploadingSources] = useState(false);
   const [replacingSourceId, setReplacingSourceId] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
@@ -1349,6 +1433,11 @@ export function EditorClient({ project }: { project: Project }) {
   const [floatingPalette, setFloatingPalette] = useState<FloatingPalette>(null);
   const [copiedFillColor, setCopiedFillColor] = useState<string | null>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>("canvas");
+  const [commandCanvasLayout, setCommandCanvasLayout] = useState<CommandCanvasLayout>(createDefaultCommandCanvasLayout);
+  const [commandCanvasLayoutHydrated, setCommandCanvasLayoutHydrated] = useState(false);
+  const [commandCanvasViewportWidth, setCommandCanvasViewportWidth] = useState(1536);
+  const [commandCanvasViewportHeight, setCommandCanvasViewportHeight] = useState(1024);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("graph");
   const [drawTab, setDrawTab] = useState<DrawTab>("shape");
   const [isPending, startTransition] = useTransition();
@@ -1359,6 +1448,11 @@ export function EditorClient({ project }: { project: Project }) {
   const [clipartSearch, setClipartSearch] = useState("");
   const [deletingClipartAssetId, setDeletingClipartAssetId] = useState<string | null>(null);
   const settingsRef = useRef(settings);
+  const commandCanvasLayoutRef = useRef(commandCanvasLayout);
+  commandCanvasLayoutRef.current = commandCanvasLayout;
+  const commandCanvasPodDragRef = useRef<CommandCanvasPodDrag | null>(null);
+  const commandCanvasPodResizeRef = useRef<CommandCanvasPodResize | null>(null);
+  const commandCanvasDockPreviewRef = useRef<HTMLDivElement | null>(null);
   const processingDebounceRef = useRef<{ run: (...args: unknown[]) => void; cancel: () => void } | null>(null);
   const sourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const sourceCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
@@ -1384,7 +1478,6 @@ export function EditorClient({ project }: { project: Project }) {
     shapes: GraphShapeDrawing[];
     cliparts: GraphClipartImage[];
   } | null>(null);
-  const panelResizeStateRef = useRef<PanelResizeState | null>(null);
   const exportMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const exportMenuPortalRef = useRef<HTMLDivElement | null>(null);
   const workspaceMenuButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -1411,6 +1504,63 @@ export function EditorClient({ project }: { project: Project }) {
     forceNextProcessingRef.current = false;
     setIsDraggingGraph(true);
   }, []);
+
+  useEffect(() => {
+    let restored = createDefaultCommandCanvasLayout();
+    try {
+      restored = deserializeCommandCanvasLayout(window.localStorage.getItem(COMMAND_CANVAS_LAYOUT_STORAGE_KEY));
+    } catch {
+      // Presentation storage can be unavailable in restricted browsing modes.
+    }
+    setCommandCanvasLayout(restored);
+    setSourcePanelCollapsed(restored.collapsed.includes("scene"));
+    setSettingsPanelCollapsed(restored.collapsed.includes("focus"));
+    setCommandCanvasLayoutHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    const syncViewportSize = () => {
+      setCommandCanvasViewportWidth(window.innerWidth);
+      setCommandCanvasViewportHeight(window.innerHeight);
+    };
+    syncViewportSize();
+    window.addEventListener("resize", syncViewportSize);
+    return () => window.removeEventListener("resize", syncViewportSize);
+  }, []);
+
+  useEffect(() => {
+    if (!commandCanvasLayoutHydrated) return;
+    try {
+      window.localStorage.setItem(COMMAND_CANVAS_LAYOUT_STORAGE_KEY, serializeCommandCanvasLayout(commandCanvasLayout));
+    } catch {
+      // The workspace remains fully usable when browser-local storage is unavailable.
+    }
+  }, [commandCanvasLayout, commandCanvasLayoutHydrated]);
+
+  useEffect(() => {
+    if (!commandCanvasLayoutHydrated) return;
+    setCommandCanvasLayout((current) => {
+      const nextCollapsed = COMMAND_CANVAS_POD_IDS.filter((podId) => {
+        if (!ACTIVE_COMMAND_CANVAS_PODS.has(podId)) return current.collapsed.includes(podId);
+        if (podId === "scene") return sourcePanelCollapsed;
+        if (podId === "focus") return settingsPanelCollapsed;
+        return current.collapsed.includes(podId);
+      });
+      if (
+        nextCollapsed.length === current.collapsed.length
+        && nextCollapsed.every((podId, index) => current.collapsed[index] === podId)
+      ) {
+        return current;
+      }
+      return { ...current, collapsed: nextCollapsed };
+    });
+  }, [commandCanvasLayoutHydrated, settingsPanelCollapsed, sourcePanelCollapsed]);
+
+  useEffect(() => {
+    if (!commandPaletteOpen) return;
+    setIsExportMenuOpen(false);
+    setIsWorkspaceMenuOpen(false);
+  }, [commandPaletteOpen]);
 
   useEffect(() => {
     const baseSettings = initialEditorSettings(project);
@@ -1680,6 +1830,7 @@ export function EditorClient({ project }: { project: Project }) {
   }, []);
 
   function defaultFillRegionColor(region: FillRegion, current: GraphSettings = settings) {
+    if (region.defaultColor && isFillColor(region.defaultColor)) return region.defaultColor;
     return region.kind === "source" ? current.outlineColor || current.lineColor : current.fillColor;
   }
 
@@ -1771,10 +1922,6 @@ export function EditorClient({ project }: { project: Project }) {
 
   function shapeSupportsSides(kind: GraphShapeKind) {
     return kind === "square" || kind === "rectangle";
-  }
-
-  function shapeFillMode(shape: GraphShapeDrawing): ShapeFillMode {
-    return isTransparentFillColor(shape.fillColor) ? "outline" : "filled";
   }
 
   function draftShapeDimensionsCells(cellSizeCm = settings.cellSizeCm) {
@@ -2640,41 +2787,12 @@ export function EditorClient({ project }: { project: Project }) {
     }));
   }
 
-  function rotateSourceImage(sourceId: string, direction: -1 | 1) {
-    const source = settingsRef.current.sourceImages.find((image) => image.id === sourceId);
-    if (!source || source.locked) return;
-    updateSourceImage(sourceId, { rotationDegrees: normalizeRotationDegrees(source.rotationDegrees + direction * ROTATION_STEP_DEGREES) });
-  }
-
-  function flipSourceImage(sourceId: string, axis: "x" | "y") {
-    const source = settingsRef.current.sourceImages.find((image) => image.id === sourceId);
-    if (!source || source.locked) return;
-    updateSourceImage(sourceId, axis === "x" ? { flipX: !source.flipX } : { flipY: !source.flipY });
-  }
-
-
   function toggleDrawingLock(type: "cell" | "shape" | "clipart", id: string) {
     setSettingsWithHistory((current) => ({
       ...current,
       cellPaints: type === "cell" ? current.cellPaints.map((cell) => (cell.id === id ? { ...cell, locked: !cell.locked } : cell)) : current.cellPaints,
       graphShapes: type === "shape" ? current.graphShapes.map((shape) => (shape.id === id ? { ...shape, locked: !shape.locked } : shape)) : current.graphShapes,
       clipartImages: type === "clipart" ? current.clipartImages.map((clipart) => (clipart.id === id ? { ...clipart, locked: !clipart.locked } : clipart)) : current.clipartImages,
-    }));
-  }
-
-  function toggleSourceVisibility(sourceId: string) {
-    setSettingsWithHistory((current) => ({
-      ...current,
-      sourceImages: current.sourceImages.map((source) => (source.id === sourceId ? { ...source, visible: !source.visible } : source)),
-    }));
-  }
-
-  function toggleDrawingVisibility(type: "cell" | "shape" | "clipart", id: string) {
-    setSettingsWithHistory((current) => ({
-      ...current,
-      cellPaints: type === "cell" ? current.cellPaints.map((cell) => (cell.id === id ? { ...cell, visible: !cell.visible } : cell)) : current.cellPaints,
-      graphShapes: type === "shape" ? current.graphShapes.map((shape) => (shape.id === id ? { ...shape, visible: !shape.visible } : shape)) : current.graphShapes,
-      clipartImages: type === "clipart" ? current.clipartImages.map((clipart) => (clipart.id === id ? { ...clipart, visible: !clipart.visible } : clipart)) : current.clipartImages,
     }));
   }
 
@@ -2789,52 +2907,6 @@ export function EditorClient({ project }: { project: Project }) {
     setLayerChooser(null);
   }
 
-
-  function beginPanelResize(event: ReactPointerEvent<HTMLElement>, side: "left" | "right") {
-    event.preventDefault();
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const panelElement = event.currentTarget.closest(".editor-side-column") as HTMLElement | null;
-    const renderedWidth = panelElement?.getBoundingClientRect().width;
-    const startWidth = clampSidePanelWidth(
-      renderedWidth && Number.isFinite(renderedWidth)
-        ? renderedWidth
-        : side === "left"
-          ? leftPanelWidth
-          : rightPanelWidth,
-      side,
-    );
-    // Responsive CSS may cap a panel below its stored drag width. Rebase every
-    // gesture on the rendered surface so a later reverse drag responds
-    // immediately instead of traversing an invisible width first.
-    if (side === "left") setLeftPanelWidth(startWidth);
-    else setRightPanelWidth(startWidth);
-    panelResizeStateRef.current = {
-      side,
-      pointerId: event.pointerId,
-      startClientX: event.clientX,
-      startWidth,
-    };
-    setResizingPanelSide(side);
-  }
-
-  function resizePanel(event: ReactPointerEvent<HTMLElement>) {
-    const resizeState = panelResizeStateRef.current;
-    if (!resizeState || resizeState.pointerId !== event.pointerId) return;
-    const delta = event.clientX - resizeState.startClientX;
-    const width = resizeState.side === "left" ? resizeState.startWidth + delta : resizeState.startWidth - delta;
-    if (resizeState.side === "left") setLeftPanelWidth(clampSidePanelWidth(width, "left"));
-    else setRightPanelWidth(clampSidePanelWidth(width, "right"));
-  }
-
-  function endPanelResize(event: ReactPointerEvent<HTMLElement>) {
-    const resizeState = panelResizeStateRef.current;
-    if (!resizeState || resizeState.pointerId !== event.pointerId) return;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    panelResizeStateRef.current = null;
-    setResizingPanelSide(null);
-  }
-
   function updateFillRegionColor(regionId: string, color: string) {
     if (!isFillColor(color)) return;
     setSettingsWithHistory((current) => {
@@ -2872,11 +2944,36 @@ export function EditorClient({ project }: { project: Project }) {
     };
   }
 
+  function sourceLayerHitsAtPoint(graphX: number, graphY: number): LayerHit[] {
+    const current = settingsRef.current;
+    const hits: LayerHit[] = [];
+    const layouts = sourceLayouts(current.sourceImages);
+    const sourceGraphX = graphX - current.imageOffsetX / GRAPH_MAJOR_CELL_PIXELS;
+    const sourceGraphY = graphY - current.imageOffsetY / GRAPH_MAJOR_CELL_PIXELS;
+
+    for (let index = layouts.length - 1; index >= 0; index -= 1) {
+      const layout = layouts[index];
+      if (!layout || layout.source.visible === false) continue;
+      if (sourceGraphX < layout.x || sourceGraphX > layout.x + layout.width || sourceGraphY < layout.y || sourceGraphY > layout.y + layout.height) continue;
+      hits.push({
+        key: `source:${layout.source.id}`,
+        type: "source",
+        id: layout.source.id,
+        name: layout.source.name,
+        detail: "Source image",
+        layout,
+      });
+    }
+    return hits;
+  }
+
   function layerHitsAtPoint(graphX: number, graphY: number): LayerHit[] {
+    const current = settingsRef.current;
+    const point = { x: graphX, y: graphY };
     const hits: LayerHit[] = [];
 
-    for (let index = settings.clipartImages.length - 1; index >= 0; index -= 1) {
-      const clipart = settings.clipartImages[index];
+    for (let index = current.clipartImages.length - 1; index >= 0; index -= 1) {
+      const clipart = current.clipartImages[index];
       if (!clipart || clipart.visible === false) continue;
       const width = Math.max(0.01, Math.abs(clipart.width));
       const height = Math.max(0.01, Math.abs(clipart.height));
@@ -2893,14 +2990,24 @@ export function EditorClient({ project }: { project: Project }) {
       });
     }
 
-    for (let index = settings.graphShapes.length - 1; index >= 0; index -= 1) {
-      const shape = settings.graphShapes[index];
+    for (let index = current.graphShapes.length - 1; index >= 0; index -= 1) {
+      const shape = current.graphShapes[index];
       if (!shape || shape.visible === false) continue;
-      const width = Math.max(0.01, Math.abs(shape.width));
-      const height = Math.max(0.01, Math.abs(shape.height));
-      const left = Math.min(shape.x, shape.x + shape.width);
-      const top = Math.min(shape.y, shape.y + shape.height);
-      if (graphX < left || graphX > left + width || graphY < top || graphY > top + height) continue;
+      const openPathHit =
+        shape.kind === "line" || shape.kind === "arrow"
+          ? measureGeneratedOpenPathHit(shape, point, {
+              cellSizeCm: current.cellSizeCm,
+            })
+          : null;
+      if (shape.kind === "line" || shape.kind === "arrow") {
+        if (!openPathHit) continue;
+      } else {
+        const width = Math.max(0.01, Math.abs(shape.width));
+        const height = Math.max(0.01, Math.abs(shape.height));
+        const left = Math.min(shape.x, shape.x + shape.width);
+        const top = Math.min(shape.y, shape.y + shape.height);
+        if (graphX < left || graphX > left + width || graphY < top || graphY > top + height) continue;
+      }
       hits.push({
         key: drawingLayerKey("shape", shape.id),
         type: "shape",
@@ -2908,26 +3015,11 @@ export function EditorClient({ project }: { project: Project }) {
         name: shape.name,
         detail: `Generated ${GRAPH_SHAPE_KIND_LABELS[shape.kind]?.toLowerCase() ?? "shape"}`,
         shape,
+        openPathHit: openPathHit ?? undefined,
       });
     }
 
-    const layouts = sourceLayouts(settings.sourceImages);
-    const sourceGraphX = graphX - settings.imageOffsetX / GRAPH_MAJOR_CELL_PIXELS;
-    const sourceGraphY = graphY - settings.imageOffsetY / GRAPH_MAJOR_CELL_PIXELS;
-    for (let index = layouts.length - 1; index >= 0; index -= 1) {
-      const layout = layouts[index];
-      if (!layout || layout.source.visible === false) continue;
-      if (sourceGraphX < layout.x || sourceGraphX > layout.x + layout.width || sourceGraphY < layout.y || sourceGraphY > layout.y + layout.height) continue;
-      hits.push({
-        key: `source:${layout.source.id}`,
-        type: "source",
-        id: layout.source.id,
-        name: layout.source.name,
-        detail: "Source image",
-        layout,
-      });
-    }
-
+    hits.push(...sourceLayerHitsAtPoint(graphX, graphY));
     return hits;
   }
 
@@ -2997,6 +3089,7 @@ export function EditorClient({ project }: { project: Project }) {
           strokeColor: draftShapeStrokeColor,
           fillColor,
           strokeWidth: Math.max(1, Math.min(24, Math.round(draftShapeStrokeWidth))),
+          strokeStyle: draftShapeStrokeStyle,
           sides,
           locked: false,
           visible: true,
@@ -3006,7 +3099,55 @@ export function EditorClient({ project }: { project: Project }) {
         },
       ],
     }));
-    selectGeneratedShape(id);
+    // Creating another shape should not move the editor into Selection mode.
+    setLayerChooser(null);
+    setFloatingPalette(null);
+    return id;
+  }
+
+  function addGeneratedShapeInCell(
+    kind: ClosedGeneratedShapeKind,
+    point: { x: number; y: number },
+  ) {
+    const bounds = oneCellBoundsAtGraphPoint(point, {
+      width: settingsRef.current.graphWidth,
+      height: settingsRef.current.graphHeight,
+    });
+    if (!bounds) return null;
+
+    const id = drawingId("shape");
+    const fillColor =
+      draftShapeFillMode === "filled"
+        ? draftShapeFillColor
+        : TRANSPARENT_FILL_COLOR;
+    const sides = shapeSupportsSides(kind)
+      ? [...draftShapeSides]
+      : [...CELL_LINE_SIDE_KEYS];
+
+    setSettingsWithHistory((current) => ({
+      ...current,
+      graphShapes: [
+        ...current.graphShapes,
+        {
+          id,
+          name: `${GRAPH_SHAPE_KIND_LABELS[kind]} ${current.graphShapes.length + 1}`,
+          kind,
+          ...bounds,
+          strokeColor: draftShapeStrokeColor,
+          fillColor,
+          strokeWidth: Math.max(1, Math.min(24, Math.round(draftShapeStrokeWidth))),
+          strokeStyle: "solid",
+          sides,
+          locked: false,
+          visible: true,
+          rotationDegrees: 0,
+          flipX: false,
+          flipY: false,
+        },
+      ],
+    }));
+    // Keep the creation tool active; the new shape is selected only when the
+    // user explicitly chooses it from the canvas or Scene.
     setLayerChooser(null);
     setFloatingPalette(null);
     return id;
@@ -3179,7 +3320,7 @@ export function EditorClient({ project }: { project: Project }) {
   /** Picks the source image under the brush, falling back to the selected source and then the first visible source. */
   function resolveEraseTargetSource(point: { x: number; y: number } | null): GraphSourceImage | null {
     const current = settingsRef.current;
-    const sourceHit = point ? layerHitsAtPoint(point.x, point.y).find((hit) => hit.type === "source") : null;
+    const sourceHit = point ? sourceLayerHitsAtPoint(point.x, point.y)[0] : null;
     if (sourceHit?.type === "source" && !sourceHit.layout.source.locked) return sourceHit.layout.source;
     const selected = selectedSourceId ? current.sourceImages.find((source) => source.id === selectedSourceId && source.visible !== false && !source.locked) : null;
     if (selected) return selected;
@@ -3229,7 +3370,7 @@ export function EditorClient({ project }: { project: Project }) {
     // vanish exactly when the user was lining up a stroke at an image edge.
     // Scale from the layer that would actually be erased, so the ring is a
     // truthful preview; with no target, fall back to unscaled zoom.
-    const sourceHit = layerHitsAtPoint(point.x, point.y).find((hit) => hit.type === "source");
+    const sourceHit = sourceLayerHitsAtPoint(point.x, point.y)[0];
     const scaleSource = sourceHit?.type === "source" ? sourceHit.layout.source : resolveEraseTargetSource(point);
     const details = scaleSource ? placementForSource(scaleSource) : null;
     const scale = details?.bounds.width && details.bounds.height
@@ -3410,92 +3551,92 @@ export function EditorClient({ project }: { project: Project }) {
     });
   }
 
-  function startShapeAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
+  function startLineAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
     const point = graphPointAtPointer(event);
     if (!point) return;
-    const id = drawingId("shape");
-    const cellX = Math.max(0, Math.floor(point.x));
-    const cellY = Math.max(0, Math.floor(point.y));
-    dragState.shapeId = id;
-    dragState.startGraphX = cellX;
-    dragState.startGraphY = cellY;
-    selectGeneratedShape(id);
-    setSettings((current) => {
-      if (!dragState.historyRecorded) {
-        pushUndoSettings(current);
-        dragState.historyRecorded = true;
-      }
-      const next = deriveGraphSettings({
-        ...current,
-        graphShapes: [
-          ...current.graphShapes,
-          {
-            id,
-            name: `${GRAPH_SHAPE_KIND_LABELS[draftShapeKind]} ${current.graphShapes.length + 1}`,
-            kind: draftShapeKind,
-            x: cellX,
-            y: cellY,
-            width: 1,
-            height: 1,
-            strokeColor: current.outlineColor,
-            fillColor: cellPaintFillEnabled ? current.fillColor : TRANSPARENT_FILL_COLOR,
-            strokeWidth: Math.max(1, Math.round(current.imageLineThickness || 3)),
-            sides: [...CELL_LINE_SIDE_KEYS],
-            locked: false,
-            visible: true,
-            rotationDegrees: 0,
-            flipX: false,
-            flipY: false,
-          },
-        ],
-      });
-      settingsRef.current = next;
-      return next;
-    });
+    dragState.startGraphX = point.x;
+    dragState.startGraphY = point.y;
   }
 
-  function updateShapeAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
-    if (!dragState.shapeId || dragState.startGraphX === undefined || dragState.startGraphY === undefined) return;
+  function updateLineAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
+    if (!dragState.moved || dragState.startGraphX === undefined || dragState.startGraphY === undefined) return;
     const point = graphPointAtPointer(event);
     if (!point) return;
-    const startX = dragState.startGraphX;
-    const startY = dragState.startGraphY;
-    const rawWidth = point.x - startX;
-    const rawHeight = point.y - startY;
-    setSettings((current) => {
-      const shape = current.graphShapes.find((item) => item.id === dragState.shapeId);
-      if (!shape) return current;
-      let x = startX;
-      let y = startY;
-      let width = rawWidth;
-      let height = rawHeight;
-      if (shape.kind !== "line" && shape.kind !== "arrow") {
-        x = Math.min(startX, point.x);
-        y = Math.min(startY, point.y);
-        width = Math.max(0.1, Math.abs(rawWidth));
-        height = Math.max(0.1, Math.abs(rawHeight));
-        if (shape.kind === "square" || shape.kind === "circle") {
-          const size = Math.max(width, height);
-          width = size;
-          height = size;
+    const start = { x: dragState.startGraphX, y: dragState.startGraphY };
+    const end = alignLineEndpointToCellAxis(start, point, { bypass: event.altKey });
+    const width = roundCells(end.x - start.x);
+    const height = roundCells(end.y - start.y);
+    if (width === 0 && height === 0) {
+      if (dragState.shapeId) {
+        const shapeId = dragState.shapeId;
+        const current = settingsRef.current;
+        if (current.graphShapes.some((shape) => shape.id === shapeId)) {
+          const next = deriveGraphSettings({
+            ...current,
+            graphShapes: current.graphShapes.filter((shape) => shape.id !== shapeId),
+          });
+          settingsRef.current = next;
+          setSettings(next);
         }
-      } else if (!event.altKey) {
-        // Lines and arrows snap to the dominant axis, so a drag produces a
-        // clean 0deg or 90deg segment instead of a slightly skewed diagonal.
-        // Alt frees the angle, matching the Alt-disables-snapping convention
-        // used when moving layers.
-        if (Math.abs(rawWidth) >= Math.abs(rawHeight)) height = 0;
-        else width = 0;
+        dragState.shapeId = undefined;
+        dragState.historyRecorded = false;
       }
-      const next = deriveGraphSettings({
-        ...current,
-        graphShapes: current.graphShapes.map((item) =>
-          item.id === dragState.shapeId ? { ...item, x, y, width, height } : item,
-        ),
-      });
-      settingsRef.current = next;
-      return next;
-    });
+      return;
+    }
+
+    const current = settingsRef.current;
+    const shapeId = dragState.shapeId ?? drawingId("shape");
+    const existing = current.graphShapes.find((shape) => shape.id === shapeId);
+    const lineKind = draftShapeKind === "arrow" ? "arrow" : "line";
+    let graphShapes: GraphShapeDrawing[];
+
+    if (existing) {
+      if (
+        existing.x === start.x &&
+        existing.y === start.y &&
+        existing.width === width &&
+        existing.height === height
+      ) {
+        return;
+      }
+      graphShapes = current.graphShapes.map((shape) =>
+        shape.id === shapeId
+          ? { ...shape, x: start.x, y: start.y, width, height }
+          : shape,
+      );
+    } else {
+      dragState.shapeId = shapeId;
+      graphShapes = [
+        ...current.graphShapes,
+        {
+          id: shapeId,
+          name: `${GRAPH_SHAPE_KIND_LABELS[lineKind]} ${current.graphShapes.length + 1}`,
+          kind: lineKind,
+          x: start.x,
+          y: start.y,
+          width,
+          height,
+          strokeColor: draftShapeStrokeColor,
+          fillColor: TRANSPARENT_FILL_COLOR,
+          strokeWidth: Math.max(1, Math.min(24, Math.round(draftShapeStrokeWidth))),
+          strokeStyle: draftShapeStrokeStyle,
+          sides: [...CELL_LINE_SIDE_KEYS],
+          locked: false,
+          visible: true,
+          rotationDegrees: 0,
+          flipX: false,
+          flipY: false,
+        },
+      ];
+    }
+
+    if (!dragState.historyRecorded) {
+      pushUndoSettings(current);
+      dragState.historyRecorded = true;
+    }
+    const next = deriveGraphSettings({ ...current, graphShapes });
+    settingsRef.current = next;
+    setSettings(next);
   }
 
   function fillRegionIdAtPointer(event: FillRegionPointerEvent) {
@@ -3532,7 +3673,7 @@ export function EditorClient({ project }: { project: Project }) {
       return false;
     }
     setSelectedFillRegionId(regionId);
-    setInspectorTab("palette");
+    revealCommandCanvasInspector("palette");
     if (copiedFillColor) {
       updateFillRegionColor(regionId, copiedFillColor);
       setCopiedFillColor(null);
@@ -3614,23 +3755,25 @@ export function EditorClient({ project }: { project: Project }) {
       return;
     }
 
-    if (!viewportDrag && canvasTool === "pointer" && drawingTool !== "image" && drawingTool !== "background-remover") {
+    if (!viewportDrag && canvasTool === "pointer" && drawingTool === "shape") {
+      event.preventDefault();
+      if (!armedShapeKind) return;
+      const point = graphPointAtPointer(event);
+      if (point) addGeneratedShapeInCell(armedShapeKind, point);
+      return;
+    }
+
+    if (
+      !viewportDrag &&
+      canvasTool === "pointer" &&
+      (drawingTool === "line" || drawingTool === "image-eraser")
+    ) {
       event.preventDefault();
       const isImageErase = drawingTool === "image-eraser";
-      if (!isImageErase) {
-        setSelectedSourceId(null);
-        setSelectedDrawingLayerId(null);
-        setSelectedLayerKeys([]);
-      }
       setFloatingPalette(null);
       canvas.setPointerCapture(event.pointerId);
       const dragState: DragState = {
-        kind:
-          drawingTool === "cell"
-            ? "cell-paint"
-            : isImageErase
-              ? "image-erase"
-              : "shape-draw",
+        kind: isImageErase ? "image-erase" : "shape-draw",
         pointerId: event.pointerId,
         startClientX: event.clientX,
         startClientY: event.clientY,
@@ -3646,10 +3789,12 @@ export function EditorClient({ project }: { project: Project }) {
         historyRecorded: false,
       };
       dragStateRef.current = dragState;
-      if (drawingTool === "cell") paintCellAtPointer(event, dragState);
-      else if (isImageErase) startImageEraseAtPointer(event, dragState);
-      else startShapeAtPointer(event, dragState);
-      beginGraphInteraction();
+      if (isImageErase) {
+        startImageEraseAtPointer(event, dragState);
+        beginGraphInteraction();
+      } else {
+        startLineAtPointer(event, dragState);
+      }
       return;
     }
 
@@ -3657,9 +3802,24 @@ export function EditorClient({ project }: { project: Project }) {
     const layerHits = point ? layerHitsAtPoint(point.x, point.y) : [];
     const currentSelection = new Set(selectedLayerKeysForAction(settingsRef.current));
     const selectedHit = layerHits.find((hit) => currentSelection.has(hit.key));
-    const activeHit = selectedHit ?? (layerHits.length === 1 ? layerHits[0] : null);
+    const nearestOpenPathHit = layerHits.reduce<LayerHit | null>((closest, hit) => {
+      if (!hit.openPathHit) return closest;
+      if (!closest?.openPathHit) return hit;
+      if (hit.openPathHit.visibleDistanceCells < closest.openPathHit.visibleDistanceCells) return hit;
+      if (
+        hit.openPathHit.visibleDistanceCells === closest.openPathHit.visibleDistanceCells &&
+        hit.openPathHit.centerlineDistanceCells < closest.openPathHit.centerlineDistanceCells
+      ) {
+        return hit;
+      }
+      return closest;
+    }, null);
+    // Open paths are precision targets over broad image rectangles. Selecting
+    // the nearest buffered line directly keeps an underlying selected image
+    // from swallowing the click.
+    const activeHit = nearestOpenPathHit ?? selectedHit ?? (layerHits.length === 1 ? layerHits[0] : null);
 
-    if (!viewportDrag && layerHits.length > 1 && !selectedHit) {
+    if (!viewportDrag && layerHits.length > 1 && !selectedHit && !nearestOpenPathHit) {
       event.preventDefault();
       setLayerChooser({
         x: event.clientX,
@@ -3850,7 +4010,13 @@ export function EditorClient({ project }: { project: Project }) {
   function dragGraph(event: ReactPointerEvent<HTMLElement>) {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== event.pointerId) {
-      if (!showOriginal && event.buttons === 1 && event.currentTarget === previewCanvasRef.current) {
+      if (
+        !showOriginal &&
+        event.buttons === 1 &&
+        event.currentTarget === previewCanvasRef.current &&
+        canvasTool === "pointer" &&
+        drawingTool === "image"
+      ) {
         selectFillRegionFromPointer(event as ReactPointerEvent<HTMLCanvasElement>);
       }
       return;
@@ -3861,7 +4027,12 @@ export function EditorClient({ project }: { project: Project }) {
     const deltaY = ((event.clientY - dragState.startClientY) * dragState.canvasHeight) / dragState.rectHeight;
     const imageOffsetX = clampImageOffset(dragState.startOffsetX + deltaX);
     const imageOffsetY = clampImageOffset(dragState.startOffsetY + deltaY);
-    dragState.moved = dragState.moved || Math.abs(event.clientX - dragState.startClientX) > 3 || Math.abs(event.clientY - dragState.startClientY) > 3;
+    dragState.moved =
+      dragState.moved ||
+      hasIntentionalDrag(
+        { x: dragState.startClientX, y: dragState.startClientY },
+        { x: event.clientX, y: event.clientY },
+      );
     if (dragState.kind === "source" && dragState.sourceId && dragState.moved) {
       const sourceId = dragState.sourceId;
       setDragPreviewSourceId((current) => (current === sourceId ? current : sourceId));
@@ -3897,7 +4068,11 @@ export function EditorClient({ project }: { project: Project }) {
     }
 
     if (dragState.kind === "shape-draw") {
-      updateShapeAtPointer(event, dragState);
+      if (dragState.moved && !dragState.interactionStarted) {
+        dragState.interactionStarted = true;
+        beginGraphInteraction();
+      }
+      updateLineAtPointer(event, dragState);
       return;
     }
 
@@ -4232,10 +4407,19 @@ export function EditorClient({ project }: { project: Project }) {
   function endGraphDrag(event: ReactPointerEvent<HTMLElement>) {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== event.pointerId) return;
+    dragState.moved =
+      dragState.moved ||
+      hasIntentionalDrag(
+        { x: dragState.startClientX, y: dragState.startClientY },
+        { x: event.clientX, y: event.clientY },
+      );
+    if (dragState.kind === "shape-draw" && dragState.moved) {
+      updateLineAtPointer(event, dragState);
+    }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    if (dragState.moved) {
+    if (dragState.moved && (dragState.kind !== "shape-draw" || dragState.historyRecorded)) {
       forceNextProcessingRef.current = true;
     }
     if (dragState.historyRecorded) commitPendingGestureHistory();
@@ -4364,6 +4548,7 @@ export function EditorClient({ project }: { project: Project }) {
     const sources = settingsRef.current.sourceImages;
     let cancelled = false;
     setSourceReady(false);
+    setSourceLoadSettled(false);
     setSourceCropMode(false);
     setSourceCropArea(null);
     setFillRegions([]);
@@ -4379,6 +4564,7 @@ export function EditorClient({ project }: { project: Project }) {
     processedCanvasRef.current = null;
     artworkCanvasRef.current = null;
     setProcessing(false);
+    setFailedProcessingSignature(null);
     revokeObjectUrls(sourcePreviewObjectUrlsRef.current.values());
     sourcePreviewObjectUrlsRef.current = new Map();
     setSourceStatus({});
@@ -4387,6 +4573,7 @@ export function EditorClient({ project }: { project: Project }) {
       const preview = previewCanvasRef.current;
       const context = preview?.getContext("2d");
       if (preview && context) context.clearRect(0, 0, preview.width, preview.height);
+      setSourceLoadSettled(true);
       setNotice(null);
       return () => {
         cancelled = true;
@@ -4448,16 +4635,20 @@ export function EditorClient({ project }: { project: Project }) {
         sourcePreviewObjectUrlsRef.current = previewUrls;
         setSourceStatus(nextStatus);
         setSourceReady(readyCount > 0);
+        setSourceLoadSettled(true);
         setNotice(readyCount ? null : { tone: "error", text: "Unable to load any source images." });
       })
       .catch((error) => {
-        if (!cancelled) setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to load source files." });
+        if (!cancelled) {
+          setSourceLoadSettled(true);
+          setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to load source files." });
+        }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [draftChecked, sourceLoadKey]);
+  }, [draftChecked, project.id, sourceLoadKey]);
 
   function buildWorkingSourceCanvas(source: GraphSourceImage, pristine: HTMLCanvasElement): HTMLCanvasElement {
     const canvas = document.createElement("canvas");
@@ -4567,6 +4758,11 @@ export function EditorClient({ project }: { project: Project }) {
     return derived;
   }
 
+  const currentProcessingSignature = useMemo(
+    () => buildProcessingSignature(settings),
+    [settings],
+  );
+
   useEffect(() => {
     if (!draftChecked) return;
     const currentSettings = settingsRef.current;
@@ -4577,6 +4773,7 @@ export function EditorClient({ project }: { project: Project }) {
     else if (currentSettings.clipartAssets[0]) requiredAssetIds.add(currentSettings.clipartAssets[0].id);
     const assets = currentSettings.clipartAssets.filter((asset) => requiredAssetIds.has(asset.id));
     let cancelled = false;
+    setClipartLoadSettled(false);
     const liveAssetIds = new Set(currentSettings.clipartAssets.map((asset) => asset.id));
     for (const assetId of clipartCanvasesRef.current.keys()) {
       if (!liveAssetIds.has(assetId)) clipartCanvasesRef.current.delete(assetId);
@@ -4589,6 +4786,7 @@ export function EditorClient({ project }: { project: Project }) {
     );
 
     if (!assetsToLoad.length) {
+      setClipartLoadSettled(true);
       if (!currentSettings.clipartAssets.length) {
         setPlacingClipartAssetId(null);
         setSelectedClipartAssetId(null);
@@ -4626,22 +4824,29 @@ export function EditorClient({ project }: { project: Project }) {
           .filter((clipart) => clipart.visible !== false)
           .every((clipart) => canvases.has(clipart.assetId)),
       );
+      setClipartLoadSettled(true);
       setSelectedClipartAssetId((current) =>
         current && currentSettings.clipartAssets.some((asset) => asset.id === current)
           ? current
           : currentSettings.clipartAssets[0]?.id ?? null,
       );
+    }).catch((error) => {
+      if (!cancelled) {
+        setClipartReady(false);
+        setClipartLoadSettled(true);
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to load clipart assets." });
+      }
     });
 
     return () => {
       cancelled = true;
     };
-  }, [clipartLoadKey, clipartUsageKey, draftChecked, selectedClipartAssetId]);
+  }, [clipartLoadKey, clipartUsageKey, draftChecked, project.id, selectedClipartAssetId]);
 
   useEffect(() => {
     if (!draftChecked) return;
-    if (settings.sourceImages.length && !sourceReady) return;
-    if (settings.clipartImages.length && !clipartReady) return;
+    if (settings.sourceImages.length && (!sourceLoadSettled || !sourceReady)) return;
+    if (settings.clipartImages.length && (!clipartLoadSettled || !clipartReady)) return;
     let cancelled = false;
     const controller = new AbortController();
     const dragActive = isDraggingGraph && dragStateRef.current !== null;
@@ -4657,7 +4862,7 @@ export function EditorClient({ project }: { project: Project }) {
       };
     }
 
-    const processingSignature = buildProcessingSignature(settings);
+    const processingSignature = currentProcessingSignature;
 
     if (lastProcessedSignatureRef.current === processingSignature && processedCanvasRef.current) {
       if (!dragActive) forceNextProcessingRef.current = false;
@@ -4684,6 +4889,9 @@ export function EditorClient({ project }: { project: Project }) {
       processingDebounceRef.current = createDebouncedAction(() => undefined, PREVIEW_PROCESSING_DEBOUNCE_MS);
     }
     processingDebounceRef.current.cancel();
+    setFailedProcessingSignature((current) => (
+      current === processingSignature ? null : current
+    ));
     processingDebounceRef.current = createDebouncedAction(() => {
       if (dragActive) {
         lastDragProcessingAtRef.current = performance.now();
@@ -4767,14 +4975,17 @@ export function EditorClient({ project }: { project: Project }) {
       })
         .then((result) => {
           if (cancelled) return;
-          lastProcessedSignatureRef.current = processingSignature;
-          processedRevisionRef.current += 1;
           artworkCanvasRef.current = result.canvas;
           // Rebuild the flattened image (backdrop + grid + artwork) so export/save
           // and the processed-PNG upload keep the exact output they had before the
           // grid became a live SVG overlay. Skip during drag drafts; export/save
           // wait for the settled full render, which flattens.
-          if (!dragActive) processedCanvasRef.current = flattenGraphForOutput(result.canvas, renderSettings);
+          if (!dragActive) {
+            processedCanvasRef.current = flattenGraphForOutput(result.canvas, renderSettings);
+            lastProcessedSignatureRef.current = processingSignature;
+            processedRevisionRef.current += 1;
+            setInitialCanvasReadyProjectId(project.id);
+          }
           fillRegionMapRef.current = result.fillRegionMap;
           fillRegionIdByMapIdRef.current = new Map(result.fillRegions.map((region) => [region.mapId, region.id] as const));
           drawPreview(result.canvas);
@@ -4782,6 +4993,7 @@ export function EditorClient({ project }: { project: Project }) {
           setSelectedFillRegionId((current) => (current && result.fillRegions.some((region) => region.id === current) ? current : null));
           setFloatingPalette((current) => (current && result.fillRegions.some((region) => region.id === current.regionId) ? current : null));
           setPalette(result.palette);
+          setFailedProcessingSignature(null);
           setProcessing(false);
           setDragPreviewSourceId(null);
           finishComposition({
@@ -4796,6 +5008,7 @@ export function EditorClient({ project }: { project: Project }) {
         .catch((error) => {
           if (controller.signal.aborted) return;
           if (!cancelled) {
+            setFailedProcessingSignature(processingSignature);
             setProcessing(false);
             setDragPreviewSourceId(null);
             finishComposition();
@@ -4810,7 +5023,19 @@ export function EditorClient({ project }: { project: Project }) {
       controller.abort();
       processingDebounceRef.current?.cancel();
     };
-  }, [clipartReady, draftChecked, drawPreview, isDraggingGraph, settings, sourceReady, renderKey]);
+  }, [
+    clipartLoadSettled,
+    clipartReady,
+    currentProcessingSignature,
+    draftChecked,
+    drawPreview,
+    isDraggingGraph,
+    project.id,
+    renderKey,
+    settings,
+    sourceLoadSettled,
+    sourceReady,
+  ]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -5390,6 +5615,7 @@ export function EditorClient({ project }: { project: Project }) {
 
   function openSourceCrop(sourceId = cropSource?.id) {
     if (!sourceId) return;
+    setCommandPaletteOpen(false);
     setSelectedSourceId(sourceId);
     setSelectedDrawingLayerId(null);
     setSelectedLayerKeys([sourceLayerKey(sourceId)]);
@@ -5817,17 +6043,111 @@ export function EditorClient({ project }: { project: Project }) {
         return settings.clipartImages.find((clipart) => clipart.id === id)?.visible === false;
       })
     : Boolean(selectedSource?.visible === false || selectedCellLayer?.visible === false || selectedShapeLayer?.visible === false || selectedClipartLayer?.visible === false);
+  const selectedLayerContainsHidden = selectedActionKeys.some((key) => {
+    const { type, id } = parseLayerKey(key);
+    if (type === "source") return settings.sourceImages.find((source) => source.id === id)?.visible === false;
+    if (type === "cell") return settings.cellPaints.find((cell) => cell.id === id)?.visible === false;
+    if (type === "shape") return settings.graphShapes.find((shape) => shape.id === id)?.visible === false;
+    return settings.clipartImages.find((clipart) => clipart.id === id)?.visible === false;
+  });
   const hasSelectedLayer = selectedLayerCount > 0;
   const selectionHasGroup = selectedActionKeys.some((key) => Boolean(layerGroupIdForKey(settings, key)));
   const canGroupSelection = selectedLayerCount > 1;
   const selectedLayerContainsLocked = selectedLayerCount > 0 && layerSelectionContainsLocked(settings, selectedActionKeys);
+  const selectedLayerStateMixed =
+    selectedLayerCount > 1
+    && (
+      (selectedLayerContainsLocked && !selectedLayerLocked)
+      || (selectedLayerContainsHidden && !selectedLayerHidden)
+    );
   const selectedLayerBounds = selectedLayerCount > 1 ? selectionBoundsForOverlay(settings, selectedActionKeys) : null;
   const sourceErrorCount = Object.values(sourceStatus).filter((status) => status.error).length;
   const visibleLayerCount = settings.sourceImages.length + settings.cellPaints.length + settings.graphShapes.length + settings.clipartImages.length;
   const generatedLayerCount = settings.graphShapes.length + settings.clipartImages.length;
-  const canvasUpdatePending = processing || Boolean(dragPreviewSourceId);
-  const canvasUpdateLabel = dragPreviewSourceId ? (isDraggingGraph ? "Positioning layer" : "Finalizing layer") : "Processing graph";
-  const statusLabel = sourceErrorCount ? "Source needs attention" : canvasUpdatePending ? canvasUpdateLabel : sourceReady || !settings.sourceImages.length ? "Ready" : "Loading source files";
+  const projectAssetCount = settings.sourceImages.length + settings.clipartImages.length;
+  const projectAssetsSettled =
+    (!settings.sourceImages.length || sourceLoadSettled)
+    && (!settings.clipartImages.length || clipartLoadSettled);
+  const projectAssetsReady =
+    (!settings.sourceImages.length || (sourceLoadSettled && sourceReady))
+    && (!settings.clipartImages.length || (clipartLoadSettled && clipartReady));
+  const workspaceBootPending = !draftChecked;
+  const projectAssetsPending = draftChecked && !projectAssetsSettled;
+  const projectAssetLoadFailed =
+    draftChecked
+    && projectAssetsSettled
+    && !projectAssetsReady;
+  const initialAssetLoadFailed =
+    !initialCanvasReady
+    && projectAssetLoadFailed;
+  const currentGraphRenderFailed =
+    failedProcessingSignature === currentProcessingSignature;
+  const initialGraphRenderFailed =
+    !initialCanvasReady
+    && currentGraphRenderFailed;
+  const initialCanvasFailed = initialAssetLoadFailed || initialGraphRenderFailed;
+  // This mask is deliberately a one-time bootstrap surface. Once the first
+  // settled graph frame has painted, edits continue in-place without bringing
+  // the project loader back over the working canvas.
+  const canvasBootstrapPending = !initialCanvasReady && !initialCanvasFailed;
+  const canvasLoaderVisible = !initialCanvasReady;
+  const canvasLoaderPhase = initialCanvasFailed
+    ? "error"
+    : workspaceBootPending || projectAssetsPending
+      ? "assets"
+      : "render";
+  const canvasLoaderLabel = workspaceBootPending
+    ? "Preparing project workspace"
+    : initialAssetLoadFailed
+      ? "Unable to load project assets"
+      : initialGraphRenderFailed
+        ? "Unable to render graph"
+        : projectAssetsPending
+          ? `Loading ${projectAssetCount} project asset${projectAssetCount === 1 ? "" : "s"}`
+          : "Rendering graph";
+  const graphFrameOutdated =
+    draftChecked
+    && projectAssetsReady
+    && (
+      lastProcessedSignatureRef.current !== currentProcessingSignature
+      || !processedCanvasRef.current
+    );
+  const graphUpdatePending = graphFrameOutdated && !currentGraphRenderFailed;
+  const canvasUpdatePending =
+    canvasBootstrapPending
+    || projectAssetsPending
+    || graphUpdatePending
+    || processing
+    || Boolean(dragPreviewSourceId);
+  const canvasUpdateLabel = dragPreviewSourceId
+    ? isDraggingGraph
+      ? "Positioning layer"
+      : "Finalizing layer"
+    : workspaceBootPending
+      ? "Preparing project"
+      : projectAssetsPending
+        ? "Loading project assets"
+        : "Processing graph";
+  const statusLabel = initialAssetLoadFailed
+    ? "Project assets unavailable"
+    : initialGraphRenderFailed
+      ? "Graph render failed"
+      : projectAssetLoadFailed
+        ? "Project assets unavailable"
+        : currentGraphRenderFailed
+          ? "Graph update failed"
+          : canvasUpdatePending
+            ? canvasUpdateLabel
+            : sourceErrorCount
+              ? "Source needs attention"
+              : "Ready";
+  const navigatorStatusTone: "attention" | "positive" =
+    initialCanvasFailed
+    || projectAssetLoadFailed
+    || currentGraphRenderFailed
+    || sourceErrorCount > 0
+      ? "attention"
+      : "positive";
   const draftShapePreviewDimensions = draftShapeDimensionsCells();
   const draftClipartPreviewDimensions = draftClipartDimensionsCells(selectedClipartAsset);
   const filteredClipartAssets = useMemo(() => {
@@ -6104,7 +6424,29 @@ export function EditorClient({ project }: { project: Project }) {
 
   function transformSelectedLayers(transform: { type: "flip"; axis: "x" | "y" } | { type: "rotate"; direction: -1 | 1 }) {
     const keys = selectedLayerKeysForAction();
-    if (keys.length < 2) return;
+    if (!keys.length) return;
+    if (keys.length === 1) {
+      const selectedKey = keys[0];
+      setSettingsWithHistory((current) => {
+        if (layerSelectionContainsLocked(current, keys)) return current;
+        return {
+          ...current,
+          sourceImages: current.sourceImages.map((source) =>
+            sourceLayerKey(source.id) === selectedKey ? transformLayerOrientation(source, transform) : source,
+          ),
+          cellPaints: current.cellPaints.map((cell) =>
+            drawingLayerKey("cell", cell.id) === selectedKey ? transformLayerOrientation(cell, transform) : cell,
+          ),
+          graphShapes: current.graphShapes.map((shape) =>
+            drawingLayerKey("shape", shape.id) === selectedKey ? transformLayerOrientation(shape, transform) : shape,
+          ),
+          clipartImages: current.clipartImages.map((clipart) =>
+            drawingLayerKey("clipart", clipart.id) === selectedKey ? transformLayerOrientation(clipart, transform) : clipart,
+          ),
+        };
+      });
+      return;
+    }
     setSettingsWithHistory((current) => {
       if (layerSelectionContainsLocked(current, keys)) return current;
       const starts = layerStartsForSelection(current, keys);
@@ -6277,63 +6619,36 @@ export function EditorClient({ project }: { project: Project }) {
     setSelectedLayerKeys([]);
   }
 
-  function renderLayerActionToolbar() {
+  function renderLayerListActionToolbar() {
     return (
-      <div className="editor-layer-actions" role="toolbar" aria-label="Selected layer actions">
-        <div className="editor-layer-actions__selection">
-          <span className="editor-layer-actions__label">
-            <strong>{selectedLayerCount}</strong> selected
-          </span>
-          <span className="editor-layer-actions__selection-tools" role="group" aria-label="Selection clipboard and grouping">
-            <button type="button" onClick={groupSelectedLayers} disabled={!canGroupSelection} className="editor-layer-action editor-layer-action--group" title="Group selected layers (Ctrl/Cmd+G)" aria-label="Group selected layers">
-              <Group size={14} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={ungroupSelectedLayers} disabled={!selectionHasGroup} className="editor-layer-action editor-layer-action--ungroup" title="Ungroup selected layers (Ctrl/Cmd+Shift+G)" aria-label="Ungroup selected layers">
-              <Ungroup size={14} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={copySelectedLayers} disabled={!hasSelectedLayer} className="editor-layer-action editor-layer-action--copy" title="Copy selected layers (Ctrl/Cmd+C)" aria-label="Copy selected layers">
-              <Copy size={14} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={pasteLayers} disabled={!clipboardCount} className="editor-layer-action editor-layer-action--paste" title={`Paste layers (Ctrl/Cmd+V)${clipboardCount ? ` — ${clipboardCount} copied` : ""}`} aria-label="Paste layers">
-              <Copy size={14} aria-hidden="true" />
-            </button>
-          </span>
-        </div>
-        <div className="editor-layer-actions__tools" role="group" aria-label="Layer operations">
-          <label
-            className={`editor-layer-action editor-layer-action--replace ${!selectedSource || selectedSource.locked || uploadingSources ? "is-disabled" : ""}`}
-            title="Replace selected source"
-            aria-disabled={!selectedSource || selectedSource.locked || uploadingSources}
-          >
-            {replacingSourceId ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />}
-            <span className="sr-only">Replace selected source</span>
-            <input type="file" accept={IMAGE_ACCEPT} disabled={!selectedSource || selectedSource.locked || uploadingSources} aria-label="Replace selected source" className="sr-only" onChange={(event) => {
-              const file = event.target.files?.[0] ?? null;
-              event.target.value = "";
-              if (file && selectedSource) void uploadSourceImages([file], `"${selectedSource.name}" replaced.`, selectedSource.id);
-            }} />
-          </label>
-          <button type="button" onClick={duplicateSelectedLayers} disabled={!hasSelectedLayer || selectedLayerLocked} className="editor-layer-action editor-layer-action--duplicate" title={selectedLayerTitle("Duplicate")} aria-label={selectedLayerTitle("Duplicate")}>
-            <Copy size={15} aria-hidden="true" />
-          </button>
-          <button type="button" onClick={toggleSelectedLayerVisibility} disabled={!hasSelectedLayer} className="editor-layer-action editor-layer-action--visibility" title={selectedLayerTitle(selectedLayerHidden ? "Show" : "Hide")} aria-label={selectedLayerTitle(selectedLayerHidden ? "Show" : "Hide")}>
-            {selectedLayerHidden ? <Eye size={15} aria-hidden="true" /> : <EyeOff size={15} aria-hidden="true" />}
-          </button>
-          <button type="button" onClick={toggleSelectedLayerLock} disabled={!hasSelectedLayer} className="editor-layer-action editor-layer-action--lock" title={selectedLayerTitle(selectedLayerLocked ? "Unlock" : "Lock")} aria-label={selectedLayerTitle(selectedLayerLocked ? "Unlock" : "Lock")}>
-            {selectedLayerLocked ? <Unlock size={15} aria-hidden="true" /> : <Lock size={15} aria-hidden="true" />}
-          </button>
-          <span className="editor-layer-actions__divider" aria-hidden="true" />
-          <button type="button" onClick={() => nudgeSelectedSource(-1, 0)} disabled={!hasSelectedLayer} className="editor-layer-action" title="Nudge selected layers left" aria-label="Nudge left"><ArrowLeft size={14} aria-hidden="true" /></button>
-          <button type="button" onClick={() => nudgeSelectedSource(0, -1)} disabled={!hasSelectedLayer} className="editor-layer-action" title="Nudge selected layers up" aria-label="Nudge up"><ArrowUp size={14} aria-hidden="true" /></button>
-          <button type="button" onClick={() => nudgeSelectedSource(0, 1)} disabled={!hasSelectedLayer} className="editor-layer-action" title="Nudge selected layers down" aria-label="Nudge down"><ArrowDown size={14} aria-hidden="true" /></button>
-          <button type="button" onClick={() => nudgeSelectedSource(1, 0)} disabled={!hasSelectedLayer} className="editor-layer-action" title="Nudge selected layers right" aria-label="Nudge right"><ArrowRight size={14} aria-hidden="true" /></button>
-          <span className="editor-layer-actions__divider" aria-hidden="true" />
-          <button type="button" onClick={() => moveSelectedLayer(-1)} disabled={!selectedLayerCanMove(-1)} className="editor-layer-action editor-layer-action--up" title="Move selected layer up" aria-label="Move selected layer up"><ArrowUp size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => moveSelectedLayer(1)} disabled={!selectedLayerCanMove(1)} className="editor-layer-action editor-layer-action--down" title="Move selected layer down" aria-label="Move selected layer down"><ArrowDown size={15} aria-hidden="true" /></button>
-          <button type="button" onClick={() => deleteSelectedLayer()} disabled={!hasSelectedLayer || selectedLayerLocked} className="editor-layer-action editor-layer-action--delete" title={selectedLayerTitle("Delete")} aria-label={selectedLayerTitle("Delete")}>
-            <Trash2 size={15} aria-hidden="true" />
-          </button>
-        </div>
+      <div className="editor-layer-list-actions" role="toolbar" aria-label="Layer list actions" data-layer-list-actions>
+        <button type="button" onClick={groupSelectedLayers} disabled={!canGroupSelection} className="editor-layer-action editor-layer-action--group" title="Group selected layers (Ctrl/Cmd+G)" aria-label="Group selected layers">
+          <Group size={14} aria-hidden="true" />
+        </button>
+        <button type="button" onClick={ungroupSelectedLayers} disabled={!selectionHasGroup} className="editor-layer-action editor-layer-action--ungroup" title="Ungroup selected layers (Ctrl/Cmd+Shift+G)" aria-label="Ungroup selected layers">
+          <Ungroup size={14} aria-hidden="true" />
+        </button>
+        <label
+          className={`editor-layer-action editor-layer-action--replace ${!selectedSource || selectedSource.locked || uploadingSources ? "is-disabled" : ""}`}
+          title="Replace selected source"
+          aria-disabled={!selectedSource || selectedSource.locked || uploadingSources}
+        >
+          {replacingSourceId ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />}
+          <span className="sr-only">Replace selected source</span>
+          <input type="file" accept={IMAGE_ACCEPT} disabled={!selectedSource || selectedSource.locked || uploadingSources} aria-label="Replace selected source" className="sr-only" onChange={(event) => {
+            const file = event.target.files?.[0] ?? null;
+            event.target.value = "";
+            if (file && selectedSource) void uploadSourceImages([file], `"${selectedSource.name}" replaced.`, selectedSource.id);
+          }} />
+        </label>
+        <button type="button" onClick={toggleSelectedLayerVisibility} disabled={!hasSelectedLayer} className="editor-layer-action editor-layer-action--visibility" title={selectedLayerTitle(selectedLayerHidden ? "Show" : "Hide")} aria-label={selectedLayerTitle(selectedLayerHidden ? "Show" : "Hide")}>
+          {selectedLayerHidden ? <Eye size={15} aria-hidden="true" /> : <EyeOff size={15} aria-hidden="true" />}
+        </button>
+        <button type="button" onClick={() => moveSelectedLayer(-1)} disabled={!selectedLayerCanMove(-1)} className="editor-layer-action editor-layer-action--up" title="Move selected layer up" aria-label="Move selected layer up"><ArrowUp size={15} aria-hidden="true" /></button>
+        <button type="button" onClick={() => moveSelectedLayer(1)} disabled={!selectedLayerCanMove(1)} className="editor-layer-action editor-layer-action--down" title="Move selected layer down" aria-label="Move selected layer down"><ArrowDown size={15} aria-hidden="true" /></button>
+        <button type="button" onClick={() => deleteSelectedLayer()} disabled={!hasSelectedLayer || selectedLayerLocked} className="editor-layer-action editor-layer-action--delete" title={selectedLayerTitle("Delete")} aria-label={selectedLayerTitle("Delete")}>
+          <Trash2 size={15} aria-hidden="true" />
+        </button>
       </div>
     );
   }
@@ -6360,7 +6675,7 @@ export function EditorClient({ project }: { project: Project }) {
   function renderShapeThumbnail(shape: GraphShapeDrawing, className = "h-12 w-12") {
     return (
       <span className={`${className} grid shrink-0 place-items-center rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] p-1`}>
-        <ShapePreviewSvg kind={shape.kind} sides={shape.sides} fillColor={shape.fillColor} strokeColor={shape.strokeColor} strokeWidth={shape.strokeWidth} widthCells={shape.width} heightCells={shape.height} />
+        <ShapePreviewSvg kind={shape.kind} sides={shape.sides} fillColor={shape.fillColor} strokeColor={shape.strokeColor} strokeWidth={shape.strokeWidth} strokeStyle={shape.strokeStyle} widthCells={shape.width} heightCells={shape.height} />
         <span className="sr-only">{GRAPH_SHAPE_KIND_LABELS[shape.kind]}</span>
       </span>
     );
@@ -6404,46 +6719,21 @@ export function EditorClient({ project }: { project: Project }) {
             <NumberField label="Remove sketch lines" value={clipart.vectorizerSketchRemoval ?? DEFAULT_VECTORIZER_SKETCH_REMOVAL} min={MIN_VECTORIZER_SKETCH_REMOVAL} max={MAX_VECTORIZER_SKETCH_REMOVAL} step={1} disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { vectorizerSketchRemoval: Math.round(value) })} />
           </InspectorFieldGrid>
         </InspectorDisclosure>
-        <InspectorMetricGrid label="Clipart placement" className="editor-object-properties__metrics editor-inspector-bounds">
-          <div><dt>Left</dt><dd>{clipart.x}</dd></div>
-          <div><dt>Top</dt><dd>{clipart.y}</dd></div>
-          <div><dt>Right</dt><dd>{drawingRightPadding(clipart)}</dd></div>
-          <div><dt>Bottom</dt><dd>{drawingBottomPadding(clipart)}</dd></div>
-        </InspectorMetricGrid>
       </div>
     );
   }
 
   function renderShapeAdvanced(shape: GraphShapeDrawing) {
-    const fillMode = shapeFillMode(shape);
     const supportsSides = shapeSupportsSides(shape.kind);
+    const openPath = shape.kind === "line" || shape.kind === "arrow";
     return (
       <div className="editor-object-properties">
-        <InspectorFieldGrid className="editor-object-properties__primary">
+        <InspectorFieldGrid columns={1} className="editor-object-properties__primary">
           <label className="editor-inspector-field">
             <span className="editor-inspector-field__label">Shape</span>
             <select value={shape.kind} disabled={shape.locked} onChange={(event) => updateGraphShape(shape.id, { kind: event.target.value as GraphShapeKind })} className="editor-inspector-control">
               {GENERATED_SHAPE_KIND_KEYS.includes(shape.kind as GeneratedShapeKind) ? null : <option value={shape.kind}>Legacy {GRAPH_SHAPE_KIND_LABELS[shape.kind]}</option>}
               {GENERATED_SHAPE_KIND_KEYS.map((kind) => <option key={kind} value={kind}>{GRAPH_SHAPE_KIND_LABELS[kind]}</option>)}
-            </select>
-          </label>
-          <label className="editor-inspector-field">
-            <span className="editor-inspector-field__label">Type</span>
-            <select
-              value={fillMode}
-              disabled={shape.locked}
-              onChange={(event) =>
-                updateGraphShape(
-                  shape.id,
-                  event.target.value === "filled"
-                    ? { fillColor: draftShapeFillColor, sides: [...CELL_LINE_SIDE_KEYS] }
-                    : { fillColor: TRANSPARENT_FILL_COLOR },
-                )
-              }
-              className="editor-inspector-control"
-            >
-              <option value="outline">Outline</option>
-              <option value="filled">Filled</option>
             </select>
           </label>
         </InspectorFieldGrid>
@@ -6453,9 +6743,26 @@ export function EditorClient({ project }: { project: Project }) {
         </InspectorFieldGrid>
         <InspectorFieldGrid>
           <NumberField label="Stroke width" value={shape.strokeWidth} min={1} max={24} disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { strokeWidth: value })} />
-          <ColorPresetField label="Line" value={shape.strokeColor} onChange={(value) => updateGraphShape(shape.id, { strokeColor: value })} />
+          {openPath ? (
+            <label className="editor-inspector-field">
+              <span className="editor-inspector-field__label">Line style</span>
+              <select
+                value={shape.strokeStyle ?? "solid"}
+                disabled={shape.locked}
+                onChange={(event) => updateGraphShape(shape.id, { strokeStyle: event.target.value as GraphGridLineStyle })}
+                className="editor-inspector-control"
+              >
+                {GRAPH_GRID_LINE_STYLE_KEYS.map((style) => (
+                  <option key={style} value={style}>
+                    {style[0].toUpperCase()}{style.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
         </InspectorFieldGrid>
-        {fillMode === "filled" ? <ColorPresetField label="Fill" value={shape.fillColor} onChange={(value) => updateGraphShape(shape.id, { fillColor: value })} allowTransparent /> : null}
+        <ColorPresetField label="Line color" value={shape.strokeColor} onChange={(value) => updateGraphShape(shape.id, { strokeColor: value })} />
+        {openPath ? null : <ColorPresetField label="Shape interior" value={shape.fillColor} onChange={(value) => updateGraphShape(shape.id, { fillColor: value })} allowTransparent />}
         {supportsSides ? (
           <InspectorDisclosure title="Visible sides" summary={`${shape.sides.length} of 4`}>
             <div className="editor-object-properties__sides">
@@ -6476,12 +6783,6 @@ export function EditorClient({ project }: { project: Project }) {
             </div>
           </InspectorDisclosure>
         ) : null}
-        <InspectorMetricGrid label="Shape placement" className="editor-object-properties__metrics editor-inspector-bounds">
-          <div><dt>Left</dt><dd>{shape.x}</dd></div>
-          <div><dt>Top</dt><dd>{shape.y}</dd></div>
-          <div><dt>Right</dt><dd>{drawingRightPadding(shape)}</dd></div>
-          <div><dt>Bottom</dt><dd>{drawingBottomPadding(shape)}</dd></div>
-        </InspectorMetricGrid>
       </div>
     );
   }
@@ -6508,12 +6809,6 @@ export function EditorClient({ project }: { project: Project }) {
           ))}
           </div>
         </InspectorDisclosure>
-        <InspectorMetricGrid label="Cell paint placement" className="editor-object-properties__metrics editor-inspector-bounds">
-          <div><dt>Left</dt><dd>{cell.x}</dd></div>
-          <div><dt>Top</dt><dd>{cell.y}</dd></div>
-          <div><dt>Right</dt><dd>{drawingRightPadding(cell)}</dd></div>
-          <div><dt>Bottom</dt><dd>{drawingBottomPadding(cell)}</dd></div>
-        </InspectorMetricGrid>
       </div>
     );
   }
@@ -6617,9 +6912,9 @@ export function EditorClient({ project }: { project: Project }) {
               </label>
             </div>
           </div>
-          {hasSelectedLayer ? <div className="editor-document-panel__layer-actions shrink-0">{renderLayerActionToolbar()}</div> : null}
           {visibleLayerCount ? (
             <div className="editor-document-panel__layer-list min-h-0 flex-1 overflow-y-auto overscroll-contain scrollbar-thin divide-y divide-[var(--editor-line-soft)]">
+              {renderLayerListActionToolbar()}
               {settings.sourceImages.length > 0 ? (
                 <div className="editor-document-panel__source-layer-list contents">
                   {settings.sourceImages.map((source) => {
@@ -6637,15 +6932,14 @@ export function EditorClient({ project }: { project: Project }) {
                         data-dragging={layerReorderPreview?.type === "source" && layerReorderPreview.draggedId === source.id}
                         data-drop-target={layerReorderPreview?.type === "source" && layerReorderPreview.targetId === source.id && layerReorderPreview.draggedId !== source.id}
                       >
-                        <div className="editor-layer-row__layout grid h-[62px] grid-cols-[20px_26px_44px_minmax(0,1fr)_28px_28px] items-center gap-2 px-3">
+                        <div className="editor-layer-row__layout grid h-[62px] grid-cols-[20px_minmax(0,1fr)_28px_28px] items-center gap-2 px-3">
                           {renderLayerSelectionCheckbox(key, selected, source.name)}
-                          <button type="button" onClick={() => toggleSourceVisibility(source.id)} className={`editor-layer-row__action ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title={hidden ? "Show layer" : "Hide layer"} aria-label={`${hidden ? "Show" : "Hide"} ${source.name}`}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
-                          <button type="button" onClick={(event) => selectSourceLayer(source.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__preview h-11 w-11" aria-label={`Select ${source.name}`}>
-                            {renderSourceThumbnail(source, "h-full w-full")}
-                          </button>
-                          <button type="button" onClick={(event) => selectSourceLayer(source.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__identity min-w-0 text-left" title={source.name}>
-                            <span className="editor-layer-row__name block truncate text-[13px] font-semibold">{source.name}</span>
-                            <span className={`editor-layer-row__meta mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"} <i aria-hidden="true">{"\u00b7"}</i> 100%</span>
+                          <button type="button" onClick={(event) => selectSourceLayer(source.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__select-target" title={source.name} aria-label={`Select ${source.name}`}>
+                            <span className="editor-layer-row__preview">{renderSourceThumbnail(source, "h-full w-full")}</span>
+                            <span className="editor-layer-row__identity min-w-0">
+                              <span className="editor-layer-row__name block truncate text-[13px] font-semibold">{source.name}</span>
+                              <span className={`editor-layer-row__meta mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"} <i aria-hidden="true">{"\u00b7"}</i> 100%</span>
+                            </span>
                           </button>
                           <button type="button" onClick={() => toggleSourceLock(source.id)} className={`editor-layer-row__action ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title={source.locked ? "Unlock layer" : "Lock layer"} aria-label={`${source.locked ? "Unlock" : "Lock"} ${source.name}`}>{source.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
                           <button type="button" draggable onDragStart={handleLayerDragStart("source", source.id)} onDragEnd={handleLayerDragEnd} className={`editor-layer-row__grip cursor-grab active:cursor-grabbing ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title="Drag to reorder" aria-label={`Drag ${source.name} to reorder`}><GripVertical size={16} aria-hidden="true" /></button>
@@ -6687,15 +6981,14 @@ export function EditorClient({ project }: { project: Project }) {
                             data-dragging={layerReorderPreview?.type === "clipart" && layerReorderPreview.draggedId === clipart.id}
                             data-drop-target={layerReorderPreview?.type === "clipart" && layerReorderPreview.targetId === clipart.id && layerReorderPreview.draggedId !== clipart.id}
                           >
-                            <div className="editor-layer-row__layout grid h-[62px] grid-cols-[20px_26px_44px_minmax(0,1fr)_28px_28px] items-center gap-2 px-3">
+                            <div className="editor-layer-row__layout grid h-[62px] grid-cols-[20px_minmax(0,1fr)_28px_28px] items-center gap-2 px-3">
                               {renderLayerSelectionCheckbox(key, selected, clipart.name)}
-                              <button type="button" onClick={() => toggleDrawingVisibility("clipart", clipart.id)} className={`editor-layer-row__action ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title={hidden ? "Show clipart" : "Hide clipart"} aria-label={`${hidden ? "Show" : "Hide"} ${clipart.name}`}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
-                              <button type="button" onClick={(event) => selectClipartLayer(clipart.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__preview h-11 w-11" aria-label={`Select ${clipart.name}`}>
-                                {renderClipartThumbnail(clipart, "h-full w-full")}
-                              </button>
-                              <button type="button" onClick={(event) => selectClipartLayer(clipart.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__identity min-w-0 text-left" title={clipart.name}>
-                                <span className="editor-layer-row__name block truncate text-[13px] font-semibold">{clipart.name}</span>
-                                <span className={`editor-layer-row__meta mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"} <i aria-hidden="true">{"\u00b7"}</i> 100%</span>
+                              <button type="button" onClick={(event) => selectClipartLayer(clipart.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__select-target" title={clipart.name} aria-label={`Select ${clipart.name}`}>
+                                <span className="editor-layer-row__preview">{renderClipartThumbnail(clipart, "h-full w-full")}</span>
+                                <span className="editor-layer-row__identity min-w-0">
+                                  <span className="editor-layer-row__name block truncate text-[13px] font-semibold">{clipart.name}</span>
+                                  <span className={`editor-layer-row__meta mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"} <i aria-hidden="true">{"\u00b7"}</i> 100%</span>
+                                </span>
                               </button>
                               <button type="button" onClick={() => toggleDrawingLock("clipart", clipart.id)} className={`editor-layer-row__action ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title={clipart.locked ? "Unlock clipart" : "Lock clipart"} aria-label={`${clipart.locked ? "Unlock" : "Lock"} ${clipart.name}`}>{clipart.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
                               <button type="button" draggable onDragStart={handleLayerDragStart("clipart", clipart.id)} onDragEnd={handleLayerDragEnd} className={`editor-layer-row__grip cursor-grab active:cursor-grabbing ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title="Drag to reorder" aria-label={`Drag ${clipart.name} to reorder`}><GripVertical size={16} aria-hidden="true" /></button>
@@ -6718,15 +7011,14 @@ export function EditorClient({ project }: { project: Project }) {
                             data-dragging={layerReorderPreview?.type === "shape" && layerReorderPreview.draggedId === shape.id}
                             data-drop-target={layerReorderPreview?.type === "shape" && layerReorderPreview.targetId === shape.id && layerReorderPreview.draggedId !== shape.id}
                           >
-                            <div className="editor-layer-row__layout grid h-[62px] grid-cols-[20px_26px_44px_minmax(0,1fr)_28px_28px] items-center gap-2 px-3">
+                            <div className="editor-layer-row__layout grid h-[62px] grid-cols-[20px_minmax(0,1fr)_28px_28px] items-center gap-2 px-3">
                               {renderLayerSelectionCheckbox(key, selected, shape.name)}
-                              <button type="button" onClick={() => toggleDrawingVisibility("shape", shape.id)} className={`editor-layer-row__action ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title={hidden ? "Show generated image" : "Hide generated image"} aria-label={`${hidden ? "Show" : "Hide"} ${shape.name}`}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
-                              <button type="button" onClick={(event) => selectGeneratedShape(shape.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__preview h-11 w-11" aria-label={`Select ${shape.name}`}>
-                                {renderShapeThumbnail(shape, "h-full w-full")}
-                              </button>
-                              <button type="button" onClick={(event) => selectGeneratedShape(shape.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__identity min-w-0 text-left" title={shape.name}>
-                                <span className="editor-layer-row__name block truncate text-[13px] font-semibold">{shape.name}</span>
-                                <span className={`editor-layer-row__meta mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"} <i aria-hidden="true">{"\u00b7"}</i> 100%</span>
+                              <button type="button" onClick={(event) => selectGeneratedShape(shape.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__select-target" title={shape.name} aria-label={`Select ${shape.name}`}>
+                                <span className="editor-layer-row__preview">{renderShapeThumbnail(shape, "h-full w-full")}</span>
+                                <span className="editor-layer-row__identity min-w-0">
+                                  <span className="editor-layer-row__name block truncate text-[13px] font-semibold">{shape.name}</span>
+                                  <span className={`editor-layer-row__meta mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"} <i aria-hidden="true">{"\u00b7"}</i> 100%</span>
+                                </span>
                               </button>
                               <button type="button" onClick={() => toggleDrawingLock("shape", shape.id)} className={`editor-layer-row__action ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title={shape.locked ? "Unlock generated image" : "Lock generated image"} aria-label={`${shape.locked ? "Unlock" : "Lock"} ${shape.name}`}>{shape.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
                               <button type="button" draggable onDragStart={handleLayerDragStart("shape", shape.id)} onDragEnd={handleLayerDragEnd} className={`editor-layer-row__grip cursor-grab active:cursor-grabbing ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title="Drag to reorder" aria-label={`Drag ${shape.name} to reorder`}><GripVertical size={16} aria-hidden="true" /></button>
@@ -6754,15 +7046,14 @@ export function EditorClient({ project }: { project: Project }) {
                     data-dragging={layerReorderPreview?.type === "cell" && layerReorderPreview.draggedId === cell.id}
                     data-drop-target={layerReorderPreview?.type === "cell" && layerReorderPreview.targetId === cell.id && layerReorderPreview.draggedId !== cell.id}
                   >
-                    <div className="editor-layer-row__layout grid h-[62px] grid-cols-[20px_26px_44px_minmax(0,1fr)_28px_28px] items-center gap-2 px-3">
+                    <div className="editor-layer-row__layout grid h-[62px] grid-cols-[20px_minmax(0,1fr)_28px_28px] items-center gap-2 px-3">
                       {renderLayerSelectionCheckbox(key, selected, cell.name)}
-                      <button type="button" onClick={() => toggleDrawingVisibility("cell", cell.id)} className={`editor-layer-row__action ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title={hidden ? "Show layer" : "Hide layer"} aria-label={`${hidden ? "Show" : "Hide"} ${cell.name}`}>{hidden ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}</button>
-                      <button type="button" onClick={(event) => selectCellLayer(cell.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__preview h-11 w-11" aria-label={`Select ${cell.name}`}>
-                        {renderCellThumbnail(cell, "h-full w-full")}
-                      </button>
-                      <button type="button" onClick={(event) => selectCellLayer(cell.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__identity min-w-0 text-left" title={cell.name}>
-                        <span className="editor-layer-row__name block truncate text-[13px] font-semibold">{cell.name}</span>
-                        <span className={`editor-layer-row__meta mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"} <i aria-hidden="true">{"\u00b7"}</i> 100%</span>
+                      <button type="button" onClick={(event) => selectCellLayer(cell.id, { additive: event.shiftKey || event.ctrlKey || event.metaKey })} className="editor-layer-row__select-target" title={cell.name} aria-label={`Select ${cell.name}`}>
+                        <span className="editor-layer-row__preview">{renderCellThumbnail(cell, "h-full w-full")}</span>
+                        <span className="editor-layer-row__identity min-w-0">
+                          <span className="editor-layer-row__name block truncate text-[13px] font-semibold">{cell.name}</span>
+                          <span className={`editor-layer-row__meta mt-0.5 block text-[12px] ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`}>{hidden ? "Hidden" : "Visible"} <i aria-hidden="true">{"\u00b7"}</i> 100%</span>
+                        </span>
                       </button>
                       <button type="button" onClick={() => toggleDrawingLock("cell", cell.id)} className={`editor-layer-row__action ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title={cell.locked ? "Unlock layer" : "Lock layer"} aria-label={`${cell.locked ? "Unlock" : "Lock"} ${cell.name}`}>{cell.locked ? <Lock size={15} aria-hidden="true" /> : <Unlock size={15} aria-hidden="true" />}</button>
                       <button type="button" draggable onDragStart={handleLayerDragStart("cell", cell.id)} onDragEnd={handleLayerDragEnd} className={`editor-layer-row__grip cursor-grab active:cursor-grabbing ${selected ? "text-[var(--on-brand)]" : "text-[var(--editor-text-dim)]"}`} title="Drag to reorder" aria-label={`Drag ${cell.name} to reorder`}><GripVertical size={16} aria-hidden="true" /></button>
@@ -6930,26 +7221,75 @@ export function EditorClient({ project }: { project: Project }) {
         </section>
 
       </div>
-      <button
-        type="button"
-        aria-label="Resize source panel"
-        title="Resize source panel"
-        onPointerDown={(event) => beginPanelResize(event, "left")}
-        onPointerMove={resizePanel}
-        onPointerUp={endPanelResize}
-        onPointerCancel={endPanelResize}
-        className="editor-panel-resizer editor-panel-resizer--left group absolute inset-y-0 right-0 hidden w-4 cursor-col-resize touch-none place-items-center lg:grid"
-        data-resizing={resizingPanelSide === "left" ? "true" : "false"}
-      >
-        <span
-          className="editor-panel-resizer__grip"
-          aria-hidden="true"
-        >
-          <GripVertical size={12} strokeWidth={2.2} />
-        </span>
-      </button>
     </aside>
   );
+
+  const selectionConsole: SelectionConsoleModel = {
+    kind:
+      selectedLayerCount > 1
+        ? "multi"
+        : selectedSource
+          ? "source"
+          : selectedShapeLayer
+            ? "shape"
+            : selectedClipartLayer
+              ? "clipart"
+              : selectedCellLayer
+                ? "cell"
+                : "none",
+    count: selectedLayerCount,
+    status:
+      selectedLayerStateMixed
+        ? "mixed"
+        : selectedLayerLocked
+          ? "locked"
+          : selectedLayerHidden
+            ? "hidden"
+            : "ready",
+    clipboardCount,
+    actions: {
+      copy: {
+        disabled: !hasSelectedLayer,
+        onAction: copySelectedLayers,
+      },
+      paste: {
+        disabled: !clipboardCount,
+        onAction: pasteLayers,
+      },
+      rotateLeft: {
+        disabled: !hasSelectedLayer || selectedLayerContainsLocked,
+        onAction: () => rotateSelectedLayers(-1),
+      },
+      rotateRight: {
+        disabled: !hasSelectedLayer || selectedLayerContainsLocked,
+        onAction: () => rotateSelectedLayers(1),
+      },
+      flipHorizontal: {
+        disabled: !hasSelectedLayer || selectedLayerContainsLocked,
+        onAction: () => flipSelectedLayers("x"),
+      },
+      flipVertical: {
+        disabled: !hasSelectedLayer || selectedLayerContainsLocked,
+        onAction: () => flipSelectedLayers("y"),
+      },
+      nudgeLeft: {
+        disabled: !hasSelectedLayer || selectedLayerLocked,
+        onAction: () => nudgeSelectedSource(-1, 0),
+      },
+      nudgeUp: {
+        disabled: !hasSelectedLayer || selectedLayerLocked,
+        onAction: () => nudgeSelectedSource(0, -1),
+      },
+      nudgeDown: {
+        disabled: !hasSelectedLayer || selectedLayerLocked,
+        onAction: () => nudgeSelectedSource(0, 1),
+      },
+      nudgeRight: {
+        disabled: !hasSelectedLayer || selectedLayerLocked,
+        onAction: () => nudgeSelectedSource(1, 0),
+      },
+    },
+  };
 
   const imageWidthCm = roundCm(settings.graphWidth * settings.cellSizeCm);
   const imageHeightCm = roundCm(settings.graphHeight * settings.cellSizeCm);
@@ -6991,19 +7331,6 @@ export function EditorClient({ project }: { project: Project }) {
     settings.showPageBreaks,
   ]);
 
-  const desktopGridColumns =
-    sourcePanelCollapsed && settingsPanelCollapsed
-      ? "minmax(0,1fr)"
-      : sourcePanelCollapsed
-        ? `minmax(0,1fr) minmax(${MIN_SIDE_PANEL_WIDTH}px, ${rightPanelWidth}px)`
-        : settingsPanelCollapsed
-          ? `minmax(${MIN_SIDE_PANEL_WIDTH}px, ${leftPanelWidth}px) minmax(0,1fr)`
-          : `minmax(${MIN_SIDE_PANEL_WIDTH}px, ${leftPanelWidth}px) minmax(0,1fr) minmax(${MIN_SIDE_PANEL_WIDTH}px, ${rightPanelWidth}px)`;
-  const editorGridStyle = {
-    "--editor-grid-columns": desktopGridColumns,
-    "--editor-left-panel-width": `${leftPanelWidth}px`,
-    "--editor-right-panel-width": `${rightPanelWidth}px`,
-  } as CSSProperties;
   const floatingFillRegion = floatingPalette ? fillRegionsById.get(floatingPalette.regionId) ?? null : null;
   const floatingFillRegionColor = floatingFillRegion ? currentFillRegionColor(floatingFillRegion) : settings.fillColor;
   const floatingPaletteNode =
@@ -7015,7 +7342,7 @@ export function EditorClient({ project }: { project: Project }) {
         <div className="mb-3 flex items-center justify-between gap-3">
           <span className="inline-flex min-w-0 items-center gap-2 text-xs font-semibold text-[var(--editor-text-dim)]">
             <Pipette size={14} aria-hidden="true" />
-            Fill {floatingFillRegion.id}
+            Region fill
           </span>
           <button
             type="button"
@@ -7139,11 +7466,39 @@ export function EditorClient({ project }: { project: Project }) {
           height: Math.max(1, Math.round(Math.abs(selectedClipartLayer.height) * GRAPH_MAJOR_CELL_PIXELS * zoom)),
         }
       : null;
+  const selectionTransformBox = selectedGroupBox ?? selectedSourceBox ?? selectedShapeBox ?? selectedClipartBox;
+  const selectionTransformStyle = selectionTransformBox
+    ? {
+        left: selectionTransformBox.left + selectionTransformBox.width / 2,
+        top: Math.max(6, selectionTransformBox.top - 46),
+      }
+    : undefined;
+  const selectionTransformLabel =
+    selectedLayerCount > 1
+      ? `${selectedLayerCount} selected layers`
+      : selectedSource?.name
+        ?? selectedShapeLayer?.name
+        ?? selectedClipartLayer?.name
+        ?? selectedCellLayer?.name
+        ?? "Selected artwork";
   const showSelectionResizeHandles = resizeHandleTarget === "selection" || dragStateRef.current?.kind === "resize-selection";
   const showSourceSideResizeHandles = resizeHandleTarget === "source" || dragStateRef.current?.kind === "resize-source";
   const showShapeSideResizeHandles = resizeHandleTarget === "shape" || dragStateRef.current?.kind === "resize-shape";
   const sourceResizeHandleVisible = (_handle: SourceResizeHandle, showSideHandles: boolean) => showSideHandles;
-  const previewCanvasCursor = isDraggingGraph ? "grabbing" : drawingTool === "image-eraser" ? "none" : drawingTool === "lasso" ? "crosshair" : canvasTool === "hand" ? "grab" : canvasTool === "fill" ? "crosshair" : SELECT_POINTER_CURSOR;
+  const previewCanvasCursor =
+    isDraggingGraph
+      ? drawingTool === "line"
+        ? "crosshair"
+        : "grabbing"
+      : drawingTool === "image-eraser"
+        ? "none"
+        : drawingTool === "lasso" || drawingTool === "line" || drawingTool === "shape"
+          ? "crosshair"
+          : canvasTool === "hand"
+            ? "grab"
+            : canvasTool === "fill"
+              ? "crosshair"
+              : SELECT_POINTER_CURSOR;
   const selectedLayerStatusLabel = selectedLayerCount
     ? `${selectedLayerCount} layer${selectedLayerCount === 1 ? "" : "s"} selected`
     : selectedFillRegion
@@ -7153,7 +7508,7 @@ export function EditorClient({ project }: { project: Project }) {
     ? "pan"
     : canvasTool === "fill"
       ? "fill"
-      : drawingTool === "cell"
+      : drawingTool === "line"
         ? "draw"
       : drawingTool === "shape"
           ? "shape"
@@ -7161,10 +7516,14 @@ export function EditorClient({ project }: { project: Project }) {
             ? "background-remover"
             : drawingTool === "image-eraser"
               ? "image-eraser"
+              : drawingTool === "lasso"
+                ? "lasso"
               : "select";
 
   const selectEditorTool = useCallback((tool: EditorToolId) => {
     setMobileTab("canvas");
+    setPlacingGeneratedShape(false);
+    setPlacingClipartAssetId(null);
     if (tool === "pan") {
       setCanvasTool("hand");
       setInspectorTab("source");
@@ -7174,38 +7533,615 @@ export function EditorClient({ project }: { project: Project }) {
       setDrawingTool("image");
       setCanvasTool("fill");
       setInspectorTab("palette");
+      setSettingsPanelCollapsed(false);
       return;
     }
     setCanvasTool("pointer");
     const nextDrawingTool: DrawingTool =
-      tool === "draw" ? "cell" : tool === "shape" ? "shape" : tool === "background-remover" ? "background-remover" : tool === "image-eraser" ? "image-eraser" : "image";
+      tool === "draw"
+        ? "line"
+        : tool === "shape"
+          ? "shape"
+          : tool === "lasso"
+            ? "lasso"
+            : tool === "background-remover"
+              ? "background-remover"
+              : tool === "image-eraser"
+                ? "image-eraser"
+                : "image";
     setDrawingTool(nextDrawingTool);
+    if (nextDrawingTool === "line") {
+      setDraftShapeKind("line");
+      setArmedShapeKind(null);
+      setDrawTab("shape");
+    } else if (nextDrawingTool === "shape") {
+      setArmedShapeKind(null);
+      setDrawTab("shape");
+    } else if (nextDrawingTool === "lasso") {
+      setDrawTab("shape");
+    }
     if (nextDrawingTool !== "image-eraser") setImageEraserCursor(null);
-    // This path never selects the lasso, so any in-progress region is abandoned.
-    setLassoVertices([]);
-    setLassoCursor(null);
-    if (nextDrawingTool === "cell" || nextDrawingTool === "shape") {
+    if (nextDrawingTool !== "lasso") {
+      setLassoVertices([]);
+      setLassoCursor(null);
+    }
+    if (nextDrawingTool === "line" || nextDrawingTool === "shape" || nextDrawingTool === "lasso") {
       setInspectorTab("draw");
     } else {
       setInspectorTab("source");
     }
+    setSettingsPanelCollapsed(false);
   }, []);
 
-  /**
-   * Choosing a kind in the Shape Generator also arms the canvas shape tool, so
-   * picking "Line" and dragging draws a line. Without this the drawing tool
-   * stayed on whatever was active — typically Cell — and the drag painted grid
-   * squares while the panel showed Line as selected.
-   */
+  function setCommandCanvasPodCollapsed(podId: PodId, collapsed: boolean) {
+    if (!ACTIVE_COMMAND_CANVAS_PODS.has(podId)) return;
+    setCommandCanvasLayout((current) => ({
+      ...current,
+      collapsed: COMMAND_CANVAS_POD_IDS.filter((candidate) =>
+        candidate === podId ? collapsed : current.collapsed.includes(candidate),
+      ),
+    }));
+    if (podId === "scene") setSourcePanelCollapsed(collapsed);
+    if (podId === "focus") setSettingsPanelCollapsed(collapsed);
+  }
+
+  function toggleCommandCanvasPod(podId: PodId) {
+    const usesResponsiveSheet =
+      (commandCanvasViewportWidth < 768 && podId === "tools")
+      || (commandCanvasViewportWidth < 1024 && (podId === "scene" || podId === "focus"));
+    if (usesResponsiveSheet) {
+      const targetTab: MobileTab = podId === "tools" ? "tools" : podId === "scene" ? "source" : "controls";
+      if (mobileTab === targetTab) {
+        setMobileTab("canvas");
+        return;
+      }
+      setCommandCanvasPodCollapsed(podId, false);
+      setMobileTab(targetTab);
+      return;
+    }
+    const collapsed =
+      podId === "scene"
+        ? sourcePanelCollapsed
+        : podId === "focus"
+          ? settingsPanelCollapsed
+          : commandCanvasLayoutRef.current.collapsed.includes(podId);
+    setCommandCanvasPodCollapsed(podId, !collapsed);
+  }
+
+  function dockCommandCanvasPod(podId: PodId, dock?: Exclude<PodDock, "floating">) {
+    const defaultDock = createDefaultCommandCanvasLayout().modules[podId].dock as Exclude<PodDock, "floating">;
+    setCommandCanvasLayout((current) => ({
+      ...current,
+      modules: {
+        ...current.modules,
+        [podId]: {
+          dock: dock ?? defaultDock,
+          ...(current.modules[podId].width === undefined ? {} : { width: current.modules[podId].width }),
+          ...(current.modules[podId].height === undefined ? {} : { height: current.modules[podId].height }),
+        },
+      },
+    }));
+    setCommandCanvasPodCollapsed(podId, false);
+  }
+
+  function floatCommandCanvasPod(podId: PodId) {
+    const element = document.querySelector<HTMLElement>(`[data-editor-pod="${podId}"]`);
+    const rect = element?.getBoundingClientRect();
+    const point = rect
+      ? clampCommandCanvasPodPosition(
+          { x: rect.left, y: rect.top },
+          { width: rect.width, height: rect.height },
+          { width: window.innerWidth, height: window.innerHeight },
+          COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
+        )
+      : { x: 24, y: 112 };
+    setCommandCanvasLayout((current) => ({
+      ...current,
+      modules: {
+        ...current.modules,
+        [podId]: {
+          ...current.modules[podId],
+          dock: "floating",
+          x: point.x,
+          y: point.y,
+          ...(rect && current.modules[podId].width === undefined
+            ? { width: quantizeCommandCanvasCoordinate(rect.width) }
+            : {}),
+          ...(rect && current.modules[podId].height === undefined
+            ? { height: quantizeCommandCanvasCoordinate(rect.height) }
+            : {}),
+        },
+      },
+    }));
+    setCommandCanvasPodCollapsed(podId, false);
+  }
+
+  function resetCommandCanvasPod(podId: PodId) {
+    const defaults = createDefaultCommandCanvasLayout();
+    setCommandCanvasLayout((current) => ({
+      ...current,
+      modules: {
+        ...current.modules,
+        [podId]: { ...defaults.modules[podId] },
+      },
+      collapsed: current.collapsed.filter((candidate) => candidate !== podId),
+    }));
+    if (podId === "scene") setSourcePanelCollapsed(false);
+    if (podId === "focus") setSettingsPanelCollapsed(false);
+  }
+
+  function nudgeCommandCanvasPod(podId: PodId, deltaX: number, deltaY: number) {
+    if (window.innerWidth < 1280) return;
+    const element = document.querySelector<HTMLElement>(`[data-editor-pod="${podId}"]`);
+    const rect = element?.getBoundingClientRect();
+    if (!rect) return;
+    const point = placeCommandCanvasPod(
+      { x: rect.left + deltaX, y: rect.top + deltaY },
+      { width: rect.width, height: rect.height },
+      { width: window.innerWidth, height: window.innerHeight },
+      COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
+    );
+    setCommandCanvasLayout((current) => ({
+      ...current,
+      modules: {
+        ...current.modules,
+        [podId]: {
+          ...current.modules[podId],
+          dock: "floating",
+          x: point.x,
+          y: point.y,
+        },
+      },
+    }));
+  }
+
+  function resetCommandCanvasLayout() {
+    setCommandCanvasLayout(createDefaultCommandCanvasLayout());
+    setSourcePanelCollapsed(false);
+    setSettingsPanelCollapsed(false);
+    setMobileTab("canvas");
+    document.querySelectorAll<HTMLElement>("[data-editor-pod]").forEach((element) => {
+      element.removeAttribute("data-dragging");
+      element.removeAttribute("data-resizing");
+      element.style.removeProperty("--cc-live-x");
+      element.style.removeProperty("--cc-live-y");
+      element.style.removeProperty("--cc-live-width");
+      element.style.removeProperty("--cc-live-height");
+    });
+    commandCanvasPodDragRef.current = null;
+    commandCanvasPodResizeRef.current = null;
+    setResizingCommandCanvasPodId(null);
+    clearCommandCanvasDockPreview();
+    setNotice({ tone: "ok", text: "Workspace layout reset." });
+  }
+
+  function commandCanvasPodCollapsed(podId: PodId) {
+    if (commandCanvasViewportWidth < 1024) {
+      if (commandCanvasViewportWidth < 768 && podId === "tools") {
+        return commandCanvasLayout.collapsed.includes(podId) || mobileTab !== "tools";
+      }
+      if (podId === "scene") return sourcePanelCollapsed || mobileTab !== "source";
+      if (podId === "focus") return settingsPanelCollapsed || mobileTab !== "controls";
+      if (podId === "navigator") return commandCanvasLayout.collapsed.includes(podId) || mobileTab !== "view";
+    }
+    if (podId === "scene") return sourcePanelCollapsed;
+    if (podId === "focus") return settingsPanelCollapsed;
+    return commandCanvasLayout.collapsed.includes(podId);
+  }
+
+  function commandCanvasPodStyle(podId: PodId) {
+    const placement = resolveCommandCanvasPodPlacement(commandCanvasLayout, podId, commandCanvasViewportWidth);
+    const minimumSize = COMMAND_CANVAS_POD_MIN_SIZES[podId];
+    const configuredMaximum = COMMAND_CANVAS_POD_MAX_SIZES[podId];
+    const maximumSize = {
+      width: configuredMaximum.width,
+      height: COMMAND_CANVAS_VIEWPORT_HEIGHT_PODS.has(podId)
+        ? Math.max(
+            minimumSize.height,
+            commandCanvasViewportHeight
+              - COMMAND_CANVAS_DESKTOP_SAFE_INSETS.top
+              - COMMAND_CANVAS_DESKTOP_SAFE_INSETS.bottom,
+          )
+        : configuredMaximum.height,
+    };
+    const storedSize = clampCommandCanvasPodSize(
+      {
+        width: placement.width ?? COMMAND_CANVAS_POD_DEFAULT_SIZES[podId].width,
+        height: placement.height ?? COMMAND_CANVAS_POD_DEFAULT_SIZES[podId].height,
+      },
+      minimumSize,
+      maximumSize,
+    );
+    const applyStoredSize = commandCanvasViewportWidth >= 1280 && podId !== "navigator";
+    const floatingPoint =
+      placement.dock === "floating" && placement.x !== undefined && placement.y !== undefined
+        ? clampCommandCanvasPodPosition(
+            { x: placement.x, y: placement.y },
+            storedSize,
+            { width: commandCanvasViewportWidth, height: commandCanvasViewportHeight },
+            COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
+          )
+        : null;
+    return {
+      ...(applyStoredSize && placement.width !== undefined ? { "--cc-pod-width": `${storedSize.width}px` } : {}),
+      ...(applyStoredSize && placement.height !== undefined ? { "--cc-pod-height": `${storedSize.height}px` } : {}),
+      ...(floatingPoint
+        ? {
+            "--cc-pod-x": `${floatingPoint.x}px`,
+            "--cc-pod-y": `${floatingPoint.y}px`,
+          }
+        : {}),
+    } as CSSProperties;
+  }
+
+  function commandCanvasPodResizeEdge(podId: PodId): Extract<CommandCanvasResizeEdge, "bottom-left" | "bottom-right"> {
+    const dock = resolveCommandCanvasPodPlacement(commandCanvasLayout, podId, commandCanvasViewportWidth).dock;
+    return dock === "right-top" || dock === "right-main" ? "bottom-left" : "bottom-right";
+  }
+
+  function commandCanvasResizeMaximum(
+    podId: PodId,
+    rect: Pick<DOMRect, "left" | "right" | "top">,
+    edge: Extract<CommandCanvasResizeEdge, "bottom-left" | "bottom-right">,
+  ) {
+    const insets = COMMAND_CANVAS_DESKTOP_SAFE_INSETS;
+    const availableWidth = edge === "bottom-left"
+      ? rect.right - insets.left
+      : window.innerWidth - insets.right - rect.left;
+    const availableHeight = window.innerHeight - insets.bottom - rect.top;
+    const configuredMaximum = COMMAND_CANVAS_POD_MAX_SIZES[podId];
+    const minimum = COMMAND_CANVAS_POD_MIN_SIZES[podId];
+    return {
+      width: Math.max(minimum.width, Math.min(configuredMaximum.width, availableWidth)),
+      height: Math.max(
+        minimum.height,
+        COMMAND_CANVAS_VIEWPORT_HEIGHT_PODS.has(podId)
+          ? availableHeight
+          : Math.min(configuredMaximum.height, availableHeight),
+      ),
+    };
+  }
+
+  function clearCommandCanvasDockPreview() {
+    const preview = commandCanvasDockPreviewRef.current;
+    if (!preview) return;
+    preview.removeAttribute("data-active-dock");
+    preview.style.removeProperty("--cc-preview-width");
+    preview.style.removeProperty("--cc-preview-height");
+  }
+
+  function beginCommandCanvasPodResize(
+    event: ReactPointerEvent<HTMLButtonElement>,
+    podId: PodId,
+    edge: Extract<CommandCanvasResizeEdge, "bottom-left" | "bottom-right">,
+  ) {
+    if (window.innerWidth < 1280 || event.button !== 0) return;
+    const podElement = event.currentTarget.closest<HTMLElement>("[data-editor-pod]");
+    if (!podElement) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const rect = podElement.getBoundingClientRect();
+    const initialSize = clampCommandCanvasPodSize(
+      { width: rect.width, height: rect.height },
+      COMMAND_CANVAS_POD_MIN_SIZES[podId],
+      commandCanvasResizeMaximum(podId, rect, edge),
+    );
+    commandCanvasPodResizeRef.current = {
+      podId,
+      edge,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startWidth: initialSize.width,
+      startHeight: initialSize.height,
+      element: podElement,
+      size: initialSize,
+    };
+    podElement.dataset.resizing = "true";
+    podElement.style.setProperty("--cc-live-width", `${initialSize.width}px`);
+    podElement.style.setProperty("--cc-live-height", `${initialSize.height}px`);
+    setResizingCommandCanvasPodId(podId);
+  }
+
+  function resizeCommandCanvasPod(event: ReactPointerEvent<HTMLButtonElement>) {
+    const resize = commandCanvasPodResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    const rect = resize.element.getBoundingClientRect();
+    const deltaX = event.clientX - resize.startClientX;
+    const deltaY = event.clientY - resize.startClientY;
+    const size = clampCommandCanvasPodSize(
+      {
+        width: resize.startWidth + (resize.edge === "bottom-left" ? -deltaX : deltaX),
+        height: resize.startHeight + deltaY,
+      },
+      COMMAND_CANVAS_POD_MIN_SIZES[resize.podId],
+      commandCanvasResizeMaximum(resize.podId, rect, resize.edge),
+    );
+    resize.size = size;
+    resize.element.style.setProperty("--cc-live-width", `${size.width}px`);
+    resize.element.style.setProperty("--cc-live-height", `${size.height}px`);
+  }
+
+  function finishCommandCanvasPodResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    const resize = commandCanvasPodResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    const rect = resize.element.getBoundingClientRect();
+    const quantizedSize = clampCommandCanvasPodSize(
+      {
+        width: quantizeCommandCanvasCoordinate(resize.size.width),
+        height: quantizeCommandCanvasCoordinate(resize.size.height),
+      },
+      COMMAND_CANVAS_POD_MIN_SIZES[resize.podId],
+      commandCanvasResizeMaximum(resize.podId, rect, resize.edge),
+    );
+    setCommandCanvasLayout((current) => ({
+      ...current,
+      modules: {
+        ...current.modules,
+        [resize.podId]: {
+          ...current.modules[resize.podId],
+          width: quantizedSize.width,
+          height: quantizedSize.height,
+        },
+      },
+    }));
+    resize.element.removeAttribute("data-resizing");
+    resize.element.style.removeProperty("--cc-live-width");
+    resize.element.style.removeProperty("--cc-live-height");
+    commandCanvasPodResizeRef.current = null;
+    setResizingCommandCanvasPodId(null);
+  }
+
+  function nudgeCommandCanvasPodSize(podId: PodId, deltaWidth: number, deltaHeight: number) {
+    if (window.innerWidth < 1280) return;
+    const element = document.querySelector<HTMLElement>(`[data-editor-pod="${podId}"]`);
+    const rect = element?.getBoundingClientRect();
+    if (!rect) return;
+    const edge = commandCanvasPodResizeEdge(podId);
+    const size = clampCommandCanvasPodSize(
+      { width: rect.width + deltaWidth, height: rect.height + deltaHeight },
+      COMMAND_CANVAS_POD_MIN_SIZES[podId],
+      commandCanvasResizeMaximum(podId, rect, edge),
+    );
+    setCommandCanvasLayout((current) => ({
+      ...current,
+      modules: {
+        ...current.modules,
+        [podId]: {
+          ...current.modules[podId],
+          width: quantizeCommandCanvasCoordinate(size.width),
+          height: quantizeCommandCanvasCoordinate(size.height),
+        },
+      },
+    }));
+  }
+
+  function beginCommandCanvasPodDrag(event: ReactPointerEvent<HTMLElement>, podId: PodId) {
+    if (
+      window.innerWidth < 1280
+      || commandCanvasPodResizeRef.current
+      || event.button !== 0
+      || (event.target as Element).closest("button, input, select, textarea, a")
+    ) return;
+    const podElement = event.currentTarget.closest<HTMLElement>("[data-editor-pod]");
+    if (!podElement) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const rect = podElement.getBoundingClientRect();
+    commandCanvasPodDragRef.current = {
+      podId,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: rect.left,
+      startY: rect.top,
+      width: rect.width,
+      height: rect.height,
+      element: podElement,
+      point: { x: rect.left, y: rect.top },
+      snapDock: null,
+    };
+    podElement.dataset.dragging = "true";
+    podElement.style.setProperty("--cc-live-x", `${rect.left}px`);
+    podElement.style.setProperty("--cc-live-y", `${rect.top}px`);
+    const preview = commandCanvasDockPreviewRef.current;
+    preview?.style.setProperty("--cc-preview-width", `${rect.width}px`);
+    preview?.style.setProperty("--cc-preview-height", `${rect.height}px`);
+  }
+
+  function moveCommandCanvasPod(event: ReactPointerEvent<HTMLElement>) {
+    const drag = commandCanvasPodDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const point = placeCommandCanvasPod(
+      {
+        x: drag.startX + event.clientX - drag.startClientX,
+        y: drag.startY + event.clientY - drag.startClientY,
+      },
+      { width: drag.width, height: drag.height },
+      { width: window.innerWidth, height: window.innerHeight },
+      COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
+    );
+    const targets = Array.from(document.querySelectorAll<HTMLElement>("[data-command-canvas-dock-target]"))
+      .map((element) => {
+        const dock = element.dataset.commandCanvasDockTarget as Exclude<PodDock, "floating"> | undefined;
+        const rect = element.getBoundingClientRect();
+        return dock ? { dock, x: rect.left, y: rect.top } : null;
+      })
+      .filter((target): target is { dock: Exclude<PodDock, "floating">; x: number; y: number } => Boolean(target));
+    const snap = detectCommandCanvasDockSnap(point, targets);
+    drag.point = snap ? { x: snap.x, y: snap.y } : point;
+    drag.snapDock = snap?.dock ?? null;
+    drag.element.style.setProperty("--cc-live-x", `${drag.point.x}px`);
+    drag.element.style.setProperty("--cc-live-y", `${drag.point.y}px`);
+    const preview = commandCanvasDockPreviewRef.current;
+    if (preview) {
+      if (snap) preview.dataset.activeDock = snap.dock;
+      else preview.removeAttribute("data-active-dock");
+    }
+  }
+
+  function endCommandCanvasPodDrag(event: ReactPointerEvent<HTMLElement>) {
+    const drag = commandCanvasPodDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    const placement = drag.snapDock
+      ? { dock: drag.snapDock }
+      : { dock: "floating" as const, x: drag.point.x, y: drag.point.y };
+    setCommandCanvasLayout((current) => {
+      const currentPlacement = current.modules[drag.podId];
+      const width = currentPlacement.width ?? (drag.snapDock ? undefined : drag.width);
+      const height = currentPlacement.height ?? (drag.snapDock ? undefined : drag.height);
+      return {
+        ...current,
+        modules: {
+          ...current.modules,
+          [drag.podId]: {
+            ...placement,
+            ...(width === undefined ? {} : { width }),
+            ...(height === undefined ? {} : { height }),
+          },
+        },
+      };
+    });
+    drag.element.removeAttribute("data-dragging");
+    drag.element.style.removeProperty("--cc-live-x");
+    drag.element.style.removeProperty("--cc-live-y");
+    commandCanvasPodDragRef.current = null;
+    clearCommandCanvasDockPreview();
+  }
+
+  function revealCommandCanvasTools() {
+    setCommandCanvasPodCollapsed("tools", false);
+    if (window.innerWidth < 768) setMobileTab("tools");
+  }
+
+  function revealCommandCanvasScene(tab: EditorLeftPanelTab) {
+    setLeftPanelTab(tab);
+    setSourcePanelCollapsed(false);
+    setCommandCanvasPodCollapsed("scene", false);
+    if (window.innerWidth < 768) setMobileTab("source");
+  }
+
+  function revealCommandCanvasInspector(tab: InspectorTab) {
+    setInspectorTab(tab);
+    setSettingsPanelCollapsed(false);
+    setCommandCanvasPodCollapsed("focus", false);
+    if (window.innerWidth < 768) setMobileTab("controls");
+  }
+
+  function fitCommandCanvasView() {
+    const scroller = canvasScrollRef.current;
+    if (!scroller) {
+      setZoom(1);
+      setCanvasPan({ x: 0, y: 0 });
+      return;
+    }
+    const numberGutter = settings.showNumbers && settings.gridNumberPlacement === "outside" ? 68 : 0;
+    const availableWidth = Math.max(160, scroller.clientWidth - (window.innerWidth >= 1280 ? 780 : 96));
+    const availableHeight = Math.max(160, scroller.clientHeight - 112);
+    const nextZoom = Math.min(
+      availableWidth / Math.max(1, previewCanvasSize.width + numberGutter),
+      availableHeight / Math.max(1, previewCanvasSize.height + numberGutter),
+    );
+    setZoom(Math.max(0.35, Math.min(2.5, Math.round(nextZoom * 100) / 100)));
+    setCanvasPan({ x: 0, y: 0 });
+    requestAnimationFrame(() => {
+      scroller.scrollTo({
+        left: Math.max(0, (scroller.scrollWidth - scroller.clientWidth) / 2),
+        top: Math.max(0, (scroller.scrollHeight - scroller.clientHeight) / 2),
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    });
+  }
+
+  const commandCanvasCommands: CommandCanvasCommand[] = [
+    { id: "tool-select", label: "Select tool", group: "Tools", keywords: ["pointer", "move", "object"], shortcut: "V", run: () => selectEditorTool("select") },
+    { id: "tool-pan", label: "Pan canvas", group: "Tools", keywords: ["hand", "navigate"], shortcut: "H", run: () => selectEditorTool("pan") },
+    { id: "tool-line", label: "Draw Line", group: "Tools", keywords: ["line", "arrow", "stroke", "pencil"], run: () => selectEditorTool("draw") },
+    { id: "tool-shape", label: "Draw Shape", group: "Tools", keywords: ["rectangle", "circle", "oval"], run: () => selectEditorTool("shape") },
+    { id: "create-clear-shapes", label: "Clear generated shapes", group: "Tools", keywords: ["remove", "delete", "all shapes"], disabled: !settings.graphShapes.length, run: clearGraphShapes },
+    { id: "tool-lasso", label: "Lasso artwork", group: "Tools", keywords: ["polygon", "region", "erase"], run: () => selectEditorTool("lasso") },
+    { id: "tool-fill", label: "Fill region", group: "Tools", keywords: ["bucket", "color"], run: () => selectEditorTool("fill") },
+    { id: "tool-background", label: "Remove background", group: "Tools", keywords: ["transparent", "tolerance"], run: () => selectEditorTool("background-remover") },
+    { id: "tool-eraser", label: "Erase image lines", group: "Tools", keywords: ["brush", "restore"], run: () => selectEditorTool("image-eraser") },
+    { id: "panel-tools", label: "Open Tools dock", group: "Panels", keywords: ["toolbar", "palette", "dock"], run: revealCommandCanvasTools },
+    { id: "scene-layers", label: "Open Layers", group: "Panels", keywords: ["scene", "objects"], run: () => revealCommandCanvasScene("layers") },
+    { id: "scene-assets", label: "Open Assets", group: "Panels", keywords: ["sources", "clipart", "uploads"], run: () => revealCommandCanvasScene("library") },
+    { id: "inspector-document", label: "Inspect Document", group: "Panels", keywords: ["canvas", "grid", "print"], run: () => revealCommandCanvasInspector("graph") },
+    { id: "inspector-selection", label: "Inspect Selection", group: "Panels", keywords: ["object", "properties", "trace"], run: () => revealCommandCanvasInspector("source") },
+    { id: "inspector-create", label: "Open Create tools", group: "Panels", keywords: ["shape", "clipart", "cell"], run: () => revealCommandCanvasInspector("draw") },
+    { id: "inspector-color", label: "Open Color controls", group: "Panels", keywords: ["palette", "fill", "outline"], run: () => revealCommandCanvasInspector("palette") },
+    { id: "view-source", label: showOriginal ? "Show processed artwork" : "Show source artwork", group: "View", keywords: ["original", "preview"], run: () => setShowOriginal((value) => !value) },
+    { id: "view-numbers", label: settings.showNumbers ? "Hide graph numbers" : "Show graph numbers", group: "View", keywords: ["grid", "labels"], run: () => updateSetting("showNumbers", !settings.showNumbers) },
+    { id: "view-zoom-in", label: "Zoom in", group: "View", shortcut: "+", run: () => setZoom((value) => Math.min(2.5, value + 0.15)) },
+    { id: "view-zoom-out", label: "Zoom out", group: "View", shortcut: "-", run: () => setZoom((value) => Math.max(0.35, value - 0.15)) },
+    { id: "view-fit", label: "Fit canvas view", group: "View", keywords: ["reset", "center"], run: fitCommandCanvasView },
+    { id: "history-undo", label: "Undo", group: "History", shortcut: "Ctrl Z", run: () => restoreSettingsHistory("undo") },
+    { id: "history-redo", label: "Redo", group: "History", shortcut: "Ctrl Shift Z", run: () => restoreSettingsHistory("redo") },
+    { id: "project-save", label: "Save project", group: "Project", shortcut: "Ctrl S", disabled: isPending || processing || Boolean(dragPreviewSourceId) || !title.trim(), run: () => saveProject() },
+    { id: "export-png", label: "Export PNG", group: "Export", keywords: ["image", "download"], disabled: processing, run: exportPNG },
+    { id: "export-pdf", label: "Export tiled PDF", group: "Export", keywords: ["print", "pages"], disabled: processing, run: exportPDF },
+    { id: "export-json", label: "Export project JSON", group: "Export", keywords: ["settings", "backup"], run: exportJSON },
+    { id: "export-print", label: "Print graph", group: "Export", keywords: ["browser", "paper"], disabled: processing, run: printGraph },
+    { id: "workspace-settings", label: "Open Workspace settings", group: "Workspace", keywords: ["description", "templates"], run: () => setIsWorkspaceMenuOpen(true) },
+    { id: "workspace-theme", label: "Toggle editor theme", group: "Workspace", keywords: ["dark", "light", "appearance"], run: () => document.querySelector<HTMLButtonElement>(".theme-toggle--editor")?.click() },
+    ...EDITOR_TEMPLATE_OPTIONS.map<CommandCanvasCommand>((template) => ({
+      id: `template-${template.id}`,
+      label: `Apply ${template.label} template`,
+      group: "Templates",
+      keywords: ["workspace", "starter"],
+      run: () => applyEditorTemplate(template.id),
+    })),
+    { id: "selection-duplicate", label: "Duplicate selection", group: "Selection", keywords: ["copy", "layer"], disabled: !hasSelectedLayer || selectedLayerLocked, run: duplicateSelectedLayers },
+    { id: "selection-copy", label: "Copy selection", group: "Selection", shortcut: "Ctrl C", disabled: !hasSelectedLayer, run: copySelectedLayers },
+    { id: "selection-paste", label: "Paste copied layers", group: "Selection", shortcut: "Ctrl V", disabled: !clipboardCount, run: pasteLayers },
+    { id: "selection-group", label: "Group selected layers", group: "Selection", shortcut: "Ctrl G", disabled: !canGroupSelection, run: groupSelectedLayers },
+    { id: "selection-ungroup", label: "Ungroup selected layers", group: "Selection", shortcut: "Ctrl Shift G", disabled: !selectionHasGroup, run: ungroupSelectedLayers },
+    { id: "selection-lock", label: selectedLayerLocked ? "Unlock selection" : "Lock selection", group: "Selection", disabled: !hasSelectedLayer, run: toggleSelectedLayerLock },
+    { id: "selection-visibility", label: selectedLayerHidden ? "Show selection" : "Hide selection", group: "Selection", disabled: !hasSelectedLayer, run: toggleSelectedLayerVisibility },
+    { id: "selection-rotate-left", label: "Rotate selection left", group: "Selection", disabled: !hasSelectedLayer || selectedLayerLocked, run: () => rotateSelectedLayers(-1) },
+    { id: "selection-rotate-right", label: "Rotate selection right", group: "Selection", disabled: !hasSelectedLayer || selectedLayerLocked, run: () => rotateSelectedLayers(1) },
+    { id: "selection-flip-horizontal", label: "Flip selection horizontally", group: "Selection", disabled: !hasSelectedLayer || selectedLayerLocked, run: () => flipSelectedLayers("x") },
+    { id: "selection-flip-vertical", label: "Flip selection vertically", group: "Selection", disabled: !hasSelectedLayer || selectedLayerLocked, run: () => flipSelectedLayers("y") },
+    { id: "selection-move-up", label: "Move selected layer up", group: "Selection", keywords: ["order", "forward"], disabled: !selectedLayerCanMove(-1), run: () => moveSelectedLayer(-1) },
+    { id: "selection-move-down", label: "Move selected layer down", group: "Selection", keywords: ["order", "backward"], disabled: !selectedLayerCanMove(1), run: () => moveSelectedLayer(1) },
+    {
+      id: "selection-replace",
+      label: "Replace selected source",
+      group: "Selection",
+      keywords: ["upload", "swap", "image"],
+      disabled: !selectedSource || selectedSource.locked || uploadingSources,
+      run: () => document.querySelector<HTMLInputElement>('input[type="file"][aria-label="Replace selected source"]')?.click(),
+    },
+    { id: "selection-delete", label: "Delete selection", group: "Selection", disabled: !hasSelectedLayer || selectedLayerLocked, run: () => deleteSelectedLayer() },
+    { id: "selection-crop", label: "Crop selected source", group: "Selection", keywords: ["image", "frame"], disabled: !selectedSource || !cropSourcePreviewUrl, run: () => selectedSource && openSourceCrop(selectedSource.id) },
+    { id: "help-shortcuts", label: "Show keyboard shortcuts", group: "Help", shortcut: "?", run: () => setShowShortcutsPanel(true) },
+    { id: "workspace-reset-layout", label: "Reset Workspace Layout", group: "Workspace", keywords: ["pods", "dock", "positions"], run: resetCommandCanvasLayout },
+  ];
+
   function selectDraftShapeKind(kind: GeneratedShapeKind) {
+    setPlacingGeneratedShape(false);
+    setPlacingClipartAssetId(null);
     setDraftShapeKind(kind);
-    selectEditorTool("shape");
+    setCanvasTool("pointer");
+    setDrawTab("shape");
+    setInspectorTab("draw");
+    setSettingsPanelCollapsed(false);
+    if (kind === "line" || kind === "arrow") {
+      setArmedShapeKind(null);
+      setDrawingTool("line");
+      return;
+    }
+    setArmedShapeKind(kind);
+    setDrawingTool("shape");
   }
 
   function updateResizeHandleHover(event: ReactPointerEvent<HTMLElement>) {
     const stage = graphStageRef.current;
     // Resize/crop handles belong to the select tool only. Showing them while
-    // erasing, drawing cells, drawing shapes, or removing a background put
+    // erasing, drawing lines, drawing shapes, or removing a background put
     // crop-looking guides under the pointer in modes where they do nothing.
     const inSelectMode = canvasTool === "pointer" && drawingTool === "image";
     if (!stage || showOriginal || !inSelectMode) {
@@ -7241,24 +8177,18 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   const canvasPanel = (
-    <section className="editor-canvas-panel atelier-canvas-panel relative grid min-h-0 grid-rows-[44px_minmax(0,1fr)_28px]" aria-label="Canvas workspace">
-        <header className="editor-canvas-panel__header flex items-center border-b border-[var(--editor-line)] bg-[var(--editor-panel)] px-4">
-          <h1 className="text-[13px] font-bold uppercase tracking-wide text-[var(--editor-text)]">Canvas</h1>
-        </header>
-
-        <EditorViewControls
-          showOriginal={showOriginal}
-          showNumbers={settings.showNumbers}
-          zoom={zoom}
-          onToggleOriginal={() => setShowOriginal((value) => !value)}
-          onToggleNumbers={() => updateSetting("showNumbers", !settings.showNumbers)}
-          onZoomOut={() => setZoom((value) => Math.max(0.35, value - 0.15))}
-          onZoomIn={() => setZoom((value) => Math.min(2.5, value + 0.15))}
-          onResetView={() => { setZoom(1); setCanvasPan({ x: 0, y: 0 }); }}
-        />
-
+    <section
+      className="editor-canvas-panel atelier-canvas-panel relative min-h-0"
+      aria-label="Canvas workspace"
+      aria-busy={canvasBootstrapPending}
+      data-canvas-loading={canvasBootstrapPending ? "true" : "false"}
+      data-canvas-state={initialCanvasFailed ? "error" : canvasLoaderVisible ? "loading" : "ready"}
+    >
+        <h1 className="sr-only">Canvas</h1>
         <div
           ref={canvasScrollRef}
+          aria-hidden={canvasLoaderVisible ? true : undefined}
+          inert={canvasLoaderVisible ? true : undefined}
           onDragOver={handleGeneratedShapeDragOver}
           onDrop={handleGeneratedShapeDrop}
           onPointerDown={(event) => {
@@ -7312,18 +8242,22 @@ export function EditorClient({ project }: { project: Project }) {
               </div>
             </div>
           ) : null}
-          {drawingTool === "shape" && !showOriginal ? (
+          {(drawingTool === "line" || drawingTool === "shape") && !showOriginal ? (
             <div className="editor-context-toolbar-wrap pointer-events-none sticky top-0 z-30 -mx-8 -mt-8 mb-4 flex justify-center px-8 pt-2">
               <div className="editor-context-toolbar pointer-events-auto">
-                <span className="editor-context-toolbar__title"><SquarePen size={14} aria-hidden="true" />Draw shape</span>
-                {/* Read-only status. The kind is chosen in the Shape Generator
-                    panel; duplicating the picker here is what let the two get
-                    out of sync. */}
-                <span className="editor-context-toolbar__field">
-                  {GRAPH_SHAPE_KIND_LABELS[draftShapeKind]}
+                <span className="editor-context-toolbar__title">
+                  <SquarePen size={14} aria-hidden="true" />
+                  {drawingTool === "line" ? "Draw Line" : "Draw Shape"}
                 </span>
-                {draftShapeKind === "line" || draftShapeKind === "arrow" ? (
-                  <span className="editor-context-toolbar__field">Hold Alt for a free angle</span>
+                <span className="editor-context-toolbar__field">
+                  {drawingTool === "line"
+                    ? GRAPH_SHAPE_KIND_LABELS[draftShapeKind]
+                    : armedShapeKind
+                      ? GRAPH_SHAPE_KIND_LABELS[armedShapeKind]
+                      : "Choose a shape in Focus Console"}
+                </span>
+                {drawingTool === "line" ? (
+                  <span className="editor-context-toolbar__field">±5° alignment · Alt frees angle</span>
                 ) : null}
                 <button type="button" className="editor-context-toolbar__btn editor-context-toolbar__btn--primary" onClick={() => selectEditorTool("select")}>
                   <Check size={13} aria-hidden="true" />Done
@@ -7696,8 +8630,49 @@ export function EditorClient({ project }: { project: Project }) {
                   )}
                 </div>
               ) : null}
+              <CommandCanvasSelectionStrip
+                visible={Boolean(
+                  selectionTransformBox
+                  && hasSelectedLayer
+                  && canvasTool === "pointer"
+                  && drawingTool === "image"
+                  && !isDraggingGraph
+                  && !resizingCommandCanvasPodId,
+                )}
+                selectionLabel={selectionTransformLabel}
+                style={selectionTransformStyle}
+                disabled={selectedLayerContainsLocked}
+                cropAvailable={Boolean(selectedSource && cropSourcePreviewUrl)}
+                onRotateLeft={() => rotateSelectedLayers(-1)}
+                onRotateRight={() => rotateSelectedLayers(1)}
+                onFlipHorizontal={() => flipSelectedLayers("x")}
+                onFlipVertical={() => flipSelectedLayers("y")}
+                onCrop={selectedSource ? () => openSourceCrop(selectedSource.id) : undefined}
+                onDuplicate={duplicateSelectedLayers}
+                extraActions={[
+                  {
+                    id: "selection-visibility",
+                    label: selectedLayerHidden ? "Show selection" : "Hide selection",
+                    icon: selectedLayerHidden ? Eye : EyeOff,
+                    run: toggleSelectedLayerVisibility,
+                  },
+                  {
+                    id: "selection-lock",
+                    label: selectedLayerLocked ? "Unlock selection" : "Lock selection",
+                    icon: selectedLayerLocked ? Unlock : Lock,
+                    run: toggleSelectedLayerLock,
+                  },
+                  {
+                    id: "selection-delete",
+                    label: "Delete selection",
+                    icon: Trash2,
+                    disabled: selectedLayerContainsLocked,
+                    run: () => deleteSelectedLayer(),
+                  },
+                ]}
+              />
               {selectedGroupBox ? (
-                <div className={CANVAS_SELECTION_BOX_CLASS} style={selectedGroupBox}>
+                <div className={CANVAS_SELECTION_BOX_CLASS} style={selectedGroupBox} data-selection-hidden={selectedLayerHidden}>
                   {SOURCE_RESIZE_HANDLES.map((handle) => {
                     const handleVisible = sourceResizeHandleVisible(handle, showSelectionResizeHandles);
                     return (
@@ -7723,6 +8698,7 @@ export function EditorClient({ project }: { project: Project }) {
                 <div
                   className={CANVAS_SELECTION_BOX_CLASS}
                   style={selectedShapeBox}
+                  data-selection-hidden={selectedLayerHidden}
                 >
                   {SOURCE_RESIZE_HANDLES.map((handle) => {
                     const handleVisible = sourceResizeHandleVisible(handle, showShapeSideResizeHandles);
@@ -7749,12 +8725,14 @@ export function EditorClient({ project }: { project: Project }) {
                 <div
                   className={CANVAS_SELECTION_BOX_CLASS}
                   style={selectedClipartBox}
+                  data-selection-hidden={selectedLayerHidden}
                 />
               ) : null}
               {!selectedGroupBox && selectedSourceBox && selectedSourceLayout ? (
                 <div
                   className={CANVAS_SELECTION_BOX_CLASS}
                   style={selectedSourceBox}
+                  data-selection-hidden={selectedLayerHidden}
                 >
                   {SOURCE_RESIZE_HANDLES.map((handle) => {
                     const handleVisible = sourceResizeHandleVisible(handle, showSourceSideResizeHandles);
@@ -7780,6 +8758,11 @@ export function EditorClient({ project }: { project: Project }) {
             </div>
           )}
         </div>
+        <EditorCanvasLoader
+          visible={canvasLoaderVisible}
+          phase={canvasLoaderPhase}
+          label={canvasLoaderLabel}
+        />
         <EditorStatusBar
           status={statusLabel}
           processing={canvasUpdatePending}
@@ -7792,7 +8775,12 @@ export function EditorClient({ project }: { project: Project }) {
   );
 
   return (
-    <div className="editor-dark-shell atelier-editor" data-editor-layout="atelier" data-editor-design="floating-studio">
+    <div
+      className="editor-dark-shell atelier-editor command-canvas"
+      data-editor-layout="atelier"
+      data-editor-design="floating-studio"
+      data-editor-generation="command-canvas"
+    >
       <EditorCommandBar
         title={title}
         onTitleChange={setTitle}
@@ -7801,16 +8789,23 @@ export function EditorClient({ project }: { project: Project }) {
         onSave={() => saveProject()}
         savePending={isPending}
         saveDisabled={isPending || processing || Boolean(dragPreviewSourceId) || !title.trim()}
-        sourcePanelCollapsed={sourcePanelCollapsed}
-        onToggleSourcePanel={() => setSourcePanelCollapsed((value) => !value)}
-        inspectorCollapsed={settingsPanelCollapsed}
-        onToggleInspector={() => setSettingsPanelCollapsed((value) => !value)}
+        sourcePanelCollapsed={commandCanvasPodCollapsed("scene")}
+        onToggleSourcePanel={() => toggleCommandCanvasPod("scene")}
+        inspectorCollapsed={commandCanvasPodCollapsed("focus")}
+        onToggleInspector={() => toggleCommandCanvasPod("focus")}
         onToggleWorkspace={() => setIsWorkspaceMenuOpen((open) => !open)}
         workspaceOpen={isWorkspaceMenuOpen}
         workspaceButtonRef={workspaceMenuButtonRef}
         onToggleExport={() => setIsExportMenuOpen((open) => !open)}
         exportOpen={isExportMenuOpen}
         exportButtonRef={exportMenuButtonRef}
+        onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+      />
+
+      <CommandCanvasCommandPalette
+        open={commandPaletteOpen}
+        onOpenChange={setCommandPaletteOpen}
+        commands={commandCanvasCommands}
       />
 
       {isWorkspaceMenuOpen && workspaceMenuStyle
@@ -7935,31 +8930,145 @@ export function EditorClient({ project }: { project: Project }) {
 
       {mobileTab !== "canvas" ? <button type="button" className="editor-mobile-sheet-backdrop" aria-label="Close panel" onClick={() => setMobileTab("canvas")} /> : null}
       <div
-        className="editor-workspace atelier-editor__workspace"
+        className="editor-workspace atelier-editor__workspace command-canvas__workspace"
         data-document-panel={sourcePanelCollapsed ? "closed" : "open"}
         data-inspector-panel={settingsPanelCollapsed ? "closed" : "open"}
-        style={editorGridStyle}
       >
-        <div className={`editor-side-column editor-side-column--document editor-mobile-sheet editor-mobile-sheet--left ${mobileTab === "source" ? "editor-mobile-sheet--open" : ""} ${sourcePanelCollapsed ? "editor-side-column--collapsed" : ""}`}>{sourcePanel}</div>
-        <div className="editor-canvas-host atelier-editor__canvas-host" data-editor-region="canvas-host">
-          <EditorToolRail activeTool={activeEditorTool} onSelectTool={selectEditorTool} />
+        <div className="editor-canvas-host atelier-editor__canvas-host command-canvas__canvas" data-editor-region="canvas-host">
           {canvasPanel}
         </div>
-          <div className={`editor-side-column editor-side-column--inspector editor-mobile-sheet editor-mobile-sheet--right ${mobileTab === "controls" ? "editor-mobile-sheet--open" : ""} ${settingsPanelCollapsed ? "editor-side-column--collapsed" : ""}`}><InspectorPanel
+
+        <CommandCanvasPod
+          id="tools"
+          title="Tools"
+          eyebrow="Workspace"
+          icon={MousePointer2}
+          meta={<span>{activeEditorTool}</span>}
+          dock={resolveCommandCanvasPodPlacement(commandCanvasLayout, "tools", commandCanvasViewportWidth).dock}
+          collapsed={false}
+          style={commandCanvasPodStyle("tools")}
+          className={`command-canvas__tools editor-mobile-sheet editor-mobile-sheet--tools ${mobileTab === "tools" ? "editor-mobile-sheet--open" : ""}`}
+          onHeaderPointerDown={(event) => beginCommandCanvasPodDrag(event, "tools")}
+          onHeaderPointerMove={moveCommandCanvasPod}
+          onHeaderPointerUp={endCommandCanvasPodDrag}
+          onHeaderPointerCancel={endCommandCanvasPodDrag}
+          onNudge={(deltaX, deltaY) => nudgeCommandCanvasPod("tools", deltaX, deltaY)}
+          resizeEdge={commandCanvasPodResizeEdge("tools")}
+          resizeActive={resizingCommandCanvasPodId === "tools"}
+          onResizePointerDown={(event) => beginCommandCanvasPodResize(event, "tools", commandCanvasPodResizeEdge("tools"))}
+          onResizePointerMove={resizeCommandCanvasPod}
+          onResizePointerUp={finishCommandCanvasPodResize}
+          onResizePointerCancel={finishCommandCanvasPodResize}
+          onResizeNudge={(deltaWidth, deltaHeight) => nudgeCommandCanvasPodSize("tools", deltaWidth, deltaHeight)}
+        >
+          <EditorToolRail activeTool={activeEditorTool} onSelectTool={selectEditorTool} />
+        </CommandCanvasPod>
+
+        <CommandCanvasPod
+          id="scene"
+          title="Scene"
+          eyebrow="Document"
+          icon={Layers3}
+          meta={<span>{visibleLayerCount}</span>}
+          dock={resolveCommandCanvasPodPlacement(commandCanvasLayout, "scene", commandCanvasViewportWidth).dock}
+          collapsed={commandCanvasPodCollapsed("scene")}
+          style={commandCanvasPodStyle("scene")}
+          className={`editor-side-column editor-side-column--document editor-mobile-sheet editor-mobile-sheet--left ${mobileTab === "source" ? "editor-mobile-sheet--open" : ""} ${sourcePanelCollapsed ? "editor-side-column--collapsed" : ""}`}
+          onHeaderPointerDown={(event) => beginCommandCanvasPodDrag(event, "scene")}
+          onHeaderPointerMove={moveCommandCanvasPod}
+          onHeaderPointerUp={endCommandCanvasPodDrag}
+          onHeaderPointerCancel={endCommandCanvasPodDrag}
+          onNudge={(deltaX, deltaY) => nudgeCommandCanvasPod("scene", deltaX, deltaY)}
+          onRequestDock={() => dockCommandCanvasPod("scene")}
+          onRequestFloat={() => floatCommandCanvasPod("scene")}
+          onRequestCollapse={() => toggleCommandCanvasPod("scene")}
+          onRequestReset={() => resetCommandCanvasPod("scene")}
+          resizeEdge={commandCanvasPodResizeEdge("scene")}
+          resizeActive={resizingCommandCanvasPodId === "scene"}
+          onResizePointerDown={(event) => beginCommandCanvasPodResize(event, "scene", commandCanvasPodResizeEdge("scene"))}
+          onResizePointerMove={resizeCommandCanvasPod}
+          onResizePointerUp={finishCommandCanvasPodResize}
+          onResizePointerCancel={finishCommandCanvasPodResize}
+          onResizeNudge={(deltaWidth, deltaHeight) => nudgeCommandCanvasPodSize("scene", deltaWidth, deltaHeight)}
+        >
+          {sourcePanel}
+        </CommandCanvasPod>
+
+        <CommandCanvasPod
+          id="navigator"
+          title="Navigator"
+          eyebrow="View"
+          icon={Maximize2}
+          headerContent={(
+            <EditorNavigatorStatus
+              status={statusLabel}
+              processing={canvasUpdatePending}
+              online={isOnline}
+              tone={navigatorStatusTone}
+            />
+          )}
+          dock="right-top"
+          collapsed={false}
+          className={`editor-mobile-sheet editor-mobile-sheet--view ${mobileTab === "view" ? "editor-mobile-sheet--open" : ""}`}
+        >
+          <CommandCanvasNavigator
+            showOriginal={showOriginal}
+            showNumbers={settings.showNumbers}
+            zoom={zoom}
+            onToggleOriginal={() => setShowOriginal((value) => !value)}
+            onToggleNumbers={() => updateSetting("showNumbers", !settings.showNumbers)}
+            onZoomOut={() => setZoom((value) => Math.max(0.35, value - 0.15))}
+            onZoomIn={() => setZoom((value) => Math.min(2.5, value + 0.15))}
+            onFitView={fitCommandCanvasView}
+          />
+        </CommandCanvasPod>
+
+        <CommandCanvasCompactViewTrigger
+          open={mobileTab === "view"}
+          onClick={() => {
+            if (mobileTab === "view") setMobileTab("canvas");
+            else {
+              setMobileTab("view");
+            }
+          }}
+        />
+
+        <CommandCanvasPod
+          id="focus"
+          title="Focus Console"
+          eyebrow="Inspector"
+          icon={Settings2}
+          meta={<span>{inspectorTab === "graph" ? "Document" : inspectorTab === "source" ? "Selection" : inspectorTab === "draw" ? "Create" : "Color"}</span>}
+          dock={resolveCommandCanvasPodPlacement(commandCanvasLayout, "focus", commandCanvasViewportWidth).dock}
+          collapsed={commandCanvasPodCollapsed("focus")}
+          style={commandCanvasPodStyle("focus")}
+          className={`editor-side-column editor-side-column--inspector editor-mobile-sheet editor-mobile-sheet--right ${mobileTab === "controls" ? "editor-mobile-sheet--open" : ""} ${settingsPanelCollapsed ? "editor-side-column--collapsed" : ""}`}
+          onHeaderPointerDown={(event) => beginCommandCanvasPodDrag(event, "focus")}
+          onHeaderPointerMove={moveCommandCanvasPod}
+          onHeaderPointerUp={endCommandCanvasPodDrag}
+          onHeaderPointerCancel={endCommandCanvasPodDrag}
+          onNudge={(deltaX, deltaY) => nudgeCommandCanvasPod("focus", deltaX, deltaY)}
+          onRequestDock={() => dockCommandCanvasPod("focus")}
+          onRequestFloat={() => floatCommandCanvasPod("focus")}
+          onRequestCollapse={() => toggleCommandCanvasPod("focus")}
+          onRequestReset={() => resetCommandCanvasPod("focus")}
+          resizeEdge={commandCanvasPodResizeEdge("focus")}
+          resizeActive={resizingCommandCanvasPodId === "focus"}
+          onResizePointerDown={(event) => beginCommandCanvasPodResize(event, "focus", commandCanvasPodResizeEdge("focus"))}
+          onResizePointerMove={resizeCommandCanvasPod}
+          onResizePointerUp={finishCommandCanvasPodResize}
+          onResizePointerCancel={finishCommandCanvasPodResize}
+          onResizeNudge={(deltaWidth, deltaHeight) => nudgeCommandCanvasPodSize("focus", deltaWidth, deltaHeight)}
+        >
+          <InspectorPanel
+            selectionConsole={selectionConsole}
             settings={settings}
             palette={palette}
-            sourceStatus={sourceStatus}
             inspectorTab={inspectorTab}
             setInspectorTab={setInspectorTab}
             drawTab={drawTab}
             setDrawTab={setDrawTab}
             drawingTool={drawingTool}
-            setDrawingTool={(tool) => {
-              setDrawingTool(tool);
-              setCanvasTool("pointer");
-              if (tool !== "image-eraser") setImageEraserCursor(null);
-              setInspectorTab(tool === "cell" || tool === "shape" || tool === "lasso" ? "draw" : "source");
-            }}
             collapsedSections={collapsedSections}
             toggleSection={toggleSection}
             selectedSource={selectedSource}
@@ -7976,38 +9085,25 @@ export function EditorClient({ project }: { project: Project }) {
             setClipartSearch={setClipartSearch}
             setSelectedClipartAssetId={setSelectedClipartAssetId}
             placingClipartAssetId={placingClipartAssetId}
-            placingGeneratedShape={placingGeneratedShape}
             selectedLayerCount={selectedLayerCount}
             selectedLayerBounds={selectedLayerBounds ? { width: selectedLayerBounds.width, height: selectedLayerBounds.height } : null}
             selectedLayerLocked={selectedLayerLocked}
             selectedLayerResizeDisabled={selectedLayerContainsLocked}
             selectedLayerHidden={selectedLayerHidden}
-            deleteSelectedLayer={() => deleteSelectedLayer()}
-            toggleSelectedLayerLock={toggleSelectedLayerLock}
-            toggleSelectedLayerVisibility={toggleSelectedLayerVisibility}
-            duplicateSelectedLayers={duplicateSelectedLayers}
-            nudgeSelectedLayer={nudgeSelectedSource}
             resizeSelectedLayerBounds={resizeSelectedLayerBounds}
-            rotateSelectedLayers={rotateSelectedLayers}
-            flipSelectedLayers={flipSelectedLayers}
             draftShapeKind={draftShapeKind}
-            draftShapeWidthCm={draftShapeWidthCm}
-            draftShapeHeightCm={draftShapeHeightCm}
+            armedShapeKind={armedShapeKind}
             draftShapeFillMode={draftShapeFillMode}
-            draftShapeSides={draftShapeSides}
             draftShapeStrokeWidth={draftShapeStrokeWidth}
             draftShapeStrokeColor={draftShapeStrokeColor}
+            draftShapeStrokeStyle={draftShapeStrokeStyle}
             draftShapeFillColor={draftShapeFillColor}
-            draftShapePreviewDimensions={draftShapePreviewDimensions}
             setDraftShapeKind={selectDraftShapeKind}
-            setDraftShapeWidthCm={setDraftShapeWidthCm}
-            setDraftShapeHeightCm={setDraftShapeHeightCm}
             setDraftShapeFillMode={setDraftShapeFillMode}
-            setDraftShapeSide={setDraftShapeSide}
             setDraftShapeStrokeWidth={setDraftShapeStrokeWidth}
             setDraftShapeStrokeColor={(value) => setDraftShapeStrokeColor(normalizeCanvasColor(value))}
+            setDraftShapeStrokeStyle={setDraftShapeStrokeStyle}
             setDraftShapeFillColor={(value) => setDraftShapeFillColor(normalizeCanvasFillColor(value))}
-            setPlacingGeneratedShape={setPlacingGeneratedShape}
             setPlacingClipartAssetId={setPlacingClipartAssetId}
             draftClipartWidthCm={draftClipartWidthCm}
             draftClipartHeightCm={draftClipartHeightCm}
@@ -8018,9 +9114,7 @@ export function EditorClient({ project }: { project: Project }) {
             setDraftClipartHeightCm={setDraftClipartHeightCm}
             setDraftClipartStrokeColor={(value) => setDraftClipartStrokeColor(normalizeCanvasColor(value))}
             setDraftClipartFillColor={(value) => setDraftClipartFillColor(normalizeCanvasFillColor(value))}
-            handleGeneratedShapeDragStart={handleGeneratedShapeDragStart}
             handleClipartDragStart={handleClipartDragStart}
-            clearGraphShapes={clearGraphShapes}
             uploadClipartAssets={uploadClipartAssets}
             deleteClipartAsset={deleteClipartAsset}
             setGeneratedImagesCollapsed={setGeneratedImagesCollapsed}
@@ -8031,14 +9125,10 @@ export function EditorClient({ project }: { project: Project }) {
             applySourceImagePropertiesToAll={applySourceImagePropertiesToAll}
             updateSourceImagePhysicalWidthCm={updateSourceImagePhysicalWidthCm}
             updateSourceImagePhysicalHeight={updateSourceImagePhysicalHeight}
-            rotateSourceImage={rotateSourceImage}
-            flipSourceImage={flipSourceImage}
             sourcePhysicalWidthCm={sourcePhysicalWidthCm}
             sourcePhysicalHeight={sourcePhysicalHeight}
             sourceRightPadding={sourceRightPadding}
             sourceBottomPadding={sourceBottomPadding}
-            toggleSourceLock={toggleSourceLock}
-            toggleSourceVisibility={toggleSourceVisibility}
             updateSetting={updateSetting}
             updateMeasurementUnit={updateMeasurementUnit}
             updateImageWidthCm={updateImageWidthCm}
@@ -8058,34 +9148,73 @@ export function EditorClient({ project }: { project: Project }) {
             printHeightCm={printHeightCm}
             roundMeasure={roundMeasure}
             cmToUnit={cmToUnit}
+            unitToCm={unitToCm}
             clipartAssetAspect={clipartAssetAspect}
-            beginPanelResize={beginPanelResize}
-            resizePanel={resizePanel}
-            endPanelResize={endPanelResize}
-            resizingPanelSide={resizingPanelSide}
-          /></div>
+          />
+        </CommandCanvasPod>
+
+        <div className="command-canvas__dock-target" data-command-canvas-dock-target="tool-spine" aria-hidden="true" />
+        <div className="command-canvas__dock-target" data-command-canvas-dock-target="left-main" aria-hidden="true" />
+        <div className="command-canvas__dock-target" data-command-canvas-dock-target="left-lower" aria-hidden="true" />
+        <div className="command-canvas__dock-target" data-command-canvas-dock-target="right-top" aria-hidden="true" />
+        <div className="command-canvas__dock-target" data-command-canvas-dock-target="right-main" aria-hidden="true" />
+        <div ref={commandCanvasDockPreviewRef} className="command-canvas__dock-preview" aria-hidden="true" />
       </div>
 
+      <section
+        className={`editor-mobile-export-sheet editor-mobile-sheet ${mobileTab === "export" ? "editor-mobile-sheet--open" : ""}`}
+        aria-label="Export formats"
+        aria-hidden={mobileTab !== "export"}
+      >
+        <header>
+          <div>
+            <span>Output</span>
+            <h2>Export graph</h2>
+          </div>
+          <button type="button" onClick={() => setMobileTab("canvas")} aria-label="Close export formats"><X size={17} aria-hidden="true" /></button>
+        </header>
+        <div>
+          <button type="button" onClick={() => { setMobileTab("canvas"); exportPNG(); }} disabled={processing}><ImageDown size={18} aria-hidden="true" /><span><strong>PNG image</strong><small>Flattened graph artwork</small></span></button>
+          <button type="button" onClick={() => { setMobileTab("canvas"); exportPDF(); }} disabled={processing}><FileText size={18} aria-hidden="true" /><span><strong>Tiled PDF</strong><small>Print-ready pages</small></span></button>
+          <button type="button" onClick={() => { setMobileTab("canvas"); exportJSON(); }}><FileJson size={18} aria-hidden="true" /><span><strong>Project JSON</strong><small>Portable settings backup</small></span></button>
+          <button type="button" onClick={() => { setMobileTab("canvas"); printGraph(); }} disabled={processing}><Printer size={18} aria-hidden="true" /><span><strong>Print</strong><small>Open browser print view</small></span></button>
+        </div>
+      </section>
+
       <nav className="editor-mobile-dock atelier-editor__mobile-dock" aria-label="Mobile editor controls">
-        <button type="button" onClick={() => setMobileTab((tab) => tab === "source" ? "canvas" : "source")} className={mobileTab === "source" ? "is-active" : ""}>
+        <button type="button" onClick={() => {
+          if (mobileTab === "source") setMobileTab("canvas");
+          else revealCommandCanvasScene(leftPanelTab);
+        }} className={mobileTab === "source" ? "is-active" : ""}>
           <Layers3 size={19} aria-hidden="true" />
           Layers
         </button>
-        <button type="button" onClick={() => selectEditorTool("select")} className={mobileTab === "canvas" && activeEditorTool === "select" ? "is-active" : ""}>
-          <SelectPointerIcon size={19} aria-hidden="true" />
-          Select
+        <button type="button" onClick={() => {
+          if (mobileTab === "tools") setMobileTab("canvas");
+          else revealCommandCanvasTools();
+        }} className={mobileTab === "tools" ? "is-active" : ""}>
+          <Scissors size={19} aria-hidden="true" />
+          Tools
         </button>
-        <button type="button" onClick={() => selectEditorTool("draw")} className={mobileTab === "canvas" && activeEditorTool === "draw" ? "is-active" : ""}>
-          <SquarePen size={19} aria-hidden="true" />
-          Draw
+        <button type="button" onClick={() => {
+          if (mobileTab === "view") setMobileTab("canvas");
+          else {
+            setMobileTab("view");
+          }
+        }} className={mobileTab === "view" ? "is-active" : ""}>
+          <Maximize2 size={19} aria-hidden="true" />
+          Canvas
         </button>
-        <button type="button" onClick={() => selectEditorTool("pan")} className={mobileTab === "canvas" && activeEditorTool === "pan" ? "is-active" : ""}>
-          <Hand size={19} aria-hidden="true" />
-          Pan
-        </button>
-        <button type="button" onClick={() => setMobileTab((tab) => tab === "controls" ? "canvas" : "controls")} className={mobileTab === "controls" ? "is-active" : ""}>
+        <button type="button" onClick={() => {
+          if (mobileTab === "controls") setMobileTab("canvas");
+          else revealCommandCanvasInspector(inspectorTab);
+        }} className={mobileTab === "controls" ? "is-active" : ""}>
           <Settings2 size={19} aria-hidden="true" />
           Properties
+        </button>
+        <button type="button" onClick={() => setMobileTab((tab) => tab === "export" ? "canvas" : "export")} className={mobileTab === "export" ? "is-active" : ""}>
+          <ImageDown size={19} aria-hidden="true" />
+          Export
         </button>
       </nav>
       {floatingPaletteNode}

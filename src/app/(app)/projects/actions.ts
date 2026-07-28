@@ -124,6 +124,7 @@ const graphShapeSchema = z.object({
   strokeColor: hexSchema,
   fillColor: fillColorSchema,
   strokeWidth: z.number().int().min(1).max(24),
+  strokeStyle: z.enum(GRAPH_GRID_LINE_STYLE_KEYS).optional(),
   sides: z.array(cellLineSideSchema).max(4),
   locked: z.boolean(),
   visible: z.boolean(),

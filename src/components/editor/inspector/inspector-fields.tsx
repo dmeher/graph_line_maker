@@ -11,6 +11,7 @@ import {
   DEFAULT_OUTLINE_COLOR,
   PRESET_GRAPH_COLORS,
   TRANSPARENT_FILL_COLOR,
+  type GraphGridLineStyle,
   isTransparentFillColor,
   normalizeCanvasColor,
   normalizeCanvasFillColor,
@@ -301,6 +302,7 @@ export const ShapePreviewSvg = memo(function ShapePreviewSvg({
   fillColor,
   strokeColor,
   strokeWidth,
+  strokeStyle = "solid",
   widthCells,
   heightCells,
   className = "h-full w-full",
@@ -310,6 +312,7 @@ export const ShapePreviewSvg = memo(function ShapePreviewSvg({
   fillColor: string;
   strokeColor: string;
   strokeWidth: number;
+  strokeStyle?: GraphGridLineStyle;
   widthCells?: number;
   heightCells?: number;
   className?: string;
@@ -321,6 +324,12 @@ export const ShapePreviewSvg = memo(function ShapePreviewSvg({
   const stroke = normalizeCanvasColor(strokeColor, DEFAULT_OUTLINE_COLOR);
   const fill = isTransparentFillColor(fillColor) ? "none" : normalizeCanvasColor(fillColor);
   const previewStrokeWidth = Math.max(2, Math.min(10, strokeWidth * 1.5));
+  const strokeDasharray =
+    strokeStyle === "dashed"
+      ? `${previewStrokeWidth * 3} ${previewStrokeWidth * 2}`
+      : strokeStyle === "dotted"
+        ? `${Math.max(1, previewStrokeWidth * 0.2)} ${previewStrokeWidth * 2}`
+        : undefined;
   const rawWidth = Math.max(0.01, Number(widthCells) || (kind === "square" || kind === "circle" ? 1 : 1.65));
   const rawHeight = kind === "square" || kind === "circle" ? rawWidth : Math.max(0.01, Number(heightCells) || 1);
   const maxPreviewWidth = 92;
@@ -364,7 +373,28 @@ export const ShapePreviewSvg = memo(function ShapePreviewSvg({
           {normalizedSides.includes("left") ? <line x1={left} y1={bottom} x2={left} y2={top} stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" /> : null}
         </>
       ) : (
-        <line x1="18" y1="68" x2="102" y2="22" stroke={stroke} strokeWidth={previewStrokeWidth} strokeLinecap="round" />
+        <>
+          <line
+            x1="18"
+            y1="68"
+            x2="102"
+            y2="22"
+            stroke={stroke}
+            strokeWidth={previewStrokeWidth}
+            strokeDasharray={strokeDasharray}
+            strokeLinecap="round"
+          />
+          {kind === "arrow" ? (
+            <path
+              d="M 88 20 L 102 22 L 96 35"
+              fill="none"
+              stroke={stroke}
+              strokeWidth={previewStrokeWidth}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          ) : null}
+        </>
       )}
     </svg>
   );
@@ -383,7 +413,7 @@ export function InspectorSegmented({
 }) {
   return (
     <div
-      className="grid rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel-2)] p-0.5"
+      className="editor-inspector-segmented grid rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel-2)] p-0.5"
       style={{ gridTemplateColumns: `repeat(${Math.max(1, options.length)}, minmax(0, 1fr))` }}
       role="group"
       aria-label={label}

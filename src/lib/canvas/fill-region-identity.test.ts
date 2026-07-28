@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   copyFillRegionOverrides,
   createStableFillRegionId,
+  fillRegionLayerScope,
   isStoredFillRegionId,
   migrateLegacyFillRegionOverrides,
 } from "./fill-region-identity.ts";
@@ -14,9 +15,32 @@ test("stored fill override keys accept legacy and scoped artwork regions only", 
   assert.equal(isStoredFillRegionId("17"), true);
   assert.equal(isStoredFillRegionId("source:lion-7:enclosed:552:1475"), true);
   assert.equal(isStoredFillRegionId("clipart:flower-1:source:0:2048"), true);
+  assert.equal(isStoredFillRegionId("generated:artwork:enclosed:1024:512"), true);
+  assert.equal(isStoredFillRegionId("generated:artwork:enclosed:2049:512"), false);
   assert.equal(isStoredFillRegionId("source:lion:enclosed:2049:0"), false);
   assert.equal(isStoredFillRegionId("source:lion:screen:10:20"), false);
   assert.equal(isStoredFillRegionId("not-a-fill-region"), false);
+});
+
+test("generated artwork receives a stable fill-region namespace", () => {
+  assert.equal(fillRegionLayerScope("generated", "artwork"), "generated:artwork");
+  const id = createStableFillRegionId({
+    layerId: fillRegionLayerScope("generated", "artwork"),
+    kind: "enclosed",
+    centerX: 200,
+    centerY: 800,
+    placement: {
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 112,
+      rotationDegrees: 0,
+      flipX: false,
+      flipY: false,
+    },
+  });
+  assert.equal(id, "generated:artwork:enclosed:1024:366");
+  assert.equal(isStoredFillRegionId(id), true);
 });
 
 function pointForArtworkPosition(

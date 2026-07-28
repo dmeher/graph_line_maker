@@ -3,8 +3,9 @@ import { createGridNumberLabels } from "@/lib/canvas/grid-numbering";
 import { maskFromImageData, maskFromVectorizedImageData, type ImageDataLike } from "@/lib/canvas/ink-mask";
 import { fillRegionNumberForRender, mergeLayerPixelMasks } from "@/lib/canvas/layer-mask-merge";
 import { isPdfSource, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
-import { createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
+import { createEnclosedRegionMask, createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
 import { createStableFillRegionId } from "@/lib/canvas/fill-region-identity";
+import { generatedShapeFillColorAtPoint } from "@/lib/canvas/generated-artwork";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import {
   DEFAULT_GRID_LINE_COLOR,
@@ -43,6 +44,8 @@ export type FillRegion = {
   mapId: number;
   /** Numeric IDs from projects saved before layer-scoped fill keys existed. */
   legacyId?: string;
+  /** Base color before a persisted per-region override is applied. */
+  defaultColor?: string;
   color: string;
   cellCount: number;
   centerX: number;
@@ -1210,59 +1213,72 @@ function drawGridNumbers(canvas: CanvasLike, settings: GraphSettings) {
   ctx.restore();
 }
 
-function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
+type ManualGraphArtworkOptions = {
+  includeCellPaints?: boolean;
+  graphShapeMode?: "artwork" | "strokes" | "topology";
+};
+
+function drawManualGraphArtwork(
+  canvas: CanvasLike,
+  settings: GraphSettings,
+  options: ManualGraphArtworkOptions = {},
+) {
   const context = getProcessingContext(canvas);
   if (!context) throw new Error("Canvas is not available.");
   const cellWidth = GRAPH_MAJOR_CELL_PIXELS;
   const cellHeight = GRAPH_MAJOR_CELL_PIXELS;
+  const includeCellPaints = options.includeCellPaints ?? true;
+  const graphShapeMode = options.graphShapeMode ?? "artwork";
 
   context.save();
   context.lineJoin = "round";
   context.lineCap = "round";
 
-  for (const paint of settings.cellPaints ?? []) {
-    if (paint.visible === false) continue;
-    const left = paint.x * cellWidth;
-    const top = paint.y * cellHeight;
-    const width = Math.max(1, paint.width * cellWidth);
-    const height = Math.max(1, paint.height * cellHeight);
-    const right = width / 2;
-    const bottom = height / 2;
-    const rotation = normalizeRotationDegrees(paint.rotationDegrees);
+  if (includeCellPaints) {
+    for (const paint of settings.cellPaints ?? []) {
+      if (paint.visible === false) continue;
+      const left = paint.x * cellWidth;
+      const top = paint.y * cellHeight;
+      const width = Math.max(1, paint.width * cellWidth);
+      const height = Math.max(1, paint.height * cellHeight);
+      const right = width / 2;
+      const bottom = height / 2;
+      const rotation = normalizeRotationDegrees(paint.rotationDegrees);
 
-    context.save();
-    context.translate(left + width / 2, top + height / 2);
-    context.rotate((rotation * Math.PI) / 180);
-    context.scale(paint.flipX ? -1 : 1, paint.flipY ? -1 : 1);
+      context.save();
+      context.translate(left + width / 2, top + height / 2);
+      context.rotate((rotation * Math.PI) / 180);
+      context.scale(paint.flipX ? -1 : 1, paint.flipY ? -1 : 1);
 
-    if (!isTransparentFillColor(paint.fillColor)) {
-      context.fillStyle = paint.fillColor;
-      context.fillRect(-right, -bottom, width, height);
+      if (!isTransparentFillColor(paint.fillColor)) {
+        context.fillStyle = paint.fillColor;
+        context.fillRect(-right, -bottom, width, height);
+      }
+
+      if (paint.sides.length) {
+        context.beginPath();
+        context.strokeStyle = paint.lineColor || settings.outlineColor || settings.lineColor;
+        context.lineWidth = Math.max(1, Math.min(24, paint.lineWidth || 3));
+        if (paint.sides.includes("top")) {
+          context.moveTo(-right, -bottom);
+          context.lineTo(right, -bottom);
+        }
+        if (paint.sides.includes("right")) {
+          context.moveTo(right, -bottom);
+          context.lineTo(right, bottom);
+        }
+        if (paint.sides.includes("bottom")) {
+          context.moveTo(right, bottom);
+          context.lineTo(-right, bottom);
+        }
+        if (paint.sides.includes("left")) {
+          context.moveTo(-right, bottom);
+          context.lineTo(-right, -bottom);
+        }
+        context.stroke();
+      }
+      context.restore();
     }
-
-    if (paint.sides.length) {
-      context.beginPath();
-      context.strokeStyle = paint.lineColor || settings.outlineColor || settings.lineColor;
-      context.lineWidth = Math.max(1, Math.min(24, paint.lineWidth || 3));
-      if (paint.sides.includes("top")) {
-        context.moveTo(-right, -bottom);
-        context.lineTo(right, -bottom);
-      }
-      if (paint.sides.includes("right")) {
-        context.moveTo(right, -bottom);
-        context.lineTo(right, bottom);
-      }
-      if (paint.sides.includes("bottom")) {
-        context.moveTo(right, bottom);
-        context.lineTo(-right, bottom);
-      }
-      if (paint.sides.includes("left")) {
-        context.moveTo(-right, bottom);
-        context.lineTo(-right, -bottom);
-      }
-      context.stroke();
-    }
-    context.restore();
   }
 
   for (const shape of settings.graphShapes ?? []) {
@@ -1272,10 +1288,22 @@ function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
     const width = shape.width * cellWidth;
     const height = shape.height * cellHeight;
     const strokeWidth = Math.max(1, Math.min(24, shape.strokeWidth || 3));
-    context.strokeStyle = shape.strokeColor || settings.outlineColor || settings.lineColor;
+    context.strokeStyle =
+      graphShapeMode === "topology"
+        ? "#000000"
+        : shape.strokeColor || settings.outlineColor || settings.lineColor;
     context.fillStyle = isTransparentFillColor(shape.fillColor) ? "rgba(0,0,0,0)" : shape.fillColor;
     context.lineWidth = strokeWidth;
     context.save();
+    const strokeStyle = shape.strokeStyle ?? "solid";
+    context.setLineDash(
+      strokeStyle === "dashed"
+        ? [Math.max(4, strokeWidth * 3), Math.max(3, strokeWidth * 2)]
+        : strokeStyle === "dotted"
+          ? [Math.max(1, strokeWidth * 0.2), Math.max(3, strokeWidth * 2)]
+          : [],
+    );
+    context.lineCap = "round";
     context.translate(x + width / 2, y + height / 2);
     context.rotate((normalizeRotationDegrees(shape.rotationDegrees) * Math.PI) / 180);
     context.scale(shape.flipX ? -1 : 1, shape.flipY ? -1 : 1);
@@ -1287,6 +1315,7 @@ function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
       context.lineTo(x + width, y + height);
       context.stroke();
       if (shape.kind === "arrow") {
+        context.setLineDash([]);
         const angle = Math.atan2(height, width);
         const headLength = Math.max(10, strokeWidth * 4);
         context.beginPath();
@@ -1312,18 +1341,18 @@ function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
 
     if (shape.kind === "circle" || shape.kind === "oval") {
       context.ellipse(centerX, centerY, drawWidth / 2, drawHeight / 2, 0, 0, Math.PI * 2);
-      if (!isTransparentFillColor(shape.fillColor)) context.fill();
+      if (graphShapeMode === "artwork" && !isTransparentFillColor(shape.fillColor)) context.fill();
       context.stroke();
     } else if (shape.kind === "half-circle") {
       context.moveTo(left, top + drawHeight);
       context.ellipse(centerX, top + drawHeight, drawWidth / 2, drawHeight, 0, Math.PI, Math.PI * 2);
       context.lineTo(left, top + drawHeight);
       context.closePath();
-      if (!isTransparentFillColor(shape.fillColor)) context.fill();
+      if (graphShapeMode === "artwork" && !isTransparentFillColor(shape.fillColor)) context.fill();
       context.stroke();
     } else {
       context.rect(left, top, drawWidth, drawHeight);
-      if (!isTransparentFillColor(shape.fillColor)) context.fill();
+      if (graphShapeMode === "artwork" && !isTransparentFillColor(shape.fillColor)) context.fill();
       const sides = isTransparentFillColor(shape.fillColor) ? (shape.sides?.length ? shape.sides : CELL_LINE_SIDE_KEYS) : CELL_LINE_SIDE_KEYS;
       if (sides.length) {
         context.beginPath();
@@ -1352,6 +1381,132 @@ function drawManualGraphArtwork(canvas: CanvasLike, settings: GraphSettings) {
   context.restore();
 }
 
+type GeneratedGraphShapeTopology = {
+  fillRegionMap: Uint16Array;
+  regions: FillRegion[];
+  nextRegionId: number;
+};
+
+/**
+ * Rasterizes all generated shapes as one image-like stroke layer. Keeping the
+ * topology document-scoped lets independently drawn lines form one enclosure,
+ * while the normal artwork pass still owns each shape's visual color and dash.
+ */
+function integrateGeneratedGraphShapeRegions(
+  destinationFillRegionMap: Uint16Array,
+  width: number,
+  height: number,
+  settings: GraphSettings,
+  nextRegionId: number,
+): GeneratedGraphShapeTopology | null {
+  if (!(settings.graphShapes ?? []).some((shape) => shape.visible !== false)) return null;
+
+  const topologyCanvas = createProcessingCanvas(width, height);
+  drawManualGraphArtwork(topologyCanvas, settings, {
+    includeCellPaints: false,
+    graphShapeMode: "topology",
+  });
+  const topologyContext = getProcessingContext(topologyCanvas, { willReadFrequently: true });
+  if (!topologyContext) throw new Error("Canvas is not available.");
+
+  const pixels = topologyContext.getImageData(0, 0, width, height).data;
+  const barrierMask = new Uint8Array(width * height);
+  let hasBarrier = false;
+  for (let pixel = 0, channel = 3; pixel < barrierMask.length; pixel += 1, channel += 4) {
+    if (!pixels[channel]) continue;
+    barrierMask[pixel] = 1;
+    hasBarrier = true;
+  }
+  if (!hasBarrier) return null;
+
+  const enclosedFillMask = createEnclosedRegionMask(barrierMask, width, height);
+  const local = labelFillRegions(
+    [{ mask: enclosedFillMask, kind: "enclosed" }],
+    width,
+    height,
+    settings,
+  );
+  const generatedFillRegionMap = new Uint16Array(width * height);
+  const regionNumberMap = new Map<number, number>();
+  const generatedRegions: FillRegion[] = [];
+
+  for (const region of local.regions) {
+    if (nextRegionId >= 65535) break;
+    nextRegionId += 1;
+    regionNumberMap.set(region.mapId, nextRegionId);
+    const stableId = createStableFillRegionId({
+      layerId: "generated:artwork",
+      kind: "enclosed",
+      centerX: region.centerX,
+      centerY: region.centerY,
+      placement: {
+        x: 0,
+        y: 0,
+        width: settings.graphWidth,
+        height: settings.graphHeight,
+        rotationDegrees: 0,
+        flipX: false,
+        flipY: false,
+      },
+    });
+    generatedRegions.push({
+      ...region,
+      id: stableId,
+      mapId: nextRegionId,
+      color:
+        generatedShapeFillColorAtPoint(
+          settings.graphShapes ?? [],
+          region.centerX,
+          region.centerY,
+          GRAPH_MAJOR_CELL_PIXELS,
+        ) ?? defaultFillColorForRegion(settings, "enclosed"),
+    });
+  }
+
+  for (let pixel = 0; pixel < destinationFillRegionMap.length; pixel += 1) {
+    if (barrierMask[pixel]) {
+      destinationFillRegionMap[pixel] = 0;
+      continue;
+    }
+    const localRegionNumber = local.fillRegionMap[pixel];
+    if (!localRegionNumber) continue;
+    const globalRegionNumber = regionNumberMap.get(localRegionNumber);
+    if (!globalRegionNumber) continue;
+    destinationFillRegionMap[pixel] = globalRegionNumber;
+    generatedFillRegionMap[pixel] = globalRegionNumber;
+  }
+
+  return {
+    fillRegionMap: generatedFillRegionMap,
+    regions: generatedRegions,
+    nextRegionId,
+  };
+}
+
+function countVisibleFillRegions(fillRegionMap: Uint16Array) {
+  const visibleCounts = new Map<number, number>();
+  for (let pixel = 0; pixel < fillRegionMap.length; pixel += 1) {
+    const regionNumber = fillRegionMap[pixel];
+    if (regionNumber) visibleCounts.set(regionNumber, (visibleCounts.get(regionNumber) ?? 0) + 1);
+  }
+  return visibleCounts;
+}
+
+function displayFillRegions(
+  regions: readonly FillRegion[],
+  visibleCounts: ReadonlyMap<number, number>,
+  settings: GraphSettings,
+) {
+  return regions
+    .map((region) => ({
+      ...region,
+      defaultColor: region.defaultColor ?? region.color,
+      cellCount: visibleCounts.get(region.mapId) ?? 0,
+      color: colorForRegion(settings, region),
+    }))
+    .filter((region) => region.cellCount > 0);
+}
+
 function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, options: { sourceIsFitted?: boolean } = {}) {
   const fitted = options.sourceIsFitted ? sourceCanvas : fitCanvas(sourceCanvas, settings);
   assertCanvasBudget(fitted.width, fitted.height, 1);
@@ -1374,14 +1529,48 @@ function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, optio
   const outputContext = getProcessingContext(output, { willReadFrequently: true });
   if (!outputContext) throw new Error("Canvas is not available.");
 
-  const displayRegions = regions.map((region) => ({ ...region, color: colorForRegion(settings, region) }));
+  const sourceVisibleCounts = countVisibleFillRegions(fillRegionMap);
+  const sourceDisplayRegions = displayFillRegions(regions, sourceVisibleCounts, settings);
   // Transparent artwork only; the grid + paper backdrop are composited by the SVG
   // overlay (preview) or flattenGraphForOutput (export/save).
-  drawFillRegions(outputContext, fillRegionMap, displayRegions, output.width, output.height, settings);
+  drawFillRegions(outputContext, fillRegionMap, sourceDisplayRegions, output.width, output.height, settings);
+
+  const generatedTopology = integrateGeneratedGraphShapeRegions(
+    fillRegionMap,
+    output.width,
+    output.height,
+    settings,
+    regions.reduce((maximum, region) => Math.max(maximum, region.mapId), 0),
+  );
+  if (generatedTopology) regions.push(...generatedTopology.regions);
+  const visibleCounts = countVisibleFillRegions(fillRegionMap);
+  const displayRegions = displayFillRegions(regions, visibleCounts, settings);
+  const generatedDisplayRegions = generatedTopology
+    ? displayFillRegions(
+        generatedTopology.regions,
+        countVisibleFillRegions(generatedTopology.fillRegionMap),
+        settings,
+      )
+    : [];
+
   const imageLineThickness = lineThicknessForSettings(settings);
   const outlineColor = outlineColorForSettings(settings);
   drawMaskLayer(outputContext, outlineMask, output.width, output.height, outlineColor, 255, 0.12 * imageLineThickness);
   drawManualGraphArtwork(output, settings);
+  if (generatedTopology && generatedDisplayRegions.length) {
+    drawFillRegions(
+      outputContext,
+      generatedTopology.fillRegionMap,
+      generatedDisplayRegions,
+      output.width,
+      output.height,
+      settings,
+    );
+    drawManualGraphArtwork(output, settings, {
+      includeCellPaints: false,
+      graphShapeMode: "strokes",
+    });
+  }
   drawGridNumbers(output, settings);
 
   const outlineHex = rgbToHex(hexToRgb(outlineColor));
@@ -1500,24 +1689,49 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     maxLineThickness = Math.max(maxLineThickness, lineThicknessForSettings(layer.settings));
   }
 
-  const visibleCounts = new Map<number, number>();
-  for (let pixel = 0; pixel < fillRegionMap.length; pixel += 1) {
-    const regionNumber = fillRegionMap[pixel];
-    if (regionNumber) visibleCounts.set(regionNumber, (visibleCounts.get(regionNumber) ?? 0) + 1);
-  }
-  const visibleRegions = regions
-    .map((region) => ({
-      ...region,
-      cellCount: visibleCounts.get(region.mapId) ?? 0,
-      color: colorForRegion(settings, region),
-    }))
-    .filter((region) => region.cellCount > 0);
-
   // Transparent artwork only; grid + paper backdrop handled by the SVG overlay
   // (preview) or flattenGraphForOutput (export/save).
-  drawFillRegions(outputContext, fillRegionMap, visibleRegions, output.width, output.height, settings);
+  const sourceVisibleCounts = countVisibleFillRegions(fillRegionMap);
+  const sourceDisplayRegions = displayFillRegions(regions, sourceVisibleCounts, settings);
+  drawFillRegions(outputContext, fillRegionMap, sourceDisplayRegions, output.width, output.height, settings);
+
+  const generatedTopology = integrateGeneratedGraphShapeRegions(
+    fillRegionMap,
+    output.width,
+    output.height,
+    settings,
+    nextRegionId,
+  );
+  if (generatedTopology) {
+    nextRegionId = generatedTopology.nextRegionId;
+    regions.push(...generatedTopology.regions);
+  }
+  const visibleCounts = countVisibleFillRegions(fillRegionMap);
+  const visibleRegions = displayFillRegions(regions, visibleCounts, settings);
+  const generatedDisplayRegions = generatedTopology
+    ? displayFillRegions(
+        generatedTopology.regions,
+        countVisibleFillRegions(generatedTopology.fillRegionMap),
+        settings,
+      )
+    : [];
+
   drawColoredMaskLayers(outputContext, outlineMask, outlineColorMap, outlineColorsByNumber, output.width, output.height, outlineColorForSettings(settings), 255, 0.12 * maxLineThickness);
   drawManualGraphArtwork(output, settings);
+  if (generatedTopology && generatedDisplayRegions.length) {
+    drawFillRegions(
+      outputContext,
+      generatedTopology.fillRegionMap,
+      generatedDisplayRegions,
+      output.width,
+      output.height,
+      settings,
+    );
+    drawManualGraphArtwork(output, settings, {
+      includeCellPaints: false,
+      graphShapeMode: "strokes",
+    });
+  }
   drawGridNumbers(output, settings);
 
   const outlineCountsByColor = new Map<string, number>();
@@ -1689,31 +1903,42 @@ export async function pixelateLayeredCanvasesAsync(
     maxLineThickness = Math.max(maxLineThickness, lineThicknessForSettings(layer.settings));
   }
 
-  const visibleCounts = new Map<number, number>();
-  for (let pixel = 0; pixel < fillRegionMap.length; pixel += 1) {
-    const regionNumber = fillRegionMap[pixel];
-    if (regionNumber) visibleCounts.set(regionNumber, (visibleCounts.get(regionNumber) ?? 0) + 1);
-  }
-  const visibleRegions = regions
-    .map((region) => ({
-      ...region,
-      cellCount: visibleCounts.get(region.mapId) ?? 0,
-      color: colorForRegion(settings, region),
-    }))
-    .filter((region) => region.cellCount > 0);
-
   // Transparent artwork only; grid + paper backdrop handled by the SVG overlay
   // (preview) or flattenGraphForOutput (export/save).
+  const sourceVisibleCounts = countVisibleFillRegions(fillRegionMap);
+  const sourceDisplayRegions = displayFillRegions(regions, sourceVisibleCounts, settings);
   drawFillRegions(
     outputContext,
     fillRegionMap,
-    visibleRegions,
+    sourceDisplayRegions,
     output.width,
     output.height,
     settings,
     outlineMask,
     outlineCoverage,
   );
+
+  const generatedTopology = integrateGeneratedGraphShapeRegions(
+    fillRegionMap,
+    output.width,
+    output.height,
+    settings,
+    nextRegionId,
+  );
+  if (generatedTopology) {
+    nextRegionId = generatedTopology.nextRegionId;
+    regions.push(...generatedTopology.regions);
+  }
+  const visibleCounts = countVisibleFillRegions(fillRegionMap);
+  const visibleRegions = displayFillRegions(regions, visibleCounts, settings);
+  const generatedDisplayRegions = generatedTopology
+    ? displayFillRegions(
+        generatedTopology.regions,
+        countVisibleFillRegions(generatedTopology.fillRegionMap),
+        settings,
+      )
+    : [];
+
   drawColoredMaskLayers(
     outputContext,
     outlineMask,
@@ -1727,6 +1952,20 @@ export async function pixelateLayeredCanvasesAsync(
     outlineCoverage,
   );
   drawManualGraphArtwork(output, settings);
+  if (generatedTopology && generatedDisplayRegions.length) {
+    drawFillRegions(
+      outputContext,
+      generatedTopology.fillRegionMap,
+      generatedDisplayRegions,
+      output.width,
+      output.height,
+      settings,
+    );
+    drawManualGraphArtwork(output, settings, {
+      includeCellPaints: false,
+      graphShapeMode: "strokes",
+    });
+  }
   drawGridNumbers(output, settings);
 
   const outlineCountsByColor = new Map<string, number>();

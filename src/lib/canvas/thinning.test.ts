@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createThinArtworkMasks, expandMaskForLineSize } from "./thinning.ts";
+import { createEnclosedRegionMask, createThinArtworkMasks, expandMaskForLineSize } from "./thinning.ts";
 
 function createMask(width: number, height: number) {
   return new Uint8Array(width * height);
@@ -17,6 +17,30 @@ function fillRect(mask: Uint8Array, width: number, x: number, y: number, rectWid
 function setPixels(mask: Uint8Array, width: number, pixels: Array<[number, number]>) {
   for (const [x, y] of pixels) {
     mask[y * width + x] = 1;
+  }
+}
+
+function drawSegment(mask: Uint8Array, width: number, start: [number, number], end: [number, number]) {
+  let [x, y] = start;
+  const [endX, endY] = end;
+  const dx = Math.abs(endX - x);
+  const dy = Math.abs(endY - y);
+  const stepX = x < endX ? 1 : -1;
+  const stepY = y < endY ? 1 : -1;
+  let error = dx - dy;
+
+  while (true) {
+    mask[y * width + x] = 1;
+    if (x === endX && y === endY) break;
+    const doubledError = error * 2;
+    if (doubledError > -dy) {
+      error -= dy;
+      x += stepX;
+    }
+    if (doubledError < dx) {
+      error += dx;
+      y += stepY;
+    }
   }
 }
 
@@ -63,6 +87,35 @@ function componentCount(mask: Uint8Array, width: number, height: number) {
 
   return components;
 }
+
+test("three generated line segments form a fillable enclosed region", () => {
+  const width = 24;
+  const height = 18;
+  const barrier = createMask(width, height);
+  drawSegment(barrier, width, [5, 13], [12, 3]);
+  drawSegment(barrier, width, [12, 3], [19, 13]);
+  drawSegment(barrier, width, [19, 13], [5, 13]);
+
+  const enclosed = createEnclosedRegionMask(barrier, width, height);
+
+  assert.ok(count(enclosed) > 0);
+  assert.equal(enclosed[9 * width + 12], 1);
+  assert.equal(enclosed[1 * width + 1], 0);
+});
+
+test("an open generated-line barrier does not create a fillable region", () => {
+  const width = 24;
+  const height = 18;
+  const barrier = createMask(width, height);
+  drawSegment(barrier, width, [5, 13], [12, 3]);
+  drawSegment(barrier, width, [12, 3], [19, 13]);
+  drawSegment(barrier, width, [19, 13], [5, 13]);
+  barrier[13 * width + 12] = 0;
+
+  const enclosed = createEnclosedRegionMask(barrier, width, height);
+
+  assert.equal(count(enclosed), 0);
+});
 
 test("thick stroke components thin without breaking apart", () => {
   const width = 24;

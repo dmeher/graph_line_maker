@@ -19,7 +19,8 @@ export type FillRegionIdentityRegion = {
 
 const ID_PRECISION = 2048;
 const LEGACY_FILL_REGION_ID = /^\d+$/;
-const SCOPED_FILL_REGION_ID = /^(?:source|clipart):[A-Za-z0-9-]{1,96}:(?:source|enclosed):(?!0\d)\d{1,4}:(?!0\d)\d{1,4}$/;
+const SCOPED_FILL_REGION_ID =
+  /^(?:source|clipart|generated):[A-Za-z0-9-]{1,96}:(?:source|enclosed):(?!0\d)\d{1,4}:(?!0\d)\d{1,4}$/;
 
 /**
  * Validates persisted fill override keys. Numeric keys are retained for legacy
@@ -41,8 +42,8 @@ function quantize(value: number) {
   return Math.max(0, Math.min(ID_PRECISION, Math.round(value * ID_PRECISION)));
 }
 
-/** Returns the persistent namespace used by a rendered source or clipart layer. */
-export function fillRegionLayerScope(type: "source" | "clipart", id: string) {
+/** Returns the persistent namespace used by rendered imported or generated artwork. */
+export function fillRegionLayerScope(type: "source" | "clipart" | "generated", id: string) {
   return `${type}:${id}`;
 }
 

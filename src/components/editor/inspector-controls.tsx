@@ -15,17 +15,20 @@ export function InspectorModeRail<T extends string>({
   value,
   options,
   onChange,
+  orientation = "vertical",
 }: {
   value: T;
   options: readonly InspectorModeOption<T>[];
   onChange: (value: T) => void;
+  orientation?: "horizontal" | "vertical";
 }) {
   return (
     <nav
       className="editor-inspector__mode-rail"
+      data-orientation={orientation}
       role="tablist"
       aria-label="Inspector modes"
-      aria-orientation="vertical"
+      aria-orientation={orientation}
     >
       {options.map((option, index) => {
         const active = option.id === value;
@@ -49,9 +52,9 @@ export function InspectorModeRail<T extends string>({
                   ? 0
                   : event.key === "End"
                     ? lastIndex
-                    : event.key === "ArrowDown" || event.key === "ArrowRight"
+                    : event.key === "ArrowRight" || (orientation === "vertical" && event.key === "ArrowDown")
                       ? (index + 1) % options.length
-                      : event.key === "ArrowUp" || event.key === "ArrowLeft"
+                      : event.key === "ArrowLeft" || (orientation === "vertical" && event.key === "ArrowUp")
                         ? (index - 1 + options.length) % options.length
                         : null;
               if (nextIndex === null) return;

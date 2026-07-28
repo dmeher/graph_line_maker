@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { memo, type Ref } from "react";
 import {
+  AlertTriangle,
   Check,
   ChevronDown,
   Download,
@@ -11,6 +12,7 @@ import {
   EyeOff,
   Grid3X3,
   Hand,
+  LassoSelect,
   Loader2,
   MousePointer2,
   PaintBucket,
@@ -21,17 +23,20 @@ import {
   Pencil,
   Redo2,
   RotateCcw,
+  Search,
   Scissors,
   Shapes,
   SlidersHorizontal,
   Undo2,
+  Wifi,
+  WifiOff,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
 import { LogoMark } from "@/components/layout/brand-mark";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 
-export type EditorToolId = "select" | "pan" | "draw" | "shape" | "fill" | "background-remover" | "image-eraser";
+export type EditorToolId = "select" | "pan" | "draw" | "shape" | "fill" | "lasso" | "background-remover" | "image-eraser";
 
 type EditorCommandBarProps = {
   title: string;
@@ -51,6 +56,8 @@ type EditorCommandBarProps = {
   onToggleExport: () => void;
   exportOpen: boolean;
   exportButtonRef: Ref<HTMLButtonElement>;
+  onOpenCommandPalette?: () => void;
+  commandPaletteLabel?: string;
 };
 
 export const EditorCommandBar = memo(function EditorCommandBar({
@@ -71,6 +78,8 @@ export const EditorCommandBar = memo(function EditorCommandBar({
   onToggleExport,
   exportOpen,
   exportButtonRef,
+  onOpenCommandPalette,
+  commandPaletteLabel = "Search commands",
 }: EditorCommandBarProps) {
   return (
     <header className="editor-command-bar atelier-command-bar editor-dark-toolbar" data-editor-region="command-bar">
@@ -79,8 +88,8 @@ export const EditorCommandBar = memo(function EditorCommandBar({
           <LogoMark className="h-8 w-8" />
         </Link>
         <div className="editor-command-bar__product" aria-hidden="true">
-          <strong>Atelier</strong>
-          <span>Graph studio</span>
+          <strong>Graph Pixel Maker</strong>
+          <span>Command canvas</span>
         </div>
         <span className="editor-command-bar__divider" aria-hidden="true" />
         <label className="editor-command-bar__document editor-title-editor">
@@ -88,6 +97,20 @@ export const EditorCommandBar = memo(function EditorCommandBar({
           <input value={title} onChange={(event) => onTitleChange(event.target.value)} aria-label="Project name" placeholder="Untitled graph" />
         </label>
       </div>
+
+      {onOpenCommandPalette ? (
+        <button
+          type="button"
+          className="command-canvas-command-trigger editor-command-bar__command-trigger"
+          onClick={onOpenCommandPalette}
+          aria-label="Open command palette"
+          aria-haspopup="dialog"
+        >
+          <Search size={15} aria-hidden="true" />
+          <span>{commandPaletteLabel}</span>
+          <kbd aria-hidden="true">Ctrl K</kbd>
+        </button>
+      ) : null}
 
       <div className="editor-command-bar__history editor-toolbar-group editor-toolbar-history" role="group" aria-label="History">
         <span className="editor-command-bar__group-label" aria-hidden="true">History</span>
@@ -137,7 +160,7 @@ export const EditorCommandBar = memo(function EditorCommandBar({
 const TOOL_GROUPS: { id: string; label: string; items: { id: EditorToolId; label: string; icon: typeof MousePointer2 }[] }[] = [
   {
     id: "navigate",
-    label: "Navigate",
+    label: "",
     items: [
       { id: "select", label: "Select", icon: MousePointer2 },
       { id: "pan", label: "Pan", icon: Hand },
@@ -145,17 +168,18 @@ const TOOL_GROUPS: { id: string; label: string; items: { id: EditorToolId; label
   },
   {
     id: "create",
-    label: "Create",
+    label: "",
     items: [
-      { id: "draw", label: "Draw cells", icon: Pencil },
-      { id: "shape", label: "Shape", icon: Shapes },
+      { id: "draw", label: "Draw Line", icon: Pencil },
+      { id: "shape", label: "Draw Shape", icon: Shapes },
       { id: "fill", label: "Fill", icon: PaintBucket },
     ],
   },
   {
     id: "refine",
-    label: "Refine",
+    label: "",
     items: [
+      { id: "lasso", label: "Lasso", icon: LassoSelect },
       { id: "background-remover", label: "Remove background", icon: Scissors },
       { id: "image-eraser", label: "Erase image", icon: Eraser },
     ],
@@ -165,10 +189,6 @@ const TOOL_GROUPS: { id: string; label: string; items: { id: EditorToolId; label
 export const EditorToolRail = memo(function EditorToolRail({ activeTool, onSelectTool }: { activeTool: EditorToolId; onSelectTool: (tool: EditorToolId) => void }) {
   return (
     <nav className="editor-tool-rail atelier-tool-rail" aria-label="Canvas tools" data-editor-region="tool-rail">
-      <div className="editor-tool-rail__heading" aria-hidden="true">
-        <span>Tools</span>
-        <i />
-      </div>
       {TOOL_GROUPS.map((group) => (
         <section key={group.id} className={`editor-tool-rail__group editor-tool-rail__group--${group.id}`} aria-label={group.label}>
           <span className="editor-tool-rail__group-label" aria-hidden="true">{group.label}</span>
@@ -246,19 +266,142 @@ type EditorStatusBarProps = {
   online: boolean;
 };
 
+type EditorNavigatorStatusProps = Pick<EditorStatusBarProps, "status" | "processing" | "online"> & {
+  tone?: "positive" | "attention";
+};
+
+type EditorCanvasLoaderProps = {
+  visible: boolean;
+  phase: "assets" | "render" | "error";
+  label: string;
+};
+
+/**
+ * Visual-only bootstrap/error surface. The hidden EditorStatusBar remains the
+ * only live announcement so project readiness is never read twice.
+ */
+export const EditorCanvasLoader = memo(function EditorCanvasLoader({
+  visible,
+  phase,
+  label,
+}: EditorCanvasLoaderProps) {
+  return (
+    <div
+      className="editor-canvas-loader"
+      data-visible={visible ? "true" : "false"}
+      data-phase={phase}
+      aria-hidden="true"
+    >
+      <div className="editor-canvas-loader__card">
+        <span className="editor-canvas-loader__visual">
+          <svg viewBox="0 0 96 96" focusable="false">
+            <rect className="editor-canvas-loader__paper" x="9" y="9" width="78" height="78" rx="18" />
+            <g className="editor-canvas-loader__grid">
+              <path d="M25 17v62M40 17v62M56 17v62M71 17v62" />
+              <path d="M17 25h62M17 40h62M17 56h62M17 71h62" />
+            </g>
+            <path
+              className="editor-canvas-loader__thread-shadow"
+              pathLength="1"
+              d="M20 65h15V53h13V40h14V28h14"
+            />
+            <path
+              className="editor-canvas-loader__thread"
+              pathLength="1"
+              d="M20 65h15V53h13V40h14V28h14"
+            />
+            <g className="editor-canvas-loader__nodes">
+              <circle cx="20" cy="65" r="3" />
+              <circle cx="35" cy="53" r="3" />
+              <circle cx="48" cy="40" r="3" />
+              <circle cx="62" cy="28" r="3" />
+              <circle cx="76" cy="28" r="3" />
+            </g>
+            <path className="editor-canvas-loader__orbit" d="M48 5a43 43 0 1 1-30.4 12.6" />
+          </svg>
+        </span>
+        <span className="editor-canvas-loader__copy">
+          <strong>{label}</strong>
+          <span>
+            {phase === "assets"
+              ? "Preparing source artwork"
+              : phase === "error"
+                ? "Review the project assets, then refresh to try again"
+                : "Weaving pixels onto the graph"}
+          </span>
+        </span>
+        <span className="editor-canvas-loader__meter" aria-hidden="true"><i /></span>
+      </div>
+    </div>
+  );
+});
+
 export const EditorStatusBar = memo(function EditorStatusBar({ status, processing, dimensions, selection, zoom, online }: EditorStatusBarProps) {
   return (
-    <footer className="editor-status-bar atelier-status-bar" aria-live="polite" data-editor-region="status-bar">
-      <div className="editor-status-bar__primary">
-        <span className={`editor-status-bar__state ${processing ? "is-processing" : ""}`}><i aria-hidden="true" /><span className="sr-only">Workspace status: </span>{status}</span>
-        <span className="editor-status-bar__selection"><span className="sr-only">Current selection: </span>{selection}</span>
-      </div>
-      <div className="editor-status-bar__metrics">
-        <span className="editor-status-bar__dimensions"><span className="sr-only">Canvas dimensions: </span>{dimensions}</span>
-        <span className="editor-status-bar__zoom"><span className="sr-only">Canvas zoom: </span>{Math.round(zoom * 100)}%</span>
-        <span className="editor-status-bar__snap">Snap on</span>
-        <span className="editor-status-bar__connection"><i className={online ? "is-online" : ""} aria-hidden="true" /><span className="sr-only">Connection: </span>{online ? "Online" : "Offline"}</span>
-      </div>
+    <footer
+      className="editor-status-announcer sr-only"
+      aria-live="polite"
+      aria-atomic="true"
+      data-editor-region="status-bar"
+      data-processing={processing ? "true" : "false"}
+    >
+      Workspace status: {status}. Current selection: {selection}. Canvas: {dimensions} at {Math.round(zoom * 100)}% zoom. Snap enabled. Connection: {online ? "Online" : "Offline"}.
     </footer>
   );
 });
+
+export const EditorNavigatorStatus = memo(function EditorNavigatorStatus({
+  status,
+  processing,
+  online,
+  tone = "positive",
+}: EditorNavigatorStatusProps) {
+  const activityTone = processing ? "is-processing" : tone === "attention" ? "is-attention" : "is-positive";
+  return (
+    <div className="editor-navigator-status" data-navigator-status="visual" aria-hidden="true">
+      <div className="editor-navigator-status__visual">
+        <span
+          className={`editor-navigator-status__item editor-navigator-status__item--activity ${activityTone}`}
+          title={status}
+          data-status-item="activity"
+        >
+          {processing
+            ? <span className="editor-navigator-status__pulse" aria-hidden="true" />
+            : tone === "attention"
+              ? <AlertTriangle size={11} aria-hidden="true" />
+              : <Check size={11} aria-hidden="true" />}
+          <span className="editor-navigator-status__label">{status}</span>
+        </span>
+        <span
+          className={`editor-navigator-status__item ${online ? "is-positive" : "is-attention"}`}
+          title={online ? "Online" : "Offline"}
+          data-status-item="connection"
+        >
+          {online
+            ? <Wifi size={11} aria-hidden="true" />
+            : <WifiOff size={11} aria-hidden="true" />}
+        </span>
+      </div>
+    </div>
+  );
+});
+
+export {
+  CommandCanvasCommandPalette,
+  CommandCanvasCommandTrigger,
+  CommandCanvasCompactViewTrigger,
+  CommandCanvasNavigator,
+  CommandCanvasPod,
+  CommandCanvasSelectionStrip,
+} from "./command-canvas-chrome";
+export type {
+  CommandCanvasCommand,
+  CommandCanvasCommandPaletteProps,
+  CommandCanvasNavigatorProps,
+  CommandCanvasPaletteCommand,
+  CommandCanvasPodProps,
+  CommandCanvasPodId,
+  CommandCanvasResizeEdge,
+  CommandCanvasSelectionStripProps,
+  CommandCanvasTransformAction,
+} from "./command-canvas-chrome";

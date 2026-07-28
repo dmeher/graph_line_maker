@@ -14,6 +14,10 @@ export type SourceLayout = {
 
 export type SourcePositionPatch = Partial<Pick<GraphSourceImage, "x" | "y" | "topPadding" | "bottomPadding" | "width" | "height">>;
 export type SourceTransformPatch = Partial<Pick<GraphSourceImage, "rotationDegrees" | "flipX" | "flipY">>;
+export type LayerOrientation = Pick<GraphSourceImage, "locked" | "rotationDegrees" | "flipX" | "flipY">;
+export type LayerOrientationTransform =
+  | { type: "rotate"; direction: -1 | 1 }
+  | { type: "flip"; axis: "x" | "y" };
 export type LayerSnapBox = {
   id: string;
   x: number;
@@ -79,6 +83,31 @@ export function rotateLayerBoxInBounds(
     width: roundCells(Math.max(0.01, box.height)),
     height: roundCells(Math.max(0.01, box.width)),
   };
+}
+
+/**
+ * Applies an orientation-only transform to one layer.
+ *
+ * A single selection rotates around its own center, so its placement rectangle
+ * remains unchanged. Shared-selection geometry is handled separately by
+ * `rotateLayerBoxInBounds` / `flipLayerBoxInBounds`.
+ */
+export function transformLayerOrientation<T extends LayerOrientation>(
+  layer: T,
+  transform: LayerOrientationTransform,
+): T {
+  if (layer.locked) return layer;
+  if (transform.type === "rotate") {
+    return {
+      ...layer,
+      rotationDegrees: normalizeRotationDegrees(
+        layer.rotationDegrees + transform.direction * ROTATION_STEP_DEGREES,
+      ),
+    } as T;
+  }
+  return transform.axis === "x"
+    ? { ...layer, flipX: !layer.flipX } as T
+    : { ...layer, flipY: !layer.flipY } as T;
 }
 
 export function sourceLayouts(sources: GraphSourceImage[]): SourceLayout[] {

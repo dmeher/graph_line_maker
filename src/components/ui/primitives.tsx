@@ -86,7 +86,7 @@ export function Field({
         {leading ? <span className="ui-field__leading" aria-hidden="true">{leading}</span> : null}
         <input
           {...inputProps}
-          className={classes("ui-field__control", leading && "has-leading", trailing && "has-trailing")}
+          className={classes("ui-field__control", leading ? "has-leading" : null, trailing ? "has-trailing" : null)}
           aria-invalid={Boolean(error)}
         />
         {trailing ? <span className="ui-field__trailing">{trailing}</span> : null}

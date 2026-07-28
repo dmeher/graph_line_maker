@@ -1,6 +1,7 @@
 import "server-only";
 
 import { getSupabaseAdmin, tryGetSupabaseAdmin } from "@/lib/supabase/server";
+import { mediaUrlsForBucket } from "@/lib/storage/media";
 import { MAX_SOURCE_IMAGES, ORIGINAL_IMAGES_BUCKET, PROCESSED_IMAGES_BUCKET } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
 import { isStoredFillRegionId } from "@/lib/canvas/fill-region-identity";
@@ -34,6 +35,7 @@ import {
   DEFAULT_VECTORIZER_STROKE_WIDTH,
   DEFAULT_VECTORIZER_LINE_ADJUST,
   DEFAULT_VECTORIZER_INK_THRESHOLD,
+  DEFAULT_VECTORIZER_SKETCH_REMOVAL,
   DEFAULT_VECTORIZER_FIDELITY,
   GRAPH_MAJOR_CELL_PIXELS,
   TRANSPARENT_FILL_COLOR,
@@ -59,6 +61,7 @@ import {
   clampStrokeGapClosePixels,
   clampVectorizerInkThreshold,
   clampVectorizerLineAdjust,
+  clampVectorizerSketchRemoval,
   clampVectorizerStrokeWidth,
   normalizeGraphImageTraceEngine,
 } from "@/lib/graph-paper";
@@ -114,6 +117,7 @@ export const defaultGraphSettings: GraphSettings = {
   vectorizerStrokeColor: DEFAULT_VECTORIZER_STROKE_COLOR,
   vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
   vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+  vectorizerSketchRemoval: DEFAULT_VECTORIZER_SKETCH_REMOVAL,
   vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
   gridLineColor: DEFAULT_GRID_LINE_COLOR,
   gridLineLayer: DEFAULT_GRAPH_LINE_LAYER,
@@ -176,6 +180,7 @@ export function getMockEditorProject(): Project {
         imageColorQuantization: DEFAULT_IMAGE_COLOR_QUANTIZATION,
         vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
         vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+        vectorizerSketchRemoval: DEFAULT_VECTORIZER_SKETCH_REMOVAL,
         vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
         x: 16,
         y: 8,
@@ -240,6 +245,8 @@ type DbProject = {
   description: string | null;
   original_image_path: string | null;
   processed_image_path: string | null;
+  /** Null on projects saved before dashboard-card derivatives existed. */
+  processed_thumb_path?: string | null;
   settings: StoredGraphSettings | null;
   width: number | null;
   height: number | null;
@@ -407,6 +414,7 @@ function normalizeGraphShapes(value: unknown) {
       const fillColor = normalizeCanvasFillColor(record.fillColor);
       const strokeWidthValue = Number(record.strokeWidth);
       const strokeWidth = Math.max(1, Math.min(24, Number.isFinite(strokeWidthValue) ? Math.round(strokeWidthValue) : 3));
+      const strokeStyle = isGraphGridLineStyle(record.strokeStyle) ? record.strokeStyle : DEFAULT_GRID_LINE_STYLE;
       const rawSides = Array.isArray(record.sides) ? record.sides : [...CELL_LINE_SIDE_KEYS];
       const sides = Array.from(
         new Set(
@@ -428,6 +436,7 @@ function normalizeGraphShapes(value: unknown) {
           strokeColor,
           fillColor,
           strokeWidth,
+          strokeStyle,
           sides: sides.length ? sides : [...CELL_LINE_SIDE_KEYS],
           locked: Boolean(record.locked),
           visible: typeof record.visible === "boolean" ? record.visible : true,
@@ -451,6 +460,7 @@ function normalizeClipartAssets(value: unknown): GraphClipartAsset[] {
       const name = typeof record.name === "string" && record.name.trim() ? record.name.trim().slice(0, 160) : `Clipart ${index + 1}`;
       const path = typeof record.path === "string" && record.path.trim() ? record.path.trim().slice(0, 1024) : null;
       const url = typeof record.url === "string" && record.url.trim() ? record.url.trim().slice(0, 4096) : null;
+      const thumbPath = typeof record.thumbPath === "string" && record.thumbPath.trim() ? record.thumbPath.trim().slice(0, 1024) : null;
       const dataUrl = typeof record.dataUrl === "string" && record.dataUrl.startsWith("data:image/") ? record.dataUrl.slice(0, 1024 * 1024) : null;
       const mimeType = typeof record.mimeType === "string" && record.mimeType.trim() ? record.mimeType.trim().slice(0, 100) : "image/png";
       const rawWidth = Number(record.width);
@@ -460,7 +470,7 @@ function normalizeClipartAssets(value: unknown): GraphClipartAsset[] {
       const createdAt = typeof record.createdAt === "string" && !Number.isNaN(Date.parse(record.createdAt)) ? record.createdAt : new Date(0).toISOString();
 
       if (!path && !url && !dataUrl) return [];
-      return [{ id, name, path, url, dataUrl, mimeType, width, height, createdAt }];
+      return [{ id, name, path, url, thumbPath, thumbUrl: null, dataUrl, mimeType, width, height, createdAt }];
     })
     .slice(0, MAX_CLIPART_ASSETS);
 }
@@ -475,6 +485,7 @@ function normalizeClipartImages(
     | "strokeGapClosePixels"
     | "vectorizerLineAdjust"
     | "vectorizerInkThreshold"
+    | "vectorizerSketchRemoval"
     | "vectorizerFidelity"
   >,
 ): GraphClipartImage[] {
@@ -508,6 +519,7 @@ function normalizeClipartImages(
           imageColorQuantization: normalizeImageColorQuantization(record.imageColorQuantization),
           vectorizerLineAdjust: clampVectorizerLineAdjust(record.vectorizerLineAdjust ?? defaults.vectorizerLineAdjust),
           vectorizerInkThreshold: clampVectorizerInkThreshold(record.vectorizerInkThreshold ?? defaults.vectorizerInkThreshold),
+          vectorizerSketchRemoval: clampVectorizerSketchRemoval(record.vectorizerSketchRemoval ?? defaults.vectorizerSketchRemoval),
           vectorizerFidelity: normalizeVectorizerFidelity(record.vectorizerFidelity ?? defaults.vectorizerFidelity),
           locked: Boolean(record.locked),
           visible: typeof record.visible === "boolean" ? record.visible : true,
@@ -536,6 +548,7 @@ function normalizeSourceImages(
     | "strokeGapClosePixels"
     | "vectorizerLineAdjust"
     | "vectorizerInkThreshold"
+    | "vectorizerSketchRemoval"
     | "vectorizerFidelity"
   >,
 ): GraphSourceImage[] {
@@ -549,6 +562,7 @@ function normalizeSourceImages(
       const name = typeof record.name === "string" && record.name.trim() ? record.name.trim().slice(0, 160) : `Source ${index + 1}`;
       const path = typeof record.path === "string" && record.path.trim() ? record.path.trim().slice(0, 1024) : null;
       const url = typeof record.url === "string" && record.url.trim() ? record.url.trim().slice(0, 4096) : null;
+      const thumbPath = typeof record.thumbPath === "string" && record.thumbPath.trim() ? record.thumbPath.trim().slice(0, 1024) : null;
       const width = clampSourceSizeCells(record.width, defaultGraphSettings.imageWidth);
       const height = clampSourceSizeCells(record.height, defaultGraphSettings.imageHeight);
       const measurementUnit = isMeasurementUnit(record.measurementUnit) ? record.measurementUnit : defaults.measurementUnit;
@@ -562,6 +576,7 @@ function normalizeSourceImages(
       const imageColorQuantization = normalizeImageColorQuantization(record.imageColorQuantization);
       const vectorizerLineAdjust = clampVectorizerLineAdjust(record.vectorizerLineAdjust ?? defaults.vectorizerLineAdjust);
       const vectorizerInkThreshold = clampVectorizerInkThreshold(record.vectorizerInkThreshold ?? defaults.vectorizerInkThreshold);
+      const vectorizerSketchRemoval = clampVectorizerSketchRemoval(record.vectorizerSketchRemoval ?? defaults.vectorizerSketchRemoval);
       const vectorizerFidelity = normalizeVectorizerFidelity(record.vectorizerFidelity ?? defaults.vectorizerFidelity);
       const x = clampSourceX(record.x, graphWidth, width);
       const topPadding = clampPaddingCells(record.topPadding, graphHeight, 0);
@@ -579,6 +594,8 @@ function normalizeSourceImages(
           name,
           path,
           url,
+          thumbPath,
+          thumbUrl: null,
           width,
           height,
           measurementUnit,
@@ -592,6 +609,7 @@ function normalizeSourceImages(
           imageColorQuantization,
           vectorizerLineAdjust,
           vectorizerInkThreshold,
+          vectorizerSketchRemoval,
           vectorizerFidelity,
           x,
           y,
@@ -676,6 +694,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const vectorizerStrokeColor = normalizeCanvasColor(cleanMerged.vectorizerStrokeColor, outlineColor);
   const vectorizerLineAdjust = clampVectorizerLineAdjust(cleanMerged.vectorizerLineAdjust);
   const vectorizerInkThreshold = clampVectorizerInkThreshold(cleanMerged.vectorizerInkThreshold);
+  const vectorizerSketchRemoval = clampVectorizerSketchRemoval(cleanMerged.vectorizerSketchRemoval);
   const vectorizerFidelity = normalizeVectorizerFidelity(cleanMerged.vectorizerFidelity);
   const clipartAssets = normalizeClipartAssets(cleanMerged.clipartAssets);
   const clipartImages = normalizeClipartImages(cleanMerged.clipartImages, {
@@ -685,6 +704,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     strokeGapClosePixels,
     vectorizerLineAdjust,
     vectorizerInkThreshold,
+    vectorizerSketchRemoval,
     vectorizerFidelity,
   }).filter((image) => clipartAssets.some((asset) => asset.id === image.assetId));
   const gridLineColor = normalizeGraphLineColor(cleanMerged.gridLineColor, DEFAULT_GRID_LINE_COLOR);
@@ -711,6 +731,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     strokeGapClosePixels,
     vectorizerLineAdjust,
     vectorizerInkThreshold,
+    vectorizerSketchRemoval,
     vectorizerFidelity,
   });
   const printPaperSize = isPrintPaperSize(cleanMerged.printPaperSize) ? cleanMerged.printPaperSize : DEFAULT_PRINT_PAPER_SIZE;
@@ -761,6 +782,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     vectorizerStrokeColor,
     vectorizerLineAdjust,
     vectorizerInkThreshold,
+    vectorizerSketchRemoval,
     vectorizerFidelity,
     gridLineColor,
     gridLineLayer,
@@ -783,18 +805,14 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   };
 }
 
-async function signedUrlsForBucket(bucket: string, paths: Array<string | null | undefined>) {
-  const uniquePaths = Array.from(new Set(paths.filter((path): path is string => Boolean(path))));
-  const signedByPath = new Map<string, string | null>();
-  if (!uniquePaths.length) return signedByPath;
-  const supabase = tryGetSupabaseAdmin();
-  if (!supabase) return signedByPath;
-  const { data, error } = await supabase.storage.from(bucket).createSignedUrls(uniquePaths, 60 * 60);
-  if (error) return signedByPath;
-  for (const item of data ?? []) {
-    if (item.path) signedByPath.set(item.path, item.signedUrl ?? null);
-  }
-  return signedByPath;
+/**
+ * Signing is now a local HMAC computation against the Cloudflare media gateway.
+ * The previous implementation issued a `createSignedUrls` HTTP request to
+ * Supabase for every render — up to 132 paths on a single editor open — and
+ * minted a fresh token each time, so no browser cache entry was ever reusable.
+ */
+function signedUrlsForBucket(bucket: string, paths: Array<string | null | undefined>) {
+  return mediaUrlsForBucket(bucket, paths);
 }
 
 async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImageUrlMode: SignedImageUrlMode = "all"): Promise<Project> {
@@ -806,6 +824,10 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
           name: sourceNameFromPath(row.original_image_path),
           path: row.original_image_path,
           url: null,
+          // Legacy single-image projects predate derivatives; the full-size
+          // image is the only preview available.
+          thumbPath: null,
+          thumbUrl: null,
           width: baseSettings.imageWidth,
           height: baseSettings.imageHeight,
           measurementUnit: baseSettings.measurementUnit,
@@ -819,6 +841,7 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
           imageColorQuantization: DEFAULT_IMAGE_COLOR_QUANTIZATION,
           vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
           vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
+  vectorizerSketchRemoval: DEFAULT_VECTORIZER_SKETCH_REMOVAL,
           vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
           x: defaultSourceX(baseSettings.graphWidth, baseSettings.imageWidth),
           y: 0,
@@ -840,7 +863,9 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
       : signedUrlsForBucket(ORIGINAL_IMAGES_BUCKET, [
           row.original_image_path,
           ...unsignedSourceImages.map((source) => source.path),
+          ...unsignedSourceImages.map((source) => source.thumbPath),
           ...unsignedClipartAssets.map((asset) => asset.path),
+          ...unsignedClipartAssets.map((asset) => asset.thumbPath),
         ]),
     signedImageUrlMode === "all"
       ? signedUrlsForBucket(PROCESSED_IMAGES_BUCKET, [row.processed_image_path])
@@ -848,13 +873,17 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
   ]);
   const originalImageUrl = row.original_image_path ? originalSignedUrls.get(row.original_image_path) ?? null : null;
   const processedImageUrl = row.processed_image_path ? processedSignedUrls.get(row.processed_image_path) ?? null : null;
-  const sourceImages = unsignedSourceImages.map(({ url: _url, ...source }) => ({
+  // `url` and `thumbUrl` are always re-derived, never read from the stored
+  // settings — a persisted URL would go stale the moment its signature expired.
+  const sourceImages = unsignedSourceImages.map(({ url: _url, thumbUrl: _thumbUrl, ...source }) => ({
     ...source,
     url: source.path ? originalSignedUrls.get(source.path) ?? null : null,
+    thumbUrl: source.thumbPath ? originalSignedUrls.get(source.thumbPath) ?? null : null,
   }));
-  const clipartAssets = unsignedClipartAssets.map(({ url: _url, dataUrl: _dataUrl, ...asset }) => ({
+  const clipartAssets = unsignedClipartAssets.map(({ url: _url, thumbUrl: _thumbUrl, dataUrl: _dataUrl, ...asset }) => ({
     ...asset,
     url: asset.path ? originalSignedUrls.get(asset.path) ?? null : null,
+    thumbUrl: asset.thumbPath ? originalSignedUrls.get(asset.thumbPath) ?? null : null,
     dataUrl: null,
   }));
   const settings = {
@@ -933,7 +962,10 @@ export async function getProjectSummaries(options: ProjectSummaryPageOptions = {
   const rows = allRows.slice(0, pageSize);
 
   const [processedSignedUrls, originalSignedUrls] = await Promise.all([
-    signedUrlsForBucket(PROCESSED_IMAGES_BUCKET, rows.map((row) => row.processed_image_path)),
+    signedUrlsForBucket(PROCESSED_IMAGES_BUCKET, [
+      ...rows.map((row) => row.processed_image_path),
+      ...rows.map((row) => row.processed_thumb_path),
+    ]),
     signedUrlsForBucket(ORIGINAL_IMAGES_BUCKET, rows.map((row) => row.original_image_path)),
   ]);
 
@@ -958,6 +990,8 @@ export async function getProjectSummaries(options: ProjectSummaryPageOptions = {
       updatedAt: row.updated_at,
       originalImageUrl: row.original_image_path ? originalSignedUrls.get(row.original_image_path) ?? null : null,
       processedImageUrl: row.processed_image_path ? processedSignedUrls.get(row.processed_image_path) ?? null : null,
+      processedThumbPath: row.processed_thumb_path ?? null,
+      processedThumbUrl: row.processed_thumb_path ? processedSignedUrls.get(row.processed_thumb_path) ?? null : null,
       palettePreview: palettes.slice(0, 6),
     };
   });
@@ -1041,6 +1075,10 @@ export function clipartImagePath(userId: string, projectId: string, clipartId: s
   const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]/g, "") || "png";
   return `${userId}/${projectId}/cliparts/${safeClipartId}.${safeExtension}`;
 }
+
+// Re-exported so existing call sites keep a single import; the definitions live
+// in a pure module because client upload code and unit tests need them too.
+export { MAX_THUMBNAIL_BYTES, THUMBNAIL_CONTENT_TYPE, thumbnailPathFor } from "@/lib/storage/paths";
 
 export async function replaceProjectPalettes(projectId: string, palettes: PaletteColor[]) {
   const supabase = getSupabaseAdmin();

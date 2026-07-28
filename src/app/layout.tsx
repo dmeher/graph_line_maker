@@ -1,9 +1,14 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import "./atelier.css";
+import "./atelier-workspace.css";
+import "./atelier-editor.css";
+import "./atelier-polish.css";
+import "./atelier-editor-studio.css";
 
 export const viewport: Viewport = {
-  themeColor: "#0b1017",
+  themeColor: "#f4f3ef",
 };
 
 const geistSans = Geist({
@@ -67,13 +72,26 @@ const serviceWorkerRegistrationScript = `
 const themePreferenceScript = `
 (() => {
   const storageKey = "graph-pixel-theme";
-  const colors = { dark: "#0b1017", light: "#f5f7fa" };
-  let theme = "dark";
+  const editorStorageKey = "graph-pixel-editor-theme";
+  const projectViewStorageKey = "graph-pixel-project-view";
+  const colors = { dark: "#111319", light: "#f4f3ef" };
+  let theme = "light";
+  let editorTheme = "dark";
+  let projectView = "grid";
   try {
     const stored = window.localStorage.getItem(storageKey);
-    if (stored === "dark" || stored === "light") theme = stored;
+    if (stored === "dark" || stored === "light") {
+      theme = stored;
+      editorTheme = stored;
+    }
+    const storedEditorTheme = window.localStorage.getItem(editorStorageKey);
+    if (storedEditorTheme === "dark" || storedEditorTheme === "light") editorTheme = storedEditorTheme;
+    const storedProjectView = window.localStorage.getItem(projectViewStorageKey);
+    if (storedProjectView === "grid" || storedProjectView === "list") projectView = storedProjectView;
   } catch {}
   document.documentElement.dataset.theme = theme;
+  document.documentElement.dataset.editorTheme = editorTheme;
+  document.documentElement.dataset.projectView = projectView;
   document.documentElement.style.colorScheme = theme;
   document.querySelector('meta[name="theme-color"]')?.setAttribute("content", colors[theme]);
 })();
@@ -87,8 +105,10 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      data-theme="dark"
-      style={{ colorScheme: "dark" }}
+      data-theme="light"
+      data-editor-theme="dark"
+      data-project-view="grid"
+      style={{ colorScheme: "light" }}
       suppressHydrationWarning
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >

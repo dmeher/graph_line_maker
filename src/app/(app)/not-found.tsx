@@ -4,8 +4,9 @@ import { EmptyState } from "@/components/ui/primitives";
 
 export default function AppNotFound() {
   return (
-    <main className="grid min-h-[70dvh] place-items-center p-5">
+    <main className="system-state-page">
       <EmptyState
+        className="system-state-card"
         icon={<FileQuestion size={28} />}
         title="Project not found"
         description="The project may have been removed or you may not have access to it."

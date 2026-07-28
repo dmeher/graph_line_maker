@@ -1,7 +1,7 @@
 import type { GraphCellLineSide, GraphSettings, GraphShapeKind, MeasurementUnit } from "@/lib/types";
 
 export type ShapeFillMode = "outline" | "filled";
-export type GeneratedShapeKind = Extract<GraphShapeKind, "square" | "rectangle" | "circle" | "oval" | "half-circle">;
+export type GeneratedShapeKind = Extract<GraphShapeKind, "square" | "rectangle" | "circle" | "oval" | "half-circle" | "line" | "arrow">;
 
 export { MAX_CANVAS_DIMENSION } from "@/lib/canvas/performance-limits";
 export const CLIPART_ACCEPT = "image/png,image/jpeg,image/webp,image/svg+xml,.svg";
@@ -15,7 +15,17 @@ export const CELL_LINE_SIDE_LABELS: Record<GraphCellLineSide, string> = {
   left: "Left",
 };
 
-export const GENERATED_SHAPE_KIND_KEYS: GeneratedShapeKind[] = ["square", "rectangle", "circle", "oval", "half-circle"];
+// Line and arrow are open paths rather than closed areas, so the Filled mode
+// and the per-side checkboxes below do not apply to them; the inspector hides
+// those controls for open kinds.
+export const GENERATED_SHAPE_KIND_KEYS: GeneratedShapeKind[] = ["square", "rectangle", "circle", "oval", "half-circle", "line", "arrow"];
+
+/** Open paths: no interior to fill and no four sides to toggle. */
+export const OPEN_SHAPE_KINDS: GeneratedShapeKind[] = ["line", "arrow"];
+
+export function isOpenShapeKind(kind: GraphShapeKind) {
+  return OPEN_SHAPE_KINDS.includes(kind as GeneratedShapeKind);
+}
 
 export const GRAPH_SHAPE_KIND_KEYS: GraphShapeKind[] = ["square", "rectangle", "circle", "oval", "half-circle", "line", "arrow"];
 

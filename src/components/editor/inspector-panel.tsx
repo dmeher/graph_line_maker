@@ -1,12 +1,23 @@
 "use client";
 
-import { type ReactNode, type DragEvent as ReactDragEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
+  Children,
+  Fragment,
+  isValidElement,
+  useId,
+  useState,
+  type ReactElement,
+  type ReactNode,
+  type DragEvent as ReactDragEvent,
+} from "react";
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
   Check,
+  ClipboardPaste,
   Copy,
-  Eraser,
-  Eye,
-  EyeOff,
   FlipHorizontal,
   FlipVertical,
   Grid3X3,
@@ -14,9 +25,7 @@ import {
   Loader2,
   Lock,
   MousePointer2,
-  MoveHorizontal,
   Palette,
-  PenTool,
   Printer,
   RefreshCw,
   RotateCcw,
@@ -31,21 +40,20 @@ import {
 import {
   InspectorCheckbox,
   InspectorColorControl,
-  InspectorGroup,
+  InspectorFieldGrid,
+  InspectorMetricGrid,
+  InspectorModeRail,
   InspectorRow,
   InspectorSelect,
   inspectorControlClass,
 } from "./inspector-controls";
 import {
-  CollapsibleSection,
   ColorPresetField,
-  ColorSummary,
+  InspectorDisclosure,
   InspectorSegmented,
   NumberField,
-  ShapePreviewSvg,
 } from "./inspector/inspector-fields";
 import type {
-  GraphCellLineSide,
   GraphCellPaint,
   GraphClipartAsset,
   GraphClipartImage,
@@ -54,6 +62,7 @@ import type {
   GraphShapeKind,
   GraphSourceImage,
   MeasurementUnit,
+  PaletteColor,
 } from "@/lib/types";
 import type { FillRegion } from "@/lib/canvas/processor";
 import {
@@ -62,14 +71,16 @@ import {
   GRAPH_GRID_LINE_STYLE_KEYS,
   GRAPH_GRID_PATTERN_KEYS,
   GRAPH_LINE_LAYER_KEYS,
-  GRAPH_MAJOR_CELL_PIXELS,
   GRAPH_VECTORIZER_FIDELITY_KEYS,
   MAJOR_GRID_EVERY_KEYS,
   MAX_GRAPH_HEIGHT_CELLS,
   MAX_GRAPH_WIDTH_CELLS,
   MAX_VECTORIZER_INK_THRESHOLD,
+  MAX_VECTORIZER_SKETCH_REMOVAL,
   MAX_VECTORIZER_LINE_ADJUST,
   MIN_VECTORIZER_INK_THRESHOLD,
+  MIN_VECTORIZER_SKETCH_REMOVAL,
+  DEFAULT_VECTORIZER_SKETCH_REMOVAL,
   MIN_VECTORIZER_LINE_ADJUST,
   PRESET_GRAPH_LINE_COLORS,
   PRINT_HORIZONTAL_ALIGNMENT_KEYS,
@@ -77,15 +88,12 @@ import {
   PRINT_PAPER_SIZE_KEYS,
   PRINT_PAPER_SIZES,
   PRINT_VERTICAL_ALIGNMENT_KEYS,
-  TRANSPARENT_FILL_COLOR,
+  type GraphGridLineStyle,
   normalizeGraphLineColor,
 } from "@/lib/graph-paper";
 import {
-  CELL_LINE_SIDE_KEYS,
-  CELL_LINE_SIDE_LABELS,
   CLIPART_ACCEPT,
   GENERATED_SHAPE_FILL_MODE_LABELS,
-  GENERATED_SHAPE_KIND_KEYS,
   GRAPH_SHAPE_KIND_LABELS,
   GRAPH_LINE_LAYER_LABELS,
   GRID_NUMBER_PLACEMENT_LABELS,
@@ -99,10 +107,9 @@ import {
 
 type InspectorTab = "graph" | "source" | "draw" | "palette";
 type DrawTab = "shape" | "clipart";
-type DrawingTool = "image" | "cell" | "shape" | "background-remover" | "image-eraser";
+type DrawingTool = "image" | "line" | "shape" | "background-remover" | "image-eraser" | "lasso";
+type ClosedGeneratedShapeKind = Exclude<GeneratedShapeKind, "line" | "arrow">;
 type CollapsibleKey = "parameters" | "drawing" | "outline" | "fill" | "selectedFill" | "graphLines";
-type SourceStatus = { ready: boolean; previewUrl: string | null; error: string | null };
-
 function paperSizeOptionLabel(key: GraphSettings["printPaperSize"]) {
   const paper = PRINT_PAPER_SIZES[key] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
   return `${paper.label} (${Math.round(paper.widthCm * 10)} x ${Math.round(paper.heightCm * 10)} mm)`;
@@ -110,13 +117,12 @@ function paperSizeOptionLabel(key: GraphSettings["printPaperSize"]) {
 
 export interface InspectorPanelProps {
   settings: GraphSettings;
-  sourceStatus: Record<string, SourceStatus>;
+  palette: PaletteColor[];
   inspectorTab: InspectorTab;
   setInspectorTab: (tab: InspectorTab) => void;
   drawTab: DrawTab;
   setDrawTab: (tab: DrawTab) => void;
   drawingTool: DrawingTool;
-  setDrawingTool: (tool: DrawingTool) => void;
   collapsedSections: Record<CollapsibleKey, boolean>;
   toggleSection: (section: CollapsibleKey) => void;
 
@@ -135,39 +141,27 @@ export interface InspectorPanelProps {
   clipartSearch: string;
   setClipartSearch: (value: string) => void;
   placingClipartAssetId: string | null;
-  placingGeneratedShape: boolean;
+  selectionConsole: SelectionConsoleModel;
   selectedLayerCount: number;
   selectedLayerBounds: { width: number; height: number } | null;
   selectedLayerLocked: boolean;
   selectedLayerResizeDisabled: boolean;
   selectedLayerHidden: boolean;
-  deleteSelectedLayer: () => void;
-  toggleSelectedLayerLock: () => void;
-  toggleSelectedLayerVisibility: () => void;
-  duplicateSelectedLayers: () => void;
-  nudgeSelectedLayer: (deltaX: number, deltaY: number) => void;
   resizeSelectedLayerBounds: (size: { width?: number; height?: number }) => void;
-  rotateSelectedLayers: (direction: -1 | 1) => void;
-  flipSelectedLayers: (axis: "x" | "y") => void;
 
   draftShapeKind: GeneratedShapeKind;
-  draftShapeWidthCm: number;
-  draftShapeHeightCm: number;
+  armedShapeKind: ClosedGeneratedShapeKind | null;
   draftShapeFillMode: ShapeFillMode;
-  draftShapeSides: GraphCellLineSide[];
   draftShapeStrokeWidth: number;
   draftShapeStrokeColor: string;
+  draftShapeStrokeStyle: GraphGridLineStyle;
   draftShapeFillColor: string;
-  draftShapePreviewDimensions: { width: number; height: number };
   setDraftShapeKind: (kind: GeneratedShapeKind) => void;
-  setDraftShapeWidthCm: (value: number) => void;
-  setDraftShapeHeightCm: (value: number) => void;
   setDraftShapeFillMode: (mode: ShapeFillMode) => void;
-  setDraftShapeSide: (side: GraphCellLineSide, checked: boolean) => void;
   setDraftShapeStrokeWidth: (value: number) => void;
   setDraftShapeStrokeColor: (value: string) => void;
+  setDraftShapeStrokeStyle: (value: GraphGridLineStyle) => void;
   setDraftShapeFillColor: (value: string) => void;
-  setPlacingGeneratedShape: (value: boolean | ((prev: boolean) => boolean)) => void;
   setPlacingClipartAssetId: (value: string | null | ((prev: string | null) => string | null)) => void;
 
   draftClipartWidthCm: number;
@@ -180,9 +174,7 @@ export interface InspectorPanelProps {
   setDraftClipartStrokeColor: (value: string) => void;
   setDraftClipartFillColor: (value: string) => void;
 
-  handleGeneratedShapeDragStart: (event: ReactDragEvent<HTMLElement>) => void;
   handleClipartDragStart: (assetId: string) => (event: ReactDragEvent<HTMLElement>) => void;
-  clearGraphShapes: () => void;
   uploadClipartAssets: (files: File[] | FileList) => Promise<boolean> | boolean;
   deleteClipartAsset: (id: string) => Promise<boolean> | boolean;
   setGeneratedImagesCollapsed: (value: boolean | ((prev: boolean) => boolean)) => void;
@@ -195,14 +187,10 @@ export interface InspectorPanelProps {
   applySourceImagePropertiesToAll: (id: string) => void;
   updateSourceImagePhysicalWidthCm: (id: string, value: number) => void;
   updateSourceImagePhysicalHeight: (id: string, value: number) => void;
-  rotateSourceImage: (id: string, direction: 1 | -1) => void;
-  flipSourceImage: (id: string, axis: "x" | "y") => void;
   sourcePhysicalWidthCm: (source: GraphSourceImage) => number;
   sourcePhysicalHeight: (source: GraphSourceImage) => number;
   sourceRightPadding: (source: GraphSourceImage) => number;
   sourceBottomPadding: (source: GraphSourceImage) => number;
-  toggleSourceLock: (id: string) => void;
-  toggleSourceVisibility: (id: string) => void;
 
   updateSetting: <K extends keyof GraphSettings>(key: K, value: GraphSettings[K]) => void;
   updateMeasurementUnit: (unit: MeasurementUnit) => void;
@@ -225,20 +213,51 @@ export interface InspectorPanelProps {
   printHeightCm: number;
   roundMeasure: (value: number) => number;
   cmToUnit: (value: number, unit: MeasurementUnit) => number;
+  unitToCm: (value: number, unit: MeasurementUnit) => number;
 
   clipartAssetAspect: (asset?: GraphClipartAsset | null) => number;
 
-  beginPanelResize: (event: ReactPointerEvent<HTMLElement>, side: "left" | "right") => void;
-  resizePanel: (event: ReactPointerEvent<HTMLElement>) => void;
-  endPanelResize: (event: ReactPointerEvent<HTMLElement>) => void;
-  resizingPanelSide: "left" | "right" | null;
 }
 
-const inspectorTabs: { id: InspectorTab; label: string; icon: ReactNode }[] = [
-  { id: "graph", label: "Document", icon: <Grid3X3 size={20} strokeWidth={2.15} aria-hidden="true" /> },
-  { id: "source", label: "Selection", icon: <ImageIcon size={20} strokeWidth={2.15} aria-hidden="true" /> },
-  { id: "draw", label: "Create", icon: <PenTool size={20} strokeWidth={2.15} aria-hidden="true" /> },
-  { id: "palette", label: "Colors", icon: <Palette size={20} strokeWidth={2.15} aria-hidden="true" /> },
+export type SelectionConsoleKind =
+  | "none"
+  | "source"
+  | "shape"
+  | "clipart"
+  | "cell"
+  | "multi";
+
+export type SelectionConsoleStatus = "ready" | "hidden" | "locked" | "mixed";
+
+export type SelectionConsoleAction = {
+  disabled: boolean;
+  onAction: () => void;
+};
+
+export interface SelectionConsoleModel {
+  kind: SelectionConsoleKind;
+  count: number;
+  status: SelectionConsoleStatus;
+  clipboardCount: number;
+  actions: {
+    copy: SelectionConsoleAction;
+    paste: SelectionConsoleAction;
+    rotateLeft: SelectionConsoleAction;
+    rotateRight: SelectionConsoleAction;
+    flipHorizontal: SelectionConsoleAction;
+    flipVertical: SelectionConsoleAction;
+    nudgeLeft: SelectionConsoleAction;
+    nudgeUp: SelectionConsoleAction;
+    nudgeDown: SelectionConsoleAction;
+    nudgeRight: SelectionConsoleAction;
+  };
+}
+
+const inspectorTabs: { id: InspectorTab; label: string; accessibleLabel: string; icon: ReactNode }[] = [
+  { id: "graph", label: "Document", accessibleLabel: "Document", icon: <Grid3X3 size={18} strokeWidth={2.15} aria-hidden="true" /> },
+  { id: "source", label: "Selection", accessibleLabel: "Selection", icon: <MousePointer2 size={18} strokeWidth={2.15} aria-hidden="true" /> },
+  { id: "draw", label: "Create", accessibleLabel: "Create", icon: <Shapes size={18} strokeWidth={2.15} aria-hidden="true" /> },
+  { id: "palette", label: "Color", accessibleLabel: "Color", icon: <Palette size={18} strokeWidth={2.15} aria-hidden="true" /> },
 ];
 
 const drawTabs: { id: DrawTab; label: string }[] = [
@@ -246,68 +265,372 @@ const drawTabs: { id: DrawTab; label: string }[] = [
   { id: "clipart", label: "Clipart" },
 ];
 
-const drawingToolOptions: { id: DrawingTool; label: string }[] = [
-  { id: "image", label: "Select" },
-  { id: "cell", label: "Cell" },
-  { id: "shape", label: "Shape" },
-];
+const OPEN_SHAPE_GENERATOR_KINDS: GeneratedShapeKind[] = ["line", "arrow"];
+const CLOSED_SHAPE_GENERATOR_KINDS: GeneratedShapeKind[] = ["square", "rectangle", "circle", "oval", "half-circle"];
+
+const selectionKindLabels: Record<SelectionConsoleKind, string> = {
+  none: "No selection",
+  source: "Source image",
+  shape: "Shape",
+  clipart: "Clipart",
+  cell: "Cell paint",
+  multi: "Layer selection",
+};
+
+const selectionStatusLabels: Record<SelectionConsoleStatus, string> = {
+  ready: "Ready",
+  hidden: "Hidden",
+  locked: "Locked",
+  mixed: "Mixed state",
+};
+
+function FocusConsoleShelfPanel({
+  mode,
+  active,
+  label,
+  children,
+}: {
+  mode: InspectorTab;
+  active: boolean;
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      className="focus-console__shelf-panel"
+      data-focus-console-shelf={mode}
+      aria-label={label}
+      hidden={!active}
+    >
+      {children}
+    </section>
+  );
+}
+
+function FocusConsoleActionButton({
+  action,
+  label,
+  title,
+  icon,
+}: {
+  action: SelectionConsoleAction;
+  label: string;
+  title?: string;
+  icon: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="focus-console__command"
+      disabled={action.disabled}
+      onClick={action.onAction}
+      aria-label={label}
+      title={title ?? label}
+    >
+      {icon}
+    </button>
+  );
+}
+
+function SelectionCommandShelf({ model }: { model: SelectionConsoleModel }) {
+  const kindLabel = selectionKindLabels[model.kind];
+  const statusLabel = selectionStatusLabels[model.status];
+  const selectionLabel =
+    model.count === 0
+      ? kindLabel
+      : `${model.count} ${model.count === 1 ? kindLabel.toLocaleLowerCase("en") : "layers"}`;
+
+  return (
+    <div
+      className="focus-console__selection-shelf"
+      data-focus-command-shelf="selection"
+      data-selection-kind={model.kind}
+      data-selection-status={model.status}
+    >
+      <div className="focus-console__selection-summary">
+        <span className="focus-console__shelf-kicker">Selection</span>
+        <strong>{selectionLabel}</strong>
+        <span className="focus-console__status" data-status={model.status}>
+          <i aria-hidden="true" />
+          {statusLabel}
+        </span>
+      </div>
+
+      <div className="focus-console__selection-toolbar" role="toolbar" aria-label="Selection commands">
+        <div className="focus-console__command-pair">
+          <FocusConsoleActionButton
+            action={model.actions.copy}
+            label="Copy selection"
+            icon={<Copy size={15} aria-hidden="true" />}
+          />
+          <FocusConsoleActionButton
+            action={model.actions.paste}
+            label="Paste layers"
+            title={
+              model.clipboardCount > 0
+                ? `Paste ${model.clipboardCount} ${model.clipboardCount === 1 ? "layer" : "layers"}`
+                : "Paste layers"
+            }
+            icon={<ClipboardPaste size={15} aria-hidden="true" />}
+          />
+        </div>
+
+        <div className="focus-console__command-grid focus-console__command-grid--transform">
+          <FocusConsoleActionButton
+            action={model.actions.rotateLeft}
+            label="Rotate selection left"
+            icon={<RotateCcw size={15} aria-hidden="true" />}
+          />
+          <FocusConsoleActionButton
+            action={model.actions.rotateRight}
+            label="Rotate selection right"
+            icon={<RotateCw size={15} aria-hidden="true" />}
+          />
+          <FocusConsoleActionButton
+            action={model.actions.flipHorizontal}
+            label="Flip selection horizontally"
+            icon={<FlipHorizontal size={15} aria-hidden="true" />}
+          />
+          <FocusConsoleActionButton
+            action={model.actions.flipVertical}
+            label="Flip selection vertically"
+            icon={<FlipVertical size={15} aria-hidden="true" />}
+          />
+        </div>
+
+        <div className="focus-console__nudge-pad" role="group" aria-label="Nudge selection">
+          <span aria-hidden="true" />
+          <FocusConsoleActionButton
+            action={model.actions.nudgeUp}
+            label="Nudge selection up"
+            icon={<ArrowUp size={15} aria-hidden="true" />}
+          />
+          <span aria-hidden="true" />
+          <FocusConsoleActionButton
+            action={model.actions.nudgeLeft}
+            label="Nudge selection left"
+            icon={<ArrowLeft size={15} aria-hidden="true" />}
+          />
+          <span className="focus-console__nudge-center" aria-hidden="true" />
+          <FocusConsoleActionButton
+            action={model.actions.nudgeRight}
+            label="Nudge selection right"
+            icon={<ArrowRight size={15} aria-hidden="true" />}
+          />
+          <span aria-hidden="true" />
+          <FocusConsoleActionButton
+            action={model.actions.nudgeDown}
+            label="Nudge selection down"
+            icon={<ArrowDown size={15} aria-hidden="true" />}
+          />
+          <span aria-hidden="true" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type InspectorGroupProps = {
+  title: string;
+  tabLabel?: string;
+  icon?: ReactNode;
+  description?: string;
+  action?: ReactNode;
+  priority?: "primary" | "secondary" | "quiet";
+  layout?: "card" | "flush";
+  children: ReactNode;
+};
+
+function InspectorGroup({
+  title,
+  description,
+  action,
+  priority = "secondary",
+  layout = "card",
+  children,
+}: InspectorGroupProps) {
+  return (
+    <section
+      className="editor-inspector-group"
+      data-priority={priority}
+      data-layout={layout}
+    >
+      {description || action ? (
+        <header className="editor-inspector-group__panel-header">
+          <span>{description ?? title}</span>
+          {action ? <span className="editor-inspector-group__action">{action}</span> : null}
+        </header>
+      ) : null}
+      <div className="editor-inspector-group__body">{children}</div>
+    </section>
+  );
+}
+
+type InspectorGroupElement = ReactElement<InspectorGroupProps, typeof InspectorGroup>;
+
+function collectInspectorGroups(children: ReactNode, result: InspectorGroupElement[] = []) {
+  Children.forEach(children, (child) => {
+    if (!isValidElement(child)) return;
+    if (child.type === Fragment) {
+      collectInspectorGroups((child.props as { children?: ReactNode }).children, result);
+      return;
+    }
+    if (child.type === InspectorGroup) result.push(child as InspectorGroupElement);
+  });
+  return result;
+}
+
+function inspectorLensId(title: string, index: number) {
+  const slug = title
+    .toLocaleLowerCase("en")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${slug || "view"}-${index}`;
+}
+
+/**
+ * Focus Lens keeps every settings panel mounted while presenting one compact
+ * view at a time. This avoids the clipping and long stacked scroll that the
+ * previous card/accordion treatment caused in a floating inspector.
+ */
+function InspectorSections({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  const baseId = useId();
+  const groups = collectInspectorGroups(children);
+  const entries = groups.map((group, index) => ({
+    id: inspectorLensId(group.props.title, index),
+    group,
+  }));
+  const [requestedId, setRequestedId] = useState<string | null>(null);
+  const activeId = entries.some((entry) => entry.id === requestedId)
+    ? requestedId
+    : entries[0]?.id ?? null;
+  const activeEntry = entries.find((entry) => entry.id === activeId);
+
+  if (!entries.length) return null;
+
+  function activate(index: number, focus = false) {
+    const entry = entries[index];
+    if (!entry) return;
+    setRequestedId(entry.id);
+    if (focus) {
+      requestAnimationFrame(() => {
+        document.getElementById(`${baseId}-tab-${entry.id}`)?.focus();
+      });
+    }
+  }
+
+  return (
+    <div
+      className="editor-inspector__sections"
+      data-focus-lens={label}
+      data-has-focus-shelf="false"
+    >
+      <div
+        className="editor-inspector__lens-workspace"
+        data-has-inline-shelf="false"
+      >
+        <div
+          className="editor-inspector__lens-tabs"
+          role="tablist"
+          aria-label={`${label} views`}
+          aria-orientation="horizontal"
+        >
+          {entries.map(({ id, group }, index) => {
+            const active = id === activeId;
+            return (
+              <button
+                key={id}
+                type="button"
+                id={`${baseId}-tab-${id}`}
+                className="editor-inspector__lens-tab"
+                role="tab"
+                aria-selected={active}
+                aria-controls={`${baseId}-panel-${id}`}
+                tabIndex={active ? 0 : -1}
+                onClick={() => activate(index)}
+                onKeyDown={(event) => {
+                  const lastIndex = entries.length - 1;
+                  const nextIndex =
+                    event.key === "Home"
+                      ? 0
+                      : event.key === "End"
+                        ? lastIndex
+                        : event.key === "ArrowRight" || event.key === "ArrowDown"
+                          ? (index + 1) % entries.length
+                          : event.key === "ArrowLeft" || event.key === "ArrowUp"
+                            ? (index - 1 + entries.length) % entries.length
+                            : null;
+                  if (nextIndex === null) return;
+                  event.preventDefault();
+                  activate(nextIndex, true);
+                }}
+              >
+                {group.props.icon ? (
+                  <span className="editor-inspector__lens-tab-icon" aria-hidden="true">
+                    {group.props.icon}
+                  </span>
+                ) : null}
+                <span>{group.props.tabLabel ?? group.props.title}</span>
+                <i aria-hidden="true" />
+              </button>
+            );
+          })}
+        </div>
+
+        <div
+          className="editor-inspector__lens-deck"
+          data-active-layout={activeEntry?.group.props.layout ?? "card"}
+        >
+          {entries.map(({ id, group }) => {
+            const active = id === activeId;
+            return (
+              <section
+                key={id}
+                id={`${baseId}-panel-${id}`}
+                className="editor-inspector-group"
+                role="tabpanel"
+                aria-labelledby={`${baseId}-tab-${id}`}
+                data-priority={group.props.priority ?? "secondary"}
+                data-layout={group.props.layout ?? "card"}
+                hidden={!active}
+              >
+                {group.props.description || group.props.action ? (
+                  <header className="editor-inspector-group__panel-header">
+                    <span>{group.props.description ?? group.props.title}</span>
+                    {group.props.action ? (
+                      <span className="editor-inspector-group__action">{group.props.action}</span>
+                    ) : null}
+                  </header>
+                ) : null}
+                <div className="editor-inspector-group__body">{group.props.children}</div>
+              </section>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function shapeUsesSingleSize(kind: GraphShapeKind) {
   return kind === "square" || kind === "circle";
 }
 
-function shapeSupportsSides(kind: GraphShapeKind) {
-  return kind === "square" || kind === "rectangle";
-}
-
-function InspectorTabBar({
-  value,
-  onChange,
-}: {
-  value: InspectorTab;
-  onChange: (tab: InspectorTab) => void;
-}) {
-  return (
-    <div
-      className="grid w-full grid-cols-4 gap-1.5 rounded-xl border border-[#2a3344] bg-[#161f2e] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]"
-      role="tablist"
-      aria-label="Inspector tabs"
-    >
-      {inspectorTabs.map((tab) => {
-        const active = tab.id === value;
-        return (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            aria-selected={active}
-            aria-label={tab.label}
-            title={tab.label}
-            onClick={() => onChange(tab.id)}
-            className={`grid h-11 min-w-0 place-items-center rounded-lg border text-[11px] font-bold transition-colors ${
-              active
-                ? "border-[#008c8f] bg-[#141b28] text-[#006f72] shadow-sm"
-                : "border-transparent text-[#9aa7ba] hover:border-[#2a3344] hover:bg-[#1b2433] hover:text-[#e7edf5]"
-            }`}
-          >
-            {tab.icon}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 export function InspectorPanel(props: InspectorPanelProps) {
   const {
     settings,
-    sourceStatus,
+    palette,
     inspectorTab,
     setInspectorTab,
     drawTab,
     setDrawTab,
     drawingTool,
-    setDrawingTool,
     collapsedSections,
     toggleSection,
     selectedSource,
@@ -324,38 +647,26 @@ export function InspectorPanel(props: InspectorPanelProps) {
     clipartSearch,
     setClipartSearch,
     placingClipartAssetId,
-    placingGeneratedShape,
+    selectionConsole,
     selectedLayerCount,
     selectedLayerBounds,
     selectedLayerLocked,
     selectedLayerResizeDisabled,
     selectedLayerHidden,
-    deleteSelectedLayer,
-    toggleSelectedLayerLock,
-    toggleSelectedLayerVisibility,
-    duplicateSelectedLayers,
-    nudgeSelectedLayer,
     resizeSelectedLayerBounds,
-    rotateSelectedLayers,
-    flipSelectedLayers,
     draftShapeKind,
-    draftShapeWidthCm,
-    draftShapeHeightCm,
+    armedShapeKind,
     draftShapeFillMode,
-    draftShapeSides,
     draftShapeStrokeWidth,
     draftShapeStrokeColor,
+    draftShapeStrokeStyle,
     draftShapeFillColor,
-    draftShapePreviewDimensions,
     setDraftShapeKind,
-    setDraftShapeWidthCm,
-    setDraftShapeHeightCm,
     setDraftShapeFillMode,
-    setDraftShapeSide,
     setDraftShapeStrokeWidth,
     setDraftShapeStrokeColor,
+    setDraftShapeStrokeStyle,
     setDraftShapeFillColor,
-    setPlacingGeneratedShape,
     setPlacingClipartAssetId,
     draftClipartWidthCm,
     draftClipartHeightCm,
@@ -366,9 +677,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
     setDraftClipartHeightCm,
     setDraftClipartStrokeColor,
     setDraftClipartFillColor,
-    handleGeneratedShapeDragStart,
     handleClipartDragStart,
-    clearGraphShapes,
     uploadClipartAssets,
     deleteClipartAsset,
     setGeneratedImagesCollapsed,
@@ -379,14 +688,10 @@ export function InspectorPanel(props: InspectorPanelProps) {
     applySourceImagePropertiesToAll,
     updateSourceImagePhysicalWidthCm,
     updateSourceImagePhysicalHeight,
-    rotateSourceImage,
-    flipSourceImage,
     sourcePhysicalWidthCm,
     sourcePhysicalHeight,
     sourceRightPadding,
     sourceBottomPadding,
-    toggleSourceLock,
-    toggleSourceVisibility,
     updateSetting,
     updateMeasurementUnit,
     updateImageWidthCm,
@@ -406,315 +711,568 @@ export function InspectorPanel(props: InspectorPanelProps) {
     printHeightCm,
     roundMeasure,
     cmToUnit,
+    unitToCm,
     clipartAssetAspect,
-    beginPanelResize,
-    resizePanel,
-    endPanelResize,
-    resizingPanelSide,
   } = props;
 
-  const selectedSourceInspector = (
-    <div className={inspectorTab === "source" ? "space-y-4" : "hidden"}>
-      {selectedSource ? (
-        <div className="space-y-4">
-          <div className="rounded-xl border border-[#2a3344] bg-[#141b28] p-4 shadow-sm">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="truncate text-sm font-bold text-[#e7edf5]">{selectedSource.name}</p>
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <span
-                    className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
-                      selectedSource.locked
-                        ? "bg-amber-50 text-amber-700"
-                        : "bg-teal-50 text-[#007174]"
-                    }`}
-                  >
-                    {selectedSource.locked ? "Locked" : "Editable"}
-                  </span>
-                  <span
-                    className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
-                      sourceStatus[selectedSource.id]?.ready
-                        ? "bg-green-50 text-green-700"
-                        : sourceStatus[selectedSource.id]?.error
-                          ? "bg-red-50 text-red-700"
-                          : "bg-slate-100 text-[#9aa7ba]"
-                    }`}
-                  >
-                    {sourceStatus[selectedSource.id]?.ready
-                      ? "Ready"
-                      : sourceStatus[selectedSource.id]?.error || "Loading"}
-                  </span>
+  const selectedDrawingDimensions = selectedShapeLayer
+    ? { width: Math.abs(selectedShapeLayer.width), height: Math.abs(selectedShapeLayer.height) }
+    : selectedClipartLayer
+      ? { width: Math.abs(selectedClipartLayer.width), height: Math.abs(selectedClipartLayer.height) }
+      : selectedCellLayer
+        ? { width: Math.abs(selectedCellLayer.width), height: Math.abs(selectedCellLayer.height) }
+        : null;
+
+  const selectionInspector = (
+    <div
+      id="editor-inspector-panel-source"
+      role="tabpanel"
+      aria-labelledby="editor-inspector-tab-source"
+      className={`editor-inspector__tab-panel editor-inspector__tab-panel--selection ${inspectorTab === "source" ? "" : "hidden"}`}
+      data-inspector-panel="selection"
+    >
+      <InspectorSections label="Selection">
+        {selectedLayerCount > 1 ? (
+          <>
+          <InspectorGroup title="Transform selection" tabLabel="Transform" icon={<Copy size={15} aria-hidden="true" />}>
+            {selectedLayerBounds ? (
+              <InspectorFieldGrid>
+                <NumberField
+                  label="Group width"
+                  unit="cells"
+                  emphasis="primary"
+                  value={selectedLayerBounds.width}
+                  min={0.25}
+                  max={1000}
+                  step={0.25}
+                  allowDecimalInput
+                  disabled={selectedLayerResizeDisabled}
+                  onChange={(width) => resizeSelectedLayerBounds({ width })}
+                />
+                <NumberField
+                  label="Group height"
+                  unit="cells"
+                  emphasis="primary"
+                  value={selectedLayerBounds.height}
+                  min={0.25}
+                  max={1000}
+                  step={0.25}
+                  allowDecimalInput
+                  disabled={selectedLayerResizeDisabled}
+                  onChange={(height) => resizeSelectedLayerBounds({ height })}
+                />
+              </InspectorFieldGrid>
+            ) : null}
+            <p className="editor-inspector__hint">Hold Alt while moving to temporarily disable snapping.</p>
+          </InspectorGroup>
+          <InspectorGroup title="Selection metrics" tabLabel="Metrics" icon={<Ruler size={15} aria-hidden="true" />} priority="quiet">
+            <InspectorMetricGrid label="Selected layer metrics">
+              <div><dt>Layers</dt><dd>{selectedLayerCount}</dd></div>
+              <div><dt>State</dt><dd>{selectedLayerLocked ? "Locked" : "Editable"}</dd></div>
+              {selectedLayerBounds ? (
+                <>
+                  <div><dt>Width</dt><dd>{roundMeasure(selectedLayerBounds.width)} cells</dd></div>
+                  <div><dt>Height</dt><dd>{roundMeasure(selectedLayerBounds.height)} cells</dd></div>
+                </>
+              ) : null}
+            </InspectorMetricGrid>
+          </InspectorGroup>
+          </>
+        ) : selectedSource ? (
+          <>
+            <InspectorGroup title="Source size" tabLabel="Size" icon={<Ruler size={15} aria-hidden="true" />}>
+              <div className="editor-inspector__dimension-toolbar">
+                <span>Dimension units</span>
+                <div
+                  className="editor-inspector-unit-switch"
+                  role="group"
+                  aria-label="Source dimension unit"
+                >
+                  {(["cm", "in"] as const).map((unit) => (
+                    <button
+                      key={unit}
+                      type="button"
+                      className={selectedSource.measurementUnit === unit ? "is-active" : ""}
+                      aria-pressed={selectedSource.measurementUnit === unit}
+                      aria-label={`Show source width and height in ${unit === "cm" ? "centimeters" : "inches"}`}
+                      onClick={() =>
+                        updateSourceImage(selectedSource.id, {
+                          measurementUnit: unit,
+                        })
+                      }
+                    >
+                      {unit.toUpperCase()}
+                    </button>
+                  ))}
                 </div>
               </div>
-              <div className="flex shrink-0 items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => toggleSourceLock(selectedSource.id)}
-                  className="ui-btn-icon"
-                  title={selectedSource.locked ? "Unlock layer" : "Lock layer"}
-                >
-                  {selectedSource.locked ? <Unlock size={15} aria-hidden="true" /> : <Lock size={15} aria-hidden="true" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => toggleSourceVisibility(selectedSource.id)}
-                  className="ui-btn-icon"
-                  title={selectedSource.visible ? "Hide layer" : "Show layer"}
-                >
-                  {selectedSource.visible ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-[#2a3344] bg-[#141b28] p-4 shadow-sm">
-            <div className="grid min-w-0 grid-cols-2 gap-2">
-              <NumberField
-                label="Width (CM)"
-                value={sourcePhysicalWidthCm(selectedSource)}
-                min={0.01}
-                max={1000}
-                step={0.1}
-                allowDecimalInput
-                disabled={selectedSource.locked}
-                onChange={(value) => updateSourceImagePhysicalWidthCm(selectedSource.id, value)}
-              />
-              <NumberField
-                label={`Height (${MEASUREMENT_UNIT_LABELS[selectedSource.measurementUnit]})`}
-                value={sourcePhysicalHeight(selectedSource)}
-                min={0.01}
-                max={roundMeasure(cmToUnit(1000 * settings.cellSizeCm, selectedSource.measurementUnit))}
-                step={0.1}
-                allowDecimalInput
-                disabled={selectedSource.locked}
-                onChange={(value) => updateSourceImagePhysicalHeight(selectedSource.id, value)}
-              />
-              <label className="grid min-w-0 gap-1.5">
-                <span className="text-xs font-semibold text-[#8592a6]">Size unit</span>
-                <select
-                  value={selectedSource.measurementUnit}
-                  onChange={(event) =>
-                    updateSourceImage(selectedSource.id, {
-                      measurementUnit: event.target.value as GraphSettings["measurementUnit"],
-                    })
-                  }
-                  className="h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-[#141b28] px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100"
-                >
-                  <option value="cm">CM</option>
-                  <option value="in">IN</option>
-                </select>
-              </label>
-              <NumberField
-                label="Line adjustment"
-                value={selectedSource.vectorizerLineAdjust}
-                min={MIN_VECTORIZER_LINE_ADJUST}
-                max={MAX_VECTORIZER_LINE_ADJUST}
-                step={0.5}
-                allowDecimalInput
-                disabled={selectedSource.locked}
-                onChange={(value) => updateSourceImage(selectedSource.id, { vectorizerLineAdjust: value })}
-              />
-              <NumberField
-                label="Ink threshold"
-                value={selectedSource.vectorizerInkThreshold}
-                min={MIN_VECTORIZER_INK_THRESHOLD}
-                max={MAX_VECTORIZER_INK_THRESHOLD}
-                step={1}
-                disabled={selectedSource.locked}
-                onChange={(value) => updateSourceImage(selectedSource.id, { vectorizerInkThreshold: Math.round(value) })}
-              />
-              <label className="grid min-w-0 gap-1.5">
-                <span className="text-xs font-semibold text-[#8592a6]">Fidelity</span>
-                <select
-                  value={selectedSource.vectorizerFidelity}
+              <InspectorFieldGrid className="editor-inspector-primary-grid">
+                <NumberField
+                  label="Width"
+                  unit={MEASUREMENT_UNIT_LABELS[selectedSource.measurementUnit]}
+                  emphasis="primary"
+                  value={roundMeasure(cmToUnit(sourcePhysicalWidthCm(selectedSource), selectedSource.measurementUnit))}
+                  min={0.01}
+                  max={roundMeasure(cmToUnit(1000, selectedSource.measurementUnit))}
+                  step={0.1}
+                  allowDecimalInput
                   disabled={selectedSource.locked}
-                  onChange={(event) =>
-                    updateSourceImage(selectedSource.id, {
-                      vectorizerFidelity: event.target.value as GraphSourceImage["vectorizerFidelity"],
-                    })
+                  onChange={(value) =>
+                    updateSourceImagePhysicalWidthCm(
+                      selectedSource.id,
+                      unitToCm(value, selectedSource.measurementUnit),
+                    )
                   }
-                  className={inspectorControlClass}
-                >
-                  {GRAPH_VECTORIZER_FIDELITY_KEYS.map((key) => (
-                    <option key={key} value={key}>
-                      {key === "exact" ? "Exact" : "Smooth"}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <NumberField label="Left padding" value={selectedSource.x} min={-1000} max={1000} wholeStep readOnly onChange={() => undefined} />
-              <NumberField label="Right padding" value={sourceRightPadding(selectedSource)} min={-1000} max={1000} wholeStep readOnly onChange={() => undefined} />
-              <NumberField label="Top padding" value={selectedSource.y} min={-1000} max={1000} wholeStep readOnly onChange={() => undefined} />
-              <NumberField label="Bottom padding" value={sourceBottomPadding(selectedSource)} min={-1000} max={1000} wholeStep readOnly onChange={() => undefined} />
+                />
+                <NumberField
+                  label="Height"
+                  unit={MEASUREMENT_UNIT_LABELS[selectedSource.measurementUnit]}
+                  emphasis="primary"
+                  value={sourcePhysicalHeight(selectedSource)}
+                  min={0.01}
+                  max={roundMeasure(cmToUnit(1000 * settings.cellSizeCm, selectedSource.measurementUnit))}
+                  step={0.1}
+                  allowDecimalInput
+                  disabled={selectedSource.locked}
+                  onChange={(value) => updateSourceImagePhysicalHeight(selectedSource.id, value)}
+                />
+              </InspectorFieldGrid>
+            </InspectorGroup>
+            <InspectorGroup title="Trace" icon={<Settings2 size={15} aria-hidden="true" />}>
+              <InspectorFieldGrid>
+                <NumberField
+                  label="Line adjustment"
+                  value={selectedSource.vectorizerLineAdjust}
+                  min={MIN_VECTORIZER_LINE_ADJUST}
+                  max={MAX_VECTORIZER_LINE_ADJUST}
+                  step={0.5}
+                  allowDecimalInput
+                  disabled={selectedSource.locked}
+                  onChange={(value) => updateSourceImage(selectedSource.id, { vectorizerLineAdjust: value })}
+                />
+                <label className="editor-inspector-field">
+                  <span className="editor-inspector-field__label">Fidelity</span>
+                  <select
+                    value={selectedSource.vectorizerFidelity}
+                    disabled={selectedSource.locked}
+                    onChange={(event) =>
+                      updateSourceImage(selectedSource.id, {
+                        vectorizerFidelity: event.target.value as GraphSourceImage["vectorizerFidelity"],
+                      })
+                    }
+                    className={inspectorControlClass}
+                  >
+                    {GRAPH_VECTORIZER_FIDELITY_KEYS.map((key) => (
+                      <option key={key} value={key}>{key === "exact" ? "Exact" : "Smooth"}</option>
+                    ))}
+                  </select>
+                </label>
+              </InspectorFieldGrid>
+              <InspectorDisclosure title="Trace details" summary={`Ink ${selectedSource.vectorizerInkThreshold}`}>
+                <InspectorFieldGrid>
+                  <NumberField
+                    label="Ink threshold"
+                    value={selectedSource.vectorizerInkThreshold}
+                    min={MIN_VECTORIZER_INK_THRESHOLD}
+                    max={MAX_VECTORIZER_INK_THRESHOLD}
+                    step={1}
+                    disabled={selectedSource.locked}
+                    onChange={(value) => updateSourceImage(selectedSource.id, { vectorizerInkThreshold: Math.round(value) })}
+                  />
+                  <NumberField
+                    label="Remove sketch lines"
+                    value={selectedSource.vectorizerSketchRemoval ?? DEFAULT_VECTORIZER_SKETCH_REMOVAL}
+                    min={MIN_VECTORIZER_SKETCH_REMOVAL}
+                    max={MAX_VECTORIZER_SKETCH_REMOVAL}
+                    step={1}
+                    disabled={selectedSource.locked}
+                    onChange={(value) => updateSourceImage(selectedSource.id, { vectorizerSketchRemoval: Math.round(value) })}
+                  />
+                </InspectorFieldGrid>
+              </InspectorDisclosure>
+              <button
+                type="button"
+                onClick={() => applySourceImagePropertiesToAll(selectedSource.id)}
+                className="editor-inspector__wide-action"
+                title="Apply this image processing setup to every image"
+              >
+                <Copy size={14} aria-hidden="true" />
+                Apply trace settings to all sources
+              </button>
+            </InspectorGroup>
+            <InspectorGroup title="Placement" icon={<Ruler size={15} aria-hidden="true" />} priority="quiet">
+              <InspectorMetricGrid label="Source bounds" className="editor-inspector-bounds">
+                <div><dt>Left</dt><dd>{selectedSource.x}</dd></div>
+                <div><dt>Top</dt><dd>{selectedSource.y}</dd></div>
+                <div><dt>Right</dt><dd>{sourceRightPadding(selectedSource)}</dd></div>
+                <div><dt>Bottom</dt><dd>{sourceBottomPadding(selectedSource)}</dd></div>
+              </InspectorMetricGrid>
+            </InspectorGroup>
+          </>
+        ) : selectedDrawingDimensions ? (
+          <>
+            <InspectorGroup title="Object geometry" tabLabel="Geometry" icon={<Ruler size={15} aria-hidden="true" />}>
+              <InspectorMetricGrid label="Selected object dimensions">
+                <div><dt>Width</dt><dd>{roundMeasure(selectedDrawingDimensions.width)} cells</dd></div>
+                <div><dt>Height</dt><dd>{roundMeasure(selectedDrawingDimensions.height)} cells</dd></div>
+                <div><dt>State</dt><dd>{selectedLayerHidden ? "Hidden" : "Visible"} / {selectedLayerLocked ? "Locked" : "Editable"}</dd></div>
+              </InspectorMetricGrid>
+            </InspectorGroup>
+            {selectedShapeLayer ? (
+              <InspectorGroup title="Shape appearance" tabLabel="Appearance" icon={<Shapes size={15} aria-hidden="true" />}>
+                <div className="editor-object-properties">{renderShapeAdvanced(selectedShapeLayer)}</div>
+              </InspectorGroup>
+            ) : selectedClipartLayer ? (
+              <InspectorGroup title="Clipart appearance" tabLabel="Appearance" icon={<ImageIcon size={15} aria-hidden="true" />}>
+                <div className="editor-object-properties">{renderClipartAdvanced(selectedClipartLayer)}</div>
+              </InspectorGroup>
+            ) : selectedCellLayer ? (
+              <InspectorGroup title="Cell paint appearance" tabLabel="Appearance" icon={<MousePointer2 size={15} aria-hidden="true" />}>
+                <div className="editor-object-properties">{renderCellAdvanced(selectedCellLayer)}</div>
+              </InspectorGroup>
+            ) : null}
+            <InspectorGroup title="Object placement" tabLabel="Placement" icon={<Ruler size={15} aria-hidden="true" />} priority="quiet">
+              <InspectorMetricGrid label="Selected object placement">
+                <div><dt>Left</dt><dd>{selectedShapeLayer?.x ?? selectedClipartLayer?.x ?? selectedCellLayer?.x ?? 0}</dd></div>
+                <div><dt>Top</dt><dd>{selectedShapeLayer?.y ?? selectedClipartLayer?.y ?? selectedCellLayer?.y ?? 0}</dd></div>
+                <div><dt>Width</dt><dd>{roundMeasure(selectedDrawingDimensions.width)} cells</dd></div>
+                <div><dt>Height</dt><dd>{roundMeasure(selectedDrawingDimensions.height)} cells</dd></div>
+              </InspectorMetricGrid>
+            </InspectorGroup>
+          </>
+        ) : (
+          <InspectorGroup title="No selection" tabLabel="Select" icon={<MousePointer2 size={15} aria-hidden="true" />} priority="quiet">
+            <div className="editor-inspector-context-hint">
+              <MousePointer2 size={16} aria-hidden="true" />
+              <span>Select a layer or artwork region to reveal its settings.</span>
             </div>
-            <button
-              type="button"
-              onClick={() => applySourceImagePropertiesToAll(selectedSource.id)}
-              className="mt-3 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-[var(--line)] bg-[#141b28] px-3 text-xs font-semibold text-[#e7edf5] hover:bg-[#1b2535]"
-              title="Apply this image processing setup to every image"
-            >
-              <Copy size={14} aria-hidden="true" />
-              Apply image properties to all
-            </button>
-          </div>
-
-          <div className="grid grid-cols-4 gap-2">
-            <button type="button" onClick={() => rotateSourceImage(selectedSource.id, -1)} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Rotate left">
-              <RotateCcw size={15} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={() => rotateSourceImage(selectedSource.id, 1)} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Rotate right">
-              <RotateCw size={15} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={() => flipSourceImage(selectedSource.id, "x")} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Flip horizontal">
-              <FlipHorizontal size={15} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={() => flipSourceImage(selectedSource.id, "y")} disabled={selectedSource.locked} className="ui-btn-icon w-full" title="Flip vertical">
-              <FlipVertical size={15} aria-hidden="true" />
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="grid min-h-32 place-items-center rounded-xl border border-[#2a3344] bg-[#141b28] p-4 text-center shadow-sm">
-          <div className="space-y-2 text-[#8592a6]">
-            <MousePointer2 size={28} className="mx-auto text-[#6b7688]" aria-hidden="true" />
-            <p className="text-sm">Select a source layer to edit its size, transform, and detection settings.</p>
-          </div>
-        </div>
-      )}
+          </InspectorGroup>
+        )}
+      </InspectorSections>
     </div>
   );
 
   return (
-    <aside className="editor-panel relative space-y-0">
-      <div className="space-y-4 p-3">
-        <div className="rounded-xl border border-[#2a3344] bg-[#141b28] p-3 shadow-sm">
-          <div className="mb-3 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <span className="text-[#008c8f]">
-                <Settings2 size={16} aria-hidden="true" />
-              </span>
-              <h2 className="text-[13px] font-bold uppercase tracking-wide text-[#e7edf5]">Inspector</h2>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                setSettingsWithHistory((current) => editorDefaultGraphSettings(current));
-                setSelectedFillRegionId(null);
-                setFloatingPalette(null);
-                setCopiedFillColor(null);
-              }}
-              className="ui-btn-icon"
-              title="Reset settings"
-            >
-              <RefreshCw size={15} aria-hidden="true" />
-            </button>
+    <aside
+      className="editor-inspector atelier-inspector editor-panel focus-console relative space-y-0"
+      aria-label="Properties inspector"
+      data-editor-region="inspector"
+      data-inspector-context={inspectorTab}
+    >
+      <div className="editor-inspector__content">
+        <div className="editor-inspector__layout focus-console__layout">
+          <div className="focus-console__modes">
+            <InspectorModeRail
+              value={inspectorTab}
+              options={inspectorTabs}
+              onChange={setInspectorTab}
+              orientation="horizontal"
+            />
           </div>
-          <InspectorTabBar value={inspectorTab} onChange={setInspectorTab} />
-        </div>
 
-        {selectedSourceInspector}
-
-        {inspectorTab === "graph" ? (
-          <div className="space-y-4">
-            <InspectorGroup title="Dimensions" icon={<Ruler size={15} aria-hidden="true" />}>
-              <div className="grid min-w-0 grid-cols-2 gap-2">
-                <NumberField
-                  label="Width (cells)"
-                  value={settings.graphWidth}
-                  min={1}
-                  max={MAX_GRAPH_WIDTH_CELLS}
-                  inputClassName={inspectorControlClass}
-                  onChange={(value) => updateSetting("graphWidth", value)}
-                />
-                <NumberField
-                  label="Height (cells)"
-                  value={settings.graphHeight}
-                  min={1}
-                  max={MAX_GRAPH_HEIGHT_CELLS}
-                  inputClassName={inspectorControlClass}
-                  onChange={(value) => updateSetting("graphHeight", value)}
-                />
-              </div>
-              <p className="text-[11px] leading-4 text-[#6b7688]">Maximum {MAX_GRAPH_WIDTH_CELLS} x {MAX_GRAPH_HEIGHT_CELLS} cells ({MAX_GRAPH_WIDTH_CELLS} x {MAX_GRAPH_HEIGHT_CELLS} cm).</p>
-              <InspectorCheckbox label="Square cells" checked disabled />
-            </InspectorGroup>
-
-            <InspectorGroup title="Measurements" icon={<Ruler size={15} aria-hidden="true" />}>
-              <InspectorRow label="Units">
-                <InspectorSelect
-                  label="Measurement units"
-                  value={settings.measurementUnit}
-                  options={[
-                    { value: "cm", label: "Centimeters" },
-                    { value: "in", label: "Inches" },
-                  ]}
-                  onChange={(value) => updateMeasurementUnit(value as GraphSettings["measurementUnit"])}
-                />
-              </InspectorRow>
-              <InspectorRow label="Cell size">
-                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
-                  <input value={(settings.cellSizeCm * 10).toFixed(2)} readOnly className={inspectorControlClass} aria-label="Cell size millimeters" />
-                  <span className="grid h-9 place-items-center rounded-md border border-[#2a3344] bg-[#161f2e] text-[12px] font-semibold text-[#9aa7ba]">mm</span>
+          <div className="focus-console__workspace">
+            <div
+              className="focus-console__shelf focus-console__command-shelf"
+              aria-label="Focus console commands"
+            >
+              <FocusConsoleShelfPanel
+                mode="graph"
+                active={inspectorTab === "graph"}
+                label="Document commands"
+              >
+                <div className="focus-console__shelf-heading">
+                  <span className="focus-console__shelf-kicker">Canvas</span>
+                  <strong>Graph dimensions</strong>
                 </div>
-              </InspectorRow>
-              <p className="text-[12px] leading-5 text-[#9aa7ba]">
-                {settings.graphWidth.toFixed(0)} x {settings.graphHeight.toFixed(0)} cells = {imageWidthCm} x {imageHeightCm} cm
-              </p>
-              <InspectorRow label={`Graph height`}>
-                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
+                <div className="focus-console__unit-switch" role="group" aria-label="Measurement units">
+                  {(["cm", "in"] as const).map((unit) => (
+                    <button
+                      key={unit}
+                      type="button"
+                      className={settings.measurementUnit === unit ? "is-active" : ""}
+                      onClick={() => updateMeasurementUnit(unit)}
+                      aria-pressed={settings.measurementUnit === unit}
+                    >
+                      {unit.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+                <div className="focus-console__dimension-pair">
                   <NumberField
-                    label={`Graph height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
-                    value={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
-                    min={0.01}
-                    max={roundMeasure(cmToUnit(MAX_GRAPH_HEIGHT_CELLS * DEFAULT_CELL_SIZE_CM, settings.measurementUnit))}
-                    step={0.1}
-                    allowDecimalInput
-                    hideLabel
+                    label="Width"
+                    unit="cells"
+                    value={settings.graphWidth}
+                    min={1}
+                    max={MAX_GRAPH_WIDTH_CELLS}
                     inputClassName={inspectorControlClass}
-                    onChange={updateGraphPhysicalHeight}
+                    onChange={(value) => updateSetting("graphWidth", value)}
                   />
-                  <span className="grid h-9 place-items-center rounded-md border border-[#2a3344] bg-[#161f2e] text-[12px] font-semibold text-[#9aa7ba]">
-                    {MEASUREMENT_UNIT_LABELS[settings.measurementUnit]}
+                  <NumberField
+                    label="Height"
+                    unit="cells"
+                    value={settings.graphHeight}
+                    min={1}
+                    max={MAX_GRAPH_HEIGHT_CELLS}
+                    inputClassName={inspectorControlClass}
+                    onChange={(value) => updateSetting("graphHeight", value)}
+                  />
+                </div>
+                <dl className="focus-console__summary-metrics">
+                  <div>
+                    <dt>Cell</dt>
+                    <dd>{(settings.cellSizeCm * 10).toFixed(0)} mm</dd>
+                  </div>
+                  <div>
+                    <dt>Graph</dt>
+                    <dd>{settings.graphWidth} x {settings.graphHeight}</dd>
+                  </div>
+                </dl>
+                <div className="focus-console__toggle-list">
+                  <InspectorCheckbox
+                    label="Numbers"
+                    checked={settings.showNumbers}
+                    onChange={(checked) => updateSetting("showNumbers", checked)}
+                  />
+                  <InspectorCheckbox
+                    label="Guides"
+                    checked={settings.showPageBreaks}
+                    onChange={(checked) => updateSetting("showPageBreaks", checked)}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSettingsWithHistory((current) => editorDefaultGraphSettings(current));
+                    setSelectedFillRegionId(null);
+                    setFloatingPalette(null);
+                    setCopiedFillColor(null);
+                  }}
+                  className="focus-console__reset"
+                >
+                  <RefreshCw size={14} aria-hidden="true" />
+                  Reset document
+                </button>
+              </FocusConsoleShelfPanel>
+
+              <FocusConsoleShelfPanel
+                mode="source"
+                active={inspectorTab === "source"}
+                label="Selection commands"
+              >
+                <SelectionCommandShelf model={selectionConsole} />
+              </FocusConsoleShelfPanel>
+
+              <FocusConsoleShelfPanel
+                mode="draw"
+                active={inspectorTab === "draw"}
+                label="Create commands"
+              >
+                <div className="focus-console__shelf-heading">
+                  <span className="focus-console__shelf-kicker">Active tool</span>
+                  <strong>
+                    {drawTab === "clipart"
+                      ? "Clipart"
+                      : drawingTool === "line"
+                        ? "Draw Line"
+                        : drawingTool === "shape"
+                          ? "Draw Shape"
+                          : drawingTool === "lasso"
+                            ? "Lasso"
+                            : "Select"}
+                  </strong>
+                </div>
+                <InspectorSegmented
+                  label="Create mode"
+                  value={drawTab}
+                  options={drawTabs.map((tab) => ({ value: tab.id, label: tab.label }))}
+                  onChange={(value) => {
+                    const nextTab = value as DrawTab;
+                    if (nextTab === "shape") setPlacingClipartAssetId(null);
+                    setDrawTab(nextTab);
+                  }}
+                />
+                <dl className="focus-console__summary-metrics">
+                  <div>
+                    <dt>Kind</dt>
+                    <dd>
+                      {drawTab === "clipart"
+                        ? selectedClipartAsset
+                          ? "Selected"
+                          : "None"
+                        : drawingTool === "shape"
+                          ? armedShapeKind
+                            ? GRAPH_SHAPE_KIND_LABELS[armedShapeKind]
+                            : "Choose shape"
+                          : drawingTool === "line"
+                            ? GRAPH_SHAPE_KIND_LABELS[draftShapeKind]
+                            : drawingTool === "lasso"
+                              ? "Polygon"
+                              : "Not set"}
+                    </dd>
+                  </div>
+                </dl>
+                <div className="focus-console__swatches" aria-label="Active creation colors">
+                  <span>
+                    <i style={{ backgroundColor: drawTab === "clipart" ? draftClipartStrokeColor : draftShapeStrokeColor }} aria-hidden="true" />
+                    Stroke
+                  </span>
+                  <span>
+                    <i
+                      data-transparent={(drawTab === "clipart" ? draftClipartFillColor : draftShapeFillColor) === "transparent" ? "true" : "false"}
+                      style={{
+                        backgroundColor:
+                          (drawTab === "clipart" ? draftClipartFillColor : draftShapeFillColor) === "transparent"
+                            ? undefined
+                            : drawTab === "clipart"
+                              ? draftClipartFillColor
+                              : draftShapeFillColor,
+                      }}
+                      aria-hidden="true"
+                    />
+                    Fill
                   </span>
                 </div>
-              </InspectorRow>
-              <InspectorRow label="Artwork">
-                <div className="grid min-w-0 grid-cols-2 gap-2">
-                  <NumberField
-                    label="Artwork width (CM)"
-                    value={imageWidthCm}
-                    min={0.01}
-                    max={imageWidthCm}
-                    step={0.1}
-                    allowDecimalInput
-                    inputClassName={inspectorControlClass}
-                    onChange={updateImageWidthCm}
-                  />
-                  <NumberField
-                    label={`Artwork height (${MEASUREMENT_UNIT_LABELS[settings.measurementUnit]})`}
-                    value={roundMeasure(cmToUnit(settings.imageHeight * settings.cellSizeCm, settings.measurementUnit))}
-                    min={0.01}
-                    max={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
-                    step={0.1}
-                    allowDecimalInput
-                    inputClassName={inspectorControlClass}
-                    onChange={updateImageHeightPhysical}
-                  />
+                {drawTab === "clipart" ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      selectedClipartAsset &&
+                      setPlacingClipartAssetId((value) =>
+                        value === selectedClipartAsset.id ? null : selectedClipartAsset.id,
+                      )
+                    }
+                    disabled={!selectedClipartAsset}
+                    className="focus-console__primary-action"
+                    data-active={placingClipartAssetId === selectedClipartAsset?.id ? "true" : "false"}
+                    aria-pressed={placingClipartAssetId === selectedClipartAsset?.id}
+                  >
+                    Place on canvas
+                  </button>
+                ) : null}
+              </FocusConsoleShelfPanel>
+
+              <FocusConsoleShelfPanel
+                mode="palette"
+                active={inspectorTab === "palette"}
+                label="Color commands"
+              >
+                <div className="focus-console__shelf-heading">
+                  <span className="focus-console__shelf-kicker">
+                    {selectedFillRegion ? "Selection" : "Artwork"}
+                  </span>
+                  <strong>{selectedFillRegion ? "Selected fill" : "Default fill"}</strong>
                 </div>
-              </InspectorRow>
+                <div className="focus-console__color-summary">
+                  <span
+                    className="focus-console__primary-swatch"
+                    data-transparent={(selectedFillRegion ? selectedFillRegionColor : settings.fillColor) === "transparent" ? "true" : "false"}
+                    style={{
+                      backgroundColor:
+                        (selectedFillRegion ? selectedFillRegionColor : settings.fillColor) === "transparent"
+                          ? undefined
+                          : selectedFillRegion
+                            ? selectedFillRegionColor
+                            : settings.fillColor,
+                    }}
+                    aria-hidden="true"
+                  />
+                  <code>{(selectedFillRegion ? selectedFillRegionColor : settings.fillColor).toUpperCase()}</code>
+                  {selectedFillRegion ? (
+                    <button
+                      type="button"
+                      onClick={() => resetFillRegionColor(selectedFillRegion.id)}
+                      aria-label="Use default fill"
+                      title="Use default fill"
+                    >
+                      <RefreshCw size={14} aria-hidden="true" />
+                    </button>
+                  ) : null}
+                </div>
+                <div className="focus-console__swatches focus-console__swatches--color">
+                  <span>
+                    <i style={{ backgroundColor: settings.outlineColor }} aria-hidden="true" />
+                    Outline
+                  </span>
+                  <span>
+                    <i style={{ backgroundColor: settings.gridLineColor }} aria-hidden="true" />
+                    Grid
+                  </span>
+                </div>
+                <dl className="focus-console__summary-metrics">
+                  <div>
+                    <dt>Palette</dt>
+                    <dd>{palette.length} {palette.length === 1 ? "color" : "colors"}</dd>
+                  </div>
+                </dl>
+              </FocusConsoleShelfPanel>
+            </div>
+
+            <div className="editor-inspector__deck focus-console__detail">
+              <div className="editor-inspector__body editor-inspector__panel-host focus-console__detail-scroll">
+            {selectionInspector}
+
+          <div
+            id="editor-inspector-panel-graph"
+            role="tabpanel"
+            aria-labelledby="editor-inspector-tab-graph"
+            className={`editor-inspector__tab-panel editor-inspector__tab-panel--document ${inspectorTab === "graph" ? "" : "hidden"}`}
+            data-inspector-panel="document"
+          >
+            <InspectorSections label="Document">
+            <InspectorGroup
+              title="Physical sizing"
+              tabLabel="Size"
+              icon={<Ruler size={15} aria-hidden="true" />}
+              priority="quiet"
+              layout="flush"
+            >
+              <div className="editor-inspector__flat-section-heading">
+                <span>Graph and artwork size</span>
+                <span>
+                  {roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}{" "}
+                  {MEASUREMENT_UNIT_LABELS[settings.measurementUnit]} high
+                </span>
+              </div>
+              <InspectorFieldGrid>
+                <NumberField
+                  label="Graph height"
+                  unit={MEASUREMENT_UNIT_LABELS[settings.measurementUnit]}
+                  value={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
+                  min={0.01}
+                  max={roundMeasure(cmToUnit(MAX_GRAPH_HEIGHT_CELLS * DEFAULT_CELL_SIZE_CM, settings.measurementUnit))}
+                  step={0.1}
+                  allowDecimalInput
+                  inputClassName={inspectorControlClass}
+                  onChange={updateGraphPhysicalHeight}
+                />
+                <NumberField
+                  label="Artwork width"
+                  unit="cm"
+                  value={imageWidthCm}
+                  min={0.01}
+                  max={imageWidthCm}
+                  step={0.1}
+                  allowDecimalInput
+                  inputClassName={inspectorControlClass}
+                  onChange={updateImageWidthCm}
+                />
+                <NumberField
+                  label="Artwork height"
+                  unit={MEASUREMENT_UNIT_LABELS[settings.measurementUnit]}
+                  value={roundMeasure(cmToUnit(settings.imageHeight * settings.cellSizeCm, settings.measurementUnit))}
+                  min={0.01}
+                  max={roundMeasure(cmToUnit(settings.graphHeight * settings.cellSizeCm, settings.measurementUnit))}
+                  step={0.1}
+                  allowDecimalInput
+                  inputClassName={inspectorControlClass}
+                  onChange={updateImageHeightPhysical}
+                />
+              </InspectorFieldGrid>
             </InspectorGroup>
 
-            <InspectorGroup title="Grid Lines" icon={<Grid3X3 size={15} aria-hidden="true" />}>
+            <InspectorGroup title="Grid" icon={<Grid3X3 size={15} aria-hidden="true" />}>
               <InspectorRow label="Line color">
                 <InspectorColorControl label="Graph line color" value={settings.gridLineColor} onChange={(value) => updateSetting("gridLineColor", value)} />
-              </InspectorRow>
-              <InspectorRow label="Layer">
-                <InspectorSelect
-                  label="Graph lines layer"
-                  value={settings.gridLineLayer}
-                  options={GRAPH_LINE_LAYER_KEYS.map((key) => ({ value: key, label: GRAPH_LINE_LAYER_LABELS[key] }))}
-                  onChange={(value) => updateSetting("gridLineLayer", value as GraphSettings["gridLineLayer"])}
-                />
               </InspectorRow>
               <InspectorRow label="Major every">
                 <InspectorSelect
@@ -724,35 +1282,53 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   onChange={(value) => updateSetting("majorGridEvery", Number(value) as GraphSettings["majorGridEvery"])}
                 />
               </InspectorRow>
-              <div className="grid grid-cols-2 gap-2">
-                <InspectorSelect
-                  label="Grid line style"
-                  value={settings.gridLineStyle}
-                  options={GRAPH_GRID_LINE_STYLE_KEYS.map((key) => ({ value: key, label: key[0].toUpperCase() + key.slice(1) }))}
-                  onChange={(value) => updateSetting("gridLineStyle", value as GraphSettings["gridLineStyle"])}
-                />
-                <InspectorSelect
-                  label="Grid pattern"
-                  value={settings.gridPattern}
-                  options={GRAPH_GRID_PATTERN_KEYS.map((key) => ({ value: key, label: key === "square" ? "Square" : "Dot" }))}
-                  onChange={(value) => updateSetting("gridPattern", value as GraphSettings["gridPattern"])}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="editor-inspector-toggle-row grid grid-cols-2 gap-2">
                 <InspectorCheckbox label="Show numbers" checked={settings.showNumbers} onChange={(checked) => updateSetting("showNumbers", checked)} />
                 <InspectorCheckbox label="Show guides" checked={settings.showPageBreaks} onChange={(checked) => updateSetting("showPageBreaks", checked)} />
               </div>
-              <InspectorRow label="Numbers">
-                <InspectorSelect
-                  label="Grid number position"
-                  value={settings.gridNumberPlacement}
-                  options={(["inside", "outside"] as const).map((key) => ({ value: key, label: GRID_NUMBER_PLACEMENT_LABELS[key] }))}
-                  onChange={(value) => updateSetting("gridNumberPlacement", value as GraphSettings["gridNumberPlacement"])}
-                />
-              </InspectorRow>
+              <InspectorDisclosure title="Grid details" summary={GRAPH_LINE_LAYER_LABELS[settings.gridLineLayer]}>
+                <InspectorRow label="Layer">
+                  <InspectorSelect
+                    label="Graph lines layer"
+                    value={settings.gridLineLayer}
+                    options={GRAPH_LINE_LAYER_KEYS.map((key) => ({ value: key, label: GRAPH_LINE_LAYER_LABELS[key] }))}
+                    onChange={(value) => updateSetting("gridLineLayer", value as GraphSettings["gridLineLayer"])}
+                  />
+                </InspectorRow>
+                <InspectorFieldGrid>
+                  <label className="editor-inspector-field">
+                    <span className="editor-inspector-field__label">Line style</span>
+                    <InspectorSelect
+                      label="Grid line style"
+                      value={settings.gridLineStyle}
+                      options={GRAPH_GRID_LINE_STYLE_KEYS.map((key) => ({ value: key, label: key[0].toUpperCase() + key.slice(1) }))}
+                      onChange={(value) => updateSetting("gridLineStyle", value as GraphSettings["gridLineStyle"])}
+                    />
+                  </label>
+                  <label className="editor-inspector-field">
+                    <span className="editor-inspector-field__label">Pattern</span>
+                    <InspectorSelect
+                      label="Grid pattern"
+                      value={settings.gridPattern}
+                      options={GRAPH_GRID_PATTERN_KEYS.map((key) => ({ value: key, label: key === "square" ? "Square" : "Dot" }))}
+                      onChange={(value) => updateSetting("gridPattern", value as GraphSettings["gridPattern"])}
+                    />
+                  </label>
+                </InspectorFieldGrid>
+                {settings.showNumbers ? (
+                  <InspectorRow label="Numbers">
+                    <InspectorSelect
+                      label="Grid number position"
+                      value={settings.gridNumberPlacement}
+                      options={(["inside", "outside"] as const).map((key) => ({ value: key, label: GRID_NUMBER_PLACEMENT_LABELS[key] }))}
+                      onChange={(value) => updateSetting("gridNumberPlacement", value as GraphSettings["gridNumberPlacement"])}
+                    />
+                  </InspectorRow>
+                ) : null}
+              </InspectorDisclosure>
             </InspectorGroup>
 
-            <InspectorGroup title="Print Settings" icon={<Printer size={15} aria-hidden="true" />}>
+            <InspectorGroup title="Print" icon={<Printer size={15} aria-hidden="true" />}>
               <InspectorRow label="Paper size">
                 <InspectorSelect
                   label="Print paper size"
@@ -769,227 +1345,273 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   onChange={(value) => updateSetting("printOrientation", value as GraphSettings["printOrientation"])}
                 />
               </InspectorRow>
-              <InspectorRow label="Margin">
-                <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_58px] gap-2">
-                  <NumberField
-                    label="Page margin"
-                    value={settings.pageMargin ?? 24}
-                    min={0}
-                    max={400}
-                    wholeStep
-                    hideLabel
-                    inputClassName={inspectorControlClass}
-                    onChange={(value) => updateSetting("pageMargin", Math.round(value))}
-                  />
-                  <span className="grid h-9 place-items-center rounded-md border border-[#2a3344] bg-[#161f2e] text-[12px] font-semibold text-[#9aa7ba]">px</span>
-                </div>
-              </InspectorRow>
-              <InspectorRow label="Align">
-                <div className="grid min-w-0 grid-cols-2 gap-2">
-                  <InspectorSelect
-                    label="Horizontal print alignment"
-                    value={settings.printHorizontalAlignment}
-                    options={PRINT_HORIZONTAL_ALIGNMENT_KEYS.map((key) => ({ value: key, label: PRINT_HORIZONTAL_ALIGNMENT_LABELS[key] }))}
-                    onChange={(value) => updateSetting("printHorizontalAlignment", value as GraphSettings["printHorizontalAlignment"])}
-                  />
-                  <InspectorSelect
-                    label="Vertical print alignment"
-                    value={settings.printVerticalAlignment}
-                    options={PRINT_VERTICAL_ALIGNMENT_KEYS.map((key) => ({ value: key, label: PRINT_VERTICAL_ALIGNMENT_LABELS[key] }))}
-                    onChange={(value) => updateSetting("printVerticalAlignment", value as GraphSettings["printVerticalAlignment"])}
-                  />
-                </div>
-              </InspectorRow>
+              <InspectorDisclosure title="Page placement" summary={`${settings.pageMargin ?? 24}px margin`}>
+                <NumberField
+                  label="Page margin"
+                  unit="px"
+                  value={settings.pageMargin ?? 24}
+                  min={0}
+                  max={400}
+                  wholeStep
+                  inputClassName={inspectorControlClass}
+                  onChange={(value) => updateSetting("pageMargin", Math.round(value))}
+                />
+                <InspectorRow label="Align">
+                  <InspectorFieldGrid>
+                    <InspectorSelect
+                      label="Horizontal print alignment"
+                      value={settings.printHorizontalAlignment}
+                      options={PRINT_HORIZONTAL_ALIGNMENT_KEYS.map((key) => ({ value: key, label: PRINT_HORIZONTAL_ALIGNMENT_LABELS[key] }))}
+                      onChange={(value) => updateSetting("printHorizontalAlignment", value as GraphSettings["printHorizontalAlignment"])}
+                    />
+                    <InspectorSelect
+                      label="Vertical print alignment"
+                      value={settings.printVerticalAlignment}
+                      options={PRINT_VERTICAL_ALIGNMENT_KEYS.map((key) => ({ value: key, label: PRINT_VERTICAL_ALIGNMENT_LABELS[key] }))}
+                      onChange={(value) => updateSetting("printVerticalAlignment", value as GraphSettings["printVerticalAlignment"])}
+                    />
+                  </InspectorFieldGrid>
+                </InspectorRow>
+              </InspectorDisclosure>
             </InspectorGroup>
 
-            <div className="min-w-0 overflow-hidden rounded-xl border border-[#2a3344] bg-[#161f2e] p-3 shadow-sm">
-              <p className="break-words font-mono text-[11px] leading-5 text-[#9aa7ba]">
-                Graph {imageWidthCm} x {imageHeightCm} cm / Print {printWidthCm} x {printHeightCm} cm / 1 cell {settings.cellSizeCm} cm / artwork {settings.imageWidth} x {settings.imageHeight} cells / {GRAPH_LINE_LAYER_LABELS[settings.gridLineLayer].toLowerCase()} grid / {settings.showNumbers ? `${GRID_NUMBER_PLACEMENT_LABELS[settings.gridNumberPlacement].toLowerCase()} numbers` : "numbers off"} / {settings.showPageBreaks ? "page guides on" : "page guides off"} / {PRINT_HORIZONTAL_ALIGNMENT_LABELS[settings.printHorizontalAlignment].toLowerCase()} {PRINT_VERTICAL_ALIGNMENT_LABELS[settings.printVerticalAlignment].toLowerCase()}
-              </p>
-            </div>
+            <InspectorGroup title="Output summary" tabLabel="Output" icon={<Printer size={15} aria-hidden="true" />} priority="quiet">
+              <InspectorMetricGrid label="Document output summary" className="editor-inspector-output-summary">
+                <div><dt>Graph</dt><dd>{imageWidthCm} × {imageHeightCm} cm</dd></div>
+                <div><dt>Print</dt><dd>{printWidthCm} × {printHeightCm} cm</dd></div>
+                <div><dt>Grid</dt><dd>{GRAPH_LINE_LAYER_LABELS[settings.gridLineLayer]} / {settings.showNumbers ? GRID_NUMBER_PLACEMENT_LABELS[settings.gridNumberPlacement] : "No numbers"}</dd></div>
+              </InspectorMetricGrid>
+            </InspectorGroup>
+            </InspectorSections>
           </div>
-        ) : null}
 
-        {inspectorTab === "draw" ? (
-          <div className="space-y-4">
-            <InspectorGroup title="Drawing Tools" icon={<Eraser size={15} aria-hidden="true" />}>
-              <InspectorSegmented
-                label="Canvas tool"
-                value={drawingTool}
-                options={drawingToolOptions.map((tool) => ({ value: tool.id, label: tool.label }))}
-                onChange={(value) => setDrawingTool(value as DrawingTool)}
-              />
-              <p className="text-[12px] leading-5 text-[#9aa7ba]">
-                Hold Alt while moving a layer to temporarily disable grid/layer snapping.
-              </p>
-            </InspectorGroup>
-
-            {selectedLayerCount > 1 ? (
-            <InspectorGroup title={`Batch Layers (${selectedLayerCount})`} icon={<Copy size={15} aria-hidden="true" />}>
-              <div className="grid grid-cols-2 gap-2">
-                <button type="button" onClick={duplicateSelectedLayers} disabled={!selectedLayerCount || selectedLayerLocked} className="h-9 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-semibold text-[#c3cdda] disabled:opacity-45">Duplicate</button>
-                <button type="button" onClick={toggleSelectedLayerVisibility} disabled={!selectedLayerCount} className="h-9 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-semibold text-[#c3cdda] disabled:opacity-45">{selectedLayerHidden ? "Show" : "Hide"}</button>
-                <button type="button" onClick={toggleSelectedLayerLock} disabled={!selectedLayerCount} className="h-9 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-semibold text-[#c3cdda] disabled:opacity-45">{selectedLayerLocked ? "Unlock" : "Lock"}</button>
-                <button type="button" onClick={deleteSelectedLayer} disabled={!selectedLayerCount || selectedLayerLocked} className="h-9 rounded-md border border-[#fda29b] bg-[#141b28] text-xs font-semibold text-[#b42318] disabled:opacity-45">Delete</button>
-              </div>
-              {selectedLayerBounds ? (
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <NumberField
-                    label="Group width (cells)"
-                    value={selectedLayerBounds.width}
-                    min={0.25}
-                    max={1000}
-                    step={0.25}
-                    allowDecimalInput
-                    disabled={selectedLayerResizeDisabled}
-                    onChange={(width) => resizeSelectedLayerBounds({ width })}
-                  />
-                  <NumberField
-                    label="Group height (cells)"
-                    value={selectedLayerBounds.height}
-                    min={0.25}
-                    max={1000}
-                    step={0.25}
-                    allowDecimalInput
-                    disabled={selectedLayerResizeDisabled}
-                    onChange={(height) => resizeSelectedLayerBounds({ height })}
-                  />
-                </div>
-              ) : null}
-              <div className="mt-3 grid grid-cols-4 gap-1">
-                <button type="button" onClick={() => rotateSelectedLayers(-1)} disabled={selectedLayerResizeDisabled} aria-label="Rotate selected layers left" className="grid h-8 place-items-center rounded-md border border-[#2a3344] bg-[#141b28] text-[#c3cdda] disabled:opacity-45" title="Rotate selected layers left"><RotateCcw size={15} aria-hidden="true" /></button>
-                <button type="button" onClick={() => rotateSelectedLayers(1)} disabled={selectedLayerResizeDisabled} aria-label="Rotate selected layers right" className="grid h-8 place-items-center rounded-md border border-[#2a3344] bg-[#141b28] text-[#c3cdda] disabled:opacity-45" title="Rotate selected layers right"><RotateCw size={15} aria-hidden="true" /></button>
-                <button type="button" onClick={() => flipSelectedLayers("x")} disabled={selectedLayerResizeDisabled} aria-label="Flip selected layers horizontally" className="grid h-8 place-items-center rounded-md border border-[#2a3344] bg-[#141b28] text-[#c3cdda] disabled:opacity-45" title="Flip selected layers horizontally"><FlipHorizontal size={15} aria-hidden="true" /></button>
-                <button type="button" onClick={() => flipSelectedLayers("y")} disabled={selectedLayerResizeDisabled} aria-label="Flip selected layers vertically" className="grid h-8 place-items-center rounded-md border border-[#2a3344] bg-[#141b28] text-[#c3cdda] disabled:opacity-45" title="Flip selected layers vertically"><FlipVertical size={15} aria-hidden="true" /></button>
-              </div>
-              <div className="grid grid-cols-4 gap-1">
-                <button type="button" onClick={() => nudgeSelectedLayer(-1, 0)} disabled={!selectedLayerCount} className="h-8 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-bold disabled:opacity-45">←</button>
-                <button type="button" onClick={() => nudgeSelectedLayer(0, -1)} disabled={!selectedLayerCount} className="h-8 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-bold disabled:opacity-45">↑</button>
-                <button type="button" onClick={() => nudgeSelectedLayer(0, 1)} disabled={!selectedLayerCount} className="h-8 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-bold disabled:opacity-45">↓</button>
-                <button type="button" onClick={() => nudgeSelectedLayer(1, 0)} disabled={!selectedLayerCount} className="h-8 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-bold disabled:opacity-45">→</button>
-              </div>
-            </InspectorGroup>
-            ) : null}
-
-            <div className="rounded-xl border border-[#2a3344] bg-[#eef2f7] p-1.5 shadow-sm">
-              <InspectorSegmented
-                label="Draw mode"
-                value={drawTab}
-                options={drawTabs.map((tab) => ({ value: tab.id, label: tab.label }))}
-                onChange={(value) => setDrawTab(value as DrawTab)}
-              />
-            </div>
-
+          <div
+            id="editor-inspector-panel-draw"
+            role="tabpanel"
+            aria-labelledby="editor-inspector-tab-draw"
+            className={`editor-inspector__tab-panel editor-inspector__tab-panel--create ${inspectorTab === "draw" ? "" : "hidden"}`}
+            data-inspector-panel="create"
+          >
             {drawTab === "shape" ? (
-              <InspectorGroup title="Shape Generator" icon={<Shapes size={15} aria-hidden="true" />}>
-                <div className="grid grid-cols-2 gap-2">
-                  {GENERATED_SHAPE_KIND_KEYS.map((kind) => (
-                    <button
-                      key={`draft-shape-${kind}`}
-                      type="button"
-                      onClick={() => {
-                        setDraftShapeKind(kind);
-                        if (shapeUsesSingleSize(kind)) setDraftShapeHeightCm(draftShapeWidthCm);
-                      }}
-                      className={`h-9 rounded-md border text-xs font-semibold ${draftShapeKind === kind ? "border-[#008c8f] bg-teal-50 text-[#007174]" : "border-[#2a3344] bg-[#141b28] text-[#c3cdda]"}`}
-                    >
-                      {GRAPH_SHAPE_KIND_LABELS[kind]}
-                    </button>
-                  ))}
-                </div>
+              <div
+                className="editor-inspector__create-workbench"
+                data-create-tool={drawingTool}
+                data-shape-armed={armedShapeKind ? "true" : "false"}
+              >
+                <header className="editor-inspector__create-header">
+                  <div className="editor-inspector__create-heading">
+                    <span className="editor-inspector__create-icon" aria-hidden="true">
+                      {drawingTool === "line" ? <Ruler size={17} /> : <Shapes size={17} />}
+                    </span>
+                    <div>
+                      <span className="editor-inspector__focus-kicker">
+                        {drawingTool === "line"
+                          ? "Vector stroke"
+                          : drawingTool === "shape"
+                            ? "Cell shape"
+                            : "Create"}
+                      </span>
+                      <h3>
+                        {drawingTool === "line"
+                          ? "Draw Line"
+                          : drawingTool === "shape"
+                            ? "Draw Shape"
+                            : drawingTool === "lasso"
+                              ? "Lasso region"
+                              : "Choose a drawing tool"}
+                      </h3>
+                    </div>
+                  </div>
+                  <p>
+                    {drawingTool === "line"
+                      ? "Drag from a start point to an end point. A click alone does nothing."
+                      : drawingTool === "shape"
+                        ? "Choose a shape, then click a graph cell to place it at one-cell size."
+                        : drawingTool === "lasso"
+                          ? "Click to add vertices, then close the region near its starting point."
+                          : "Select Draw Line or Draw Shape from the left tool deck."}
+                  </p>
+                </header>
 
-                <div className="grid grid-cols-2 gap-2">
+                {drawingTool === "line" ? (
+                  <div className="editor-inspector__create-content">
+                    <section className="editor-inspector__create-section" aria-labelledby="create-line-kind-label">
+                      <div className="editor-inspector__create-section-heading">
+                        <span id="create-line-kind-label">Line type</span>
+                        <span>Default: Line</span>
+                      </div>
+                      <div className="editor-inspector__kind-grid editor-inspector__kind-grid--line">
+                        {OPEN_SHAPE_GENERATOR_KINDS.map((kind) => (
+                          <button
+                            key={`line-kind-${kind}`}
+                            type="button"
+                            onClick={() => setDraftShapeKind(kind)}
+                            className="editor-inspector__kind-button"
+                            data-active={draftShapeKind === kind ? "true" : "false"}
+                            aria-pressed={draftShapeKind === kind}
+                          >
+                            <span className={`editor-inspector__line-sample is-${kind}`} aria-hidden="true" />
+                            <strong>{GRAPH_SHAPE_KIND_LABELS[kind]}</strong>
+                          </button>
+                        ))}
+                      </div>
+                    </section>
+
+                    <section className="editor-inspector__create-section" aria-labelledby="create-line-style-label">
+                      <div className="editor-inspector__create-section-heading">
+                        <span id="create-line-style-label">Stroke</span>
+                        <span>Applies before drawing</span>
+                      </div>
+                      <InspectorFieldGrid>
+                        <NumberField
+                          label="Thickness"
+                          value={draftShapeStrokeWidth}
+                          min={1}
+                          max={24}
+                          inputClassName={inspectorControlClass}
+                          onChange={(value) => setDraftShapeStrokeWidth(Math.round(value))}
+                        />
+                        <InspectorSelect
+                          label="Line style"
+                          value={draftShapeStrokeStyle}
+                          options={GRAPH_GRID_LINE_STYLE_KEYS.map((style) => ({
+                            value: style,
+                            label: `${style[0].toUpperCase()}${style.slice(1)}`,
+                          }))}
+                          onChange={(value) => setDraftShapeStrokeStyle(value as GraphGridLineStyle)}
+                        />
+                      </InspectorFieldGrid>
+                      <ColorPresetField
+                        label="Line color"
+                        value={draftShapeStrokeColor}
+                        onChange={setDraftShapeStrokeColor}
+                      />
+                    </section>
+
+                    <div className="editor-inspector__alignment-note">
+                      <span className="editor-inspector__alignment-glyph" aria-hidden="true">±5°</span>
+                      <span>
+                        Near-horizontal and near-vertical strokes align to the graph. Hold Alt for a free angle.
+                      </span>
+                    </div>
+                  </div>
+                ) : drawingTool === "shape" ? (
+                  <div className="editor-inspector__create-content">
+                    <section className="editor-inspector__create-section" aria-labelledby="create-shape-kind-label">
+                      <div className="editor-inspector__create-section-heading">
+                        <span id="create-shape-kind-label">Choose a shape</span>
+                        <span>{armedShapeKind ? GRAPH_SHAPE_KIND_LABELS[armedShapeKind] : "Nothing selected"}</span>
+                      </div>
+                      <div className="editor-inspector__kind-grid editor-inspector__kind-grid--shape">
+                        {CLOSED_SHAPE_GENERATOR_KINDS.map((kind) => (
+                          <button
+                            key={`closed-shape-kind-${kind}`}
+                            type="button"
+                            onClick={() => setDraftShapeKind(kind)}
+                            className="editor-inspector__kind-button"
+                            data-active={armedShapeKind === kind ? "true" : "false"}
+                            aria-pressed={armedShapeKind === kind}
+                          >
+                            <span className={`editor-inspector__shape-glyph is-${kind}`} aria-hidden="true" />
+                            <strong>{GRAPH_SHAPE_KIND_LABELS[kind]}</strong>
+                          </button>
+                        ))}
+                      </div>
+                    </section>
+
+                    {armedShapeKind ? (
+                      <section className="editor-inspector__create-section" aria-labelledby="create-shape-style-label">
+                        <div className="editor-inspector__create-section-heading">
+                          <span id="create-shape-style-label">Appearance</span>
+                          <span>Placed at 1 × 1 cell</span>
+                        </div>
+                        <InspectorSegmented
+                          label="Shape appearance"
+                          value={draftShapeFillMode}
+                          options={(["outline", "filled"] as ShapeFillMode[]).map((mode) => ({
+                            value: mode,
+                            label: GENERATED_SHAPE_FILL_MODE_LABELS[mode],
+                          }))}
+                          onChange={(value) => setDraftShapeFillMode(value as ShapeFillMode)}
+                        />
+                        <NumberField
+                          label="Stroke width"
+                          value={draftShapeStrokeWidth}
+                          min={1}
+                          max={24}
+                          inputClassName={inspectorControlClass}
+                          onChange={(value) => setDraftShapeStrokeWidth(Math.round(value))}
+                        />
+                        <ColorPresetField
+                          label="Stroke color"
+                          value={draftShapeStrokeColor}
+                          onChange={setDraftShapeStrokeColor}
+                        />
+                        {draftShapeFillMode === "filled" ? (
+                          <ColorPresetField
+                            label="Fill color"
+                            value={draftShapeFillColor}
+                            onChange={setDraftShapeFillColor}
+                            allowTransparent
+                          />
+                        ) : null}
+                      </section>
+                    ) : (
+                      <div className="editor-inspector__shape-empty">
+                        <Shapes size={20} aria-hidden="true" />
+                        <strong>Select a shape to arm the canvas</strong>
+                        <span>Graph clicks remain inactive until a shape is selected.</span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="editor-inspector__create-content">
+                    <div className="editor-inspector__shape-empty">
+                      <MousePointer2 size={20} aria-hidden="true" />
+                      <strong>
+                        {drawingTool === "lasso" ? "Click points on the graph" : "No creation tool active"}
+                      </strong>
+                      <span>
+                        {drawingTool === "lasso"
+                          ? "Escape cancels. Backspace removes the last vertex."
+                          : "Use the left tool deck to start drawing."}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+            <InspectorSections label="Create">
+              <InspectorGroup title="Clipart Library" tabLabel="Library" icon={<ImageIcon size={15} aria-hidden="true" />}>
+                <InspectorFieldGrid>
                   <NumberField
-                    label={shapeUsesSingleSize(draftShapeKind) ? "Size (CM)" : "Width (CM)"}
-                    value={draftShapeWidthCm}
+                    label="Width"
+                    unit="cm"
+                    value={draftClipartWidthCm}
                     min={0.01}
                     max={1000}
                     step={0.1}
                     allowDecimalInput
                     inputClassName={inspectorControlClass}
                     onChange={(value) => {
-                      setDraftShapeWidthCm(value);
-                      if (shapeUsesSingleSize(draftShapeKind)) setDraftShapeHeightCm(value);
+                      const aspect = clipartAssetAspect();
+                      setDraftClipartWidthCm(value);
+                      setDraftClipartHeightCm(roundMeasure(value / aspect));
                     }}
                   />
                   <NumberField
-                    label={shapeUsesSingleSize(draftShapeKind) ? "Size (CM)" : "Height (CM)"}
-                    value={shapeUsesSingleSize(draftShapeKind) ? draftShapeWidthCm : draftShapeHeightCm}
+                    label="Height"
+                    unit="cm"
+                    value={draftClipartHeightCm}
                     min={0.01}
                     max={1000}
                     step={0.1}
                     allowDecimalInput
                     inputClassName={inspectorControlClass}
-                    disabled={shapeUsesSingleSize(draftShapeKind)}
-                    onChange={setDraftShapeHeightCm}
+                    onChange={setDraftClipartHeightCm}
                   />
-                </div>
-
-                <InspectorSegmented
-                  label="Shape type"
-                  value={draftShapeFillMode}
-                  options={(["outline", "filled"] as ShapeFillMode[]).map((mode) => ({ value: mode, label: GENERATED_SHAPE_FILL_MODE_LABELS[mode] }))}
-                  onChange={(value) => setDraftShapeFillMode(value as ShapeFillMode)}
-                />
-
-                {draftShapeFillMode === "outline" && shapeSupportsSides(draftShapeKind) ? (
-                  <div className="grid grid-cols-4 gap-1">
-                    {CELL_LINE_SIDE_KEYS.map((side) => (
-                      <label key={`draft-side-${side}`} className="flex h-9 items-center gap-1.5 rounded-md border border-[#2a3344] bg-[#141b28] px-2 text-[11px] font-semibold text-[#c3cdda]">
-                        <input
-                          type="checkbox"
-                          checked={draftShapeSides.includes(side)}
-                          onChange={(event) => setDraftShapeSide(side, event.target.checked)}
-                          className="h-4 w-4 accent-[#008c8f]"
-                        />
-                        {CELL_LINE_SIDE_LABELS[side]}
-                      </label>
-                    ))}
-                  </div>
-                ) : null}
-
-                <NumberField label="Stroke width" value={draftShapeStrokeWidth} min={1} max={24} inputClassName={inspectorControlClass} onChange={(value) => setDraftShapeStrokeWidth(Math.round(value))} />
-                <ColorPresetField label="Stroke color" value={draftShapeStrokeColor} onChange={setDraftShapeStrokeColor} />
-                {draftShapeFillMode === "filled" ? <ColorPresetField label="Fill color" value={draftShapeFillColor} onChange={setDraftShapeFillColor} allowTransparent /> : null}
-
-                <div className="overflow-hidden rounded-xl border border-[#2a3344] bg-[#161f2e] shadow-sm">
-                  <div
-                    draggable
-                    onDragStart={handleGeneratedShapeDragStart}
-                    onDragEnd={() => setPlacingGeneratedShape(false)}
-                    className="grid h-36 cursor-grab place-items-center bg-[#141b28] p-3 active:cursor-grabbing"
-                    title="Drag to canvas"
-                  >
-                    <ShapePreviewSvg
-                      kind={draftShapeKind}
-                      sides={shapeSupportsSides(draftShapeKind) ? draftShapeSides : CELL_LINE_SIDE_KEYS}
-                      fillColor={draftShapeFillMode === "filled" ? draftShapeFillColor : TRANSPARENT_FILL_COLOR}
-                      strokeColor={draftShapeStrokeColor}
-                      strokeWidth={draftShapeStrokeWidth}
-                      widthCells={draftShapePreviewDimensions.width}
-                      heightCells={draftShapePreviewDimensions.height}
-                      className="h-full max-h-28 w-full"
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 border-t border-[#232c3c] p-2">
-                    <button
-                      type="button"
-                      onClick={() => setPlacingGeneratedShape((value) => !value)}
-                      className={`h-9 rounded-md border text-xs font-semibold ${placingGeneratedShape ? "border-[#008c8f] bg-[#008c8f] text-white" : "border-[#2a3344] bg-[#141b28] text-[#c3cdda]"}`}
-                    >
-                      Place on canvas
-                    </button>
-                    <button type="button" onClick={clearGraphShapes} disabled={!settings.graphShapes.length} className="h-9 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-semibold text-[#c3cdda] disabled:opacity-45">
-                      Clear generated
-                    </button>
-                  </div>
-                </div>
-              </InspectorGroup>
-            ) : null}
-
-            {drawTab === "clipart" ? (
-              <InspectorGroup title="Clipart Library" icon={<ImageIcon size={15} aria-hidden="true" />}>
-                <label className={`flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md border border-[#2a3344] bg-[#141b28] text-sm font-semibold text-[#c3cdda] hover:bg-[#161f2e] ${uploadingCliparts ? "opacity-60" : ""}`}>
+                </InspectorFieldGrid>
+                <label className={`editor-inspector__upload-action ${uploadingCliparts ? "opacity-60" : ""}`}>
                   {uploadingCliparts ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Upload size={16} aria-hidden="true" />}
                   Upload cliparts
                   <input
@@ -1005,23 +1627,23 @@ export function InspectorPanel(props: InspectorPanelProps) {
                     }}
                   />
                 </label>
-                <label className="grid gap-1.5">
-                  <span className="text-xs font-semibold text-[#8592a6]">Search clipart by name</span>
+                <label className="editor-inspector-field">
+                  <span className="editor-inspector-field__label">Search clipart by name</span>
                   <div className="relative">
-                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[#6b7688]" aria-hidden="true" />
+                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--editor-muted)]" aria-hidden="true" />
                     <input
                       type="text"
                       value={clipartSearch}
                       onChange={(event) => setClipartSearch(event.target.value)}
                       placeholder="Search clipart"
-                      className="h-10 w-full rounded-md border border-[var(--line)] bg-[#141b28] py-2 pr-3 pl-9 text-sm outline-none focus:border-[#008c8f] focus:ring-2 focus:ring-teal-100"
+                      className="editor-inspector-control w-full py-2 pr-3 pl-9"
                     />
                   </div>
                 </label>
 
                 {settings.clipartAssets.length ? (
                   filteredClipartAssets.length ? (
-                    <div className="grid max-h-44 gap-1 overflow-y-auto rounded-md border border-[#2a3344] bg-[#eef2f7] p-1">
+                    <div className="editor-inspector__clipart-grid">
                       {filteredClipartAssets.map((asset) => {
                         const selected = selectedClipartAsset?.id === asset.id;
                         const previewUrl = asset.url ?? asset.dataUrl ?? null;
@@ -1034,18 +1656,19 @@ export function InspectorPanel(props: InspectorPanelProps) {
                               const aspect = clipartAssetAspect(asset);
                               if (draftClipartHeightCm === draftClipartWidthCm) setDraftClipartHeightCm(roundMeasure(draftClipartWidthCm / aspect));
                             }}
-                            className={`grid min-h-14 grid-cols-[44px_minmax(0,1fr)_24px] items-center gap-2 rounded px-2 py-1.5 text-left ${selected ? "bg-[#0f2f30] text-[#0f766e]" : "hover:bg-[#161f2e]"}`}
+                            className="editor-inspector__clipart-tile"
+                            data-selected={selected ? "true" : "false"}
                           >
                             {previewUrl ? (
-                              <img src={previewUrl} alt="" className="h-11 w-11 rounded border border-[#2a3344] bg-[#eef2f7] object-contain p-1" />
+                              <img src={previewUrl} alt="" className="h-11 w-11 rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] object-contain p-1" />
                             ) : (
-                              <span className="grid h-11 w-11 place-items-center rounded border border-[#2a3344] bg-[#eef2f7] text-[#6b7688]">
+                              <span className="grid h-11 w-11 place-items-center rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] text-[var(--editor-muted)]">
                                 <ImageIcon size={15} aria-hidden="true" />
                               </span>
                             )}
                             <span className="min-w-0">
-                              <span className="block truncate text-[12px] font-semibold text-[#e7edf5]">{asset.name}</span>
-                              <span className="block truncate text-[11px] text-[#9aa7ba]">{asset.width} x {asset.height}</span>
+                              <span className="block truncate text-[12px] font-semibold text-[var(--editor-text)]">{asset.name}</span>
+                              <span className="block truncate text-[11px] text-[var(--editor-muted)]">{asset.width} x {asset.height}</span>
                             </span>
                             {selected ? <Check size={16} aria-hidden="true" /> : null}
                           </button>
@@ -1053,56 +1676,30 @@ export function InspectorPanel(props: InspectorPanelProps) {
                       })}
                     </div>
                   ) : (
-                    <div className="rounded-md border border-dashed border-[#2a3344] bg-[#161f2e] px-3 py-5 text-center text-xs font-medium text-[#9aa7ba]">
+                    <div className="editor-inspector-context-hint">
                       No cliparts match &quot;{clipartSearch}&quot;
                     </div>
                   )
                 ) : (
-                  <div className="rounded-md border border-dashed border-[#2a3344] bg-[#161f2e] px-3 py-5 text-center text-xs font-medium text-[#9aa7ba]">
+                  <div className="editor-inspector-context-hint">
                     Upload cliparts to reuse in this project.
                   </div>
                 )}
 
-                <div className="grid grid-cols-2 gap-2">
-                  <NumberField
-                    label="Width (CM)"
-                    value={draftClipartWidthCm}
-                    min={0.01}
-                    max={1000}
-                    step={0.1}
-                    allowDecimalInput
-                    inputClassName={inspectorControlClass}
-                    onChange={(value) => {
-                      const aspect = clipartAssetAspect();
-                      setDraftClipartWidthCm(value);
-                      setDraftClipartHeightCm(roundMeasure(value / aspect));
-                    }}
-                  />
-                  <NumberField
-                    label="Height (CM)"
-                    value={draftClipartHeightCm}
-                    min={0.01}
-                    max={1000}
-                    step={0.1}
-                    allowDecimalInput
-                    inputClassName={inspectorControlClass}
-                    onChange={setDraftClipartHeightCm}
-                  />
-                </div>
                 <ColorPresetField label="Stroke color" value={draftClipartStrokeColor} onChange={setDraftClipartStrokeColor} />
                 <ColorPresetField label="Fill color" value={draftClipartFillColor} onChange={setDraftClipartFillColor} allowTransparent />
 
-                <div className="overflow-hidden rounded-xl border border-[#2a3344] bg-[#161f2e] shadow-sm">
+                <div className="editor-inspector__placement-preview">
                   <div
                     draggable={Boolean(selectedClipartAsset)}
                     onDragStart={selectedClipartAsset ? handleClipartDragStart(selectedClipartAsset.id) : undefined}
                     onDragEnd={() => setPlacingClipartAssetId(null)}
-                    className={`grid h-36 place-items-center bg-[#141b28] p-3 ${selectedClipartAsset ? "cursor-grab active:cursor-grabbing" : "text-[#6b7688]"}`}
+                    className={`editor-inspector__placement-stage ${selectedClipartAsset ? "cursor-grab active:cursor-grabbing" : "text-[var(--editor-muted)]"}`}
                     title={selectedClipartAsset ? "Drag to canvas" : "Upload or select a clipart"}
                   >
                     {selectedClipartAsset?.url || selectedClipartAsset?.dataUrl ? (
                       <div
-                        className="grid h-full max-h-28 w-full place-items-center overflow-hidden rounded border bg-[#161f2e] p-2"
+                        className="grid h-full max-h-28 w-full place-items-center overflow-hidden rounded border bg-[var(--editor-panel-2)] p-2"
                         style={{ borderColor: draftClipartStrokeColor }}
                       >
                         <img
@@ -1118,114 +1715,131 @@ export function InspectorPanel(props: InspectorPanelProps) {
                       <ImageIcon size={28} aria-hidden="true" />
                     )}
                   </div>
-                  <div className="grid grid-cols-2 gap-2 border-t border-[#232c3c] p-2">
-                    <button
-                      type="button"
-                      onClick={() => selectedClipartAsset && setPlacingClipartAssetId((value) => (value === selectedClipartAsset.id ? null : selectedClipartAsset.id))}
-                      disabled={!selectedClipartAsset}
-                      className={`h-9 rounded-md border text-xs font-semibold disabled:opacity-45 ${placingClipartAssetId === selectedClipartAsset?.id ? "border-[#008c8f] bg-[#008c8f] text-white" : "border-[#2a3344] bg-[#141b28] text-[#c3cdda]"}`}
-                    >
-                      Place clipart
-                    </button>
+                  <div className="grid grid-cols-2 gap-2 border-t border-[var(--editor-line-soft)] p-2">
                     <button
                       type="button"
                       onClick={() => {
                         if (selectedClipartAsset) void deleteClipartAsset(selectedClipartAsset.id);
                       }}
                       disabled={!selectedClipartAsset || deletingClipartAssetId !== null}
-                      className="h-9 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-semibold text-[#b42318] disabled:opacity-45"
+                      className="editor-inspector__secondary-action is-danger"
                     >
                       {selectedClipartAsset && deletingClipartAssetId === selectedClipartAsset.id ? <Loader2 size={14} className="animate-spin" /> : "Delete clipart"}
                     </button>
-                    <button type="button" onClick={() => setGeneratedImagesCollapsed(false)} disabled={!settings.clipartImages.length} className="h-9 rounded-md border border-[#2a3344] bg-[#141b28] text-xs font-semibold text-[#c3cdda] disabled:opacity-45">
+                    <button type="button" onClick={() => setGeneratedImagesCollapsed(false)} disabled={!settings.clipartImages.length} className="editor-inspector__secondary-action">
                       Show placed
                     </button>
                   </div>
                 </div>
               </InspectorGroup>
-            ) : null}
+            </InspectorSections>
+            )}
 
-            {drawTab === "shape" && selectedShapeLayer ? (
-              <InspectorGroup title="Selected Generated Image" icon={<MousePointer2 size={15} aria-hidden="true" />}>
-                <div className="rounded-md border border-[#2a3344] bg-[#141b28]">{renderShapeAdvanced(selectedShapeLayer)}</div>
-              </InspectorGroup>
-            ) : null}
-            {drawTab === "clipart" && selectedClipartLayer ? (
-              <InspectorGroup title="Selected Clipart Image" icon={<MousePointer2 size={15} aria-hidden="true" />}>
-                <div className="rounded-md border border-[#2a3344] bg-[#141b28]">{renderClipartAdvanced(selectedClipartLayer)}</div>
-              </InspectorGroup>
-            ) : null}
-            {selectedCellLayer ? (
-              <InspectorGroup title="Selected Cell Paint" icon={<MousePointer2 size={15} aria-hidden="true" />}>
-                <div className="rounded-md border border-[#2a3344] bg-[#141b28]">{renderCellAdvanced(selectedCellLayer)}</div>
-              </InspectorGroup>
-            ) : null}
           </div>
-        ) : null}
 
-        <div className={inspectorTab === "palette" ? "space-y-4" : "hidden"}>
-          <InspectorGroup title="Palette" icon={<Palette size={15} aria-hidden="true" />}>
-            <CollapsibleSection title="Outline" summary={<ColorSummary value={settings.outlineColor} />} open={!collapsedSections.outline} onToggle={() => toggleSection("outline")}>
-              <ColorPresetField label="Outline" value={settings.outlineColor} onChange={updateOutlineColor} />
-            </CollapsibleSection>
-
-            <CollapsibleSection title="Default fill" summary={<ColorSummary value={settings.fillColor} />} open={!collapsedSections.fill} onToggle={() => toggleSection("fill")}>
-              <ColorPresetField label="Default fill" value={settings.fillColor} onChange={(value) => updateSetting("fillColor", value)} allowTransparent />
-            </CollapsibleSection>
-
-            {selectedFillRegion ? (
-              <CollapsibleSection title={`Selected ${selectedFillRegion.kind === "source" ? "source" : "manual"} fill`} summary={<ColorSummary value={selectedFillRegionColor} />} open={!collapsedSections.selectedFill} onToggle={() => toggleSection("selectedFill")}>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-semibold text-[#8592a6]">{selectedFillRegion.kind === "source" ? "Source fill" : "Manual fill"}</span>
-                  <button
-                    type="button"
-                    onClick={() => resetFillRegionColor(selectedFillRegion.id)}
-                    className="grid h-8 w-8 place-items-center rounded-md border border-[var(--line)] bg-[#141b28] text-[#9aa7ba] hover:bg-slate-50"
-                    title="Use default fill"
-                  >
-                    <RefreshCw size={14} aria-hidden="true" />
-                  </button>
+        <div
+          id="editor-inspector-panel-palette"
+          role="tabpanel"
+          aria-labelledby="editor-inspector-tab-palette"
+          className={`editor-inspector__tab-panel editor-inspector__tab-panel--color ${inspectorTab === "palette" ? "" : "hidden"}`}
+          data-inspector-panel="color"
+        >
+          <InspectorSections label="Color">
+            <InspectorGroup title="Fill color" tabLabel="Fill" icon={<Palette size={15} aria-hidden="true" />}>
+              {selectedFillRegion ? (
+                <ColorPresetField
+                  label={
+                    selectedFillRegion.id.startsWith("generated:")
+                      ? "Generated artwork fill"
+                      : selectedFillRegion.kind === "source"
+                        ? "Source region fill"
+                        : "Manual region fill"
+                  }
+                  value={selectedFillRegionColor}
+                  onChange={(value) => updateFillRegionColor(selectedFillRegion.id, value)}
+                  allowTransparent
+                  expanded={!collapsedSections.selectedFill}
+                  onExpandedChange={() => toggleSection("selectedFill")}
+                />
+              ) : null}
+              <ColorPresetField
+                label="Default fill"
+                value={settings.fillColor}
+                onChange={(value) => updateSetting("fillColor", value)}
+                allowTransparent
+                expanded={!collapsedSections.fill}
+                onExpandedChange={() => toggleSection("fill")}
+              />
+            </InspectorGroup>
+            <InspectorGroup title="Artwork colors" tabLabel="Artwork" icon={<Palette size={15} aria-hidden="true" />}>
+              {!selectedFillRegion ? (
+                <div className="editor-inspector-context-hint">
+                  <Palette size={15} aria-hidden="true" />
+                  Select a filled region on the canvas to override it independently.
                 </div>
-                <ColorPresetField label="Section fill" value={selectedFillRegionColor} onChange={(value) => updateFillRegionColor(selectedFillRegion.id, value)} allowTransparent />
-              </CollapsibleSection>
-            ) : null}
-
-            <CollapsibleSection title="Graph lines" summary={<ColorSummary value={settings.gridLineColor} />} open={!collapsedSections.graphLines} onToggle={() => toggleSection("graphLines")}>
+              ) : null}
+              <ColorPresetField
+                label="Outline"
+                value={settings.outlineColor}
+                onChange={updateOutlineColor}
+                expanded={!collapsedSections.outline}
+                onExpandedChange={() => toggleSection("outline")}
+              />
+            </InspectorGroup>
+            <InspectorGroup title="Graph color" tabLabel="Grid" icon={<Grid3X3 size={15} aria-hidden="true" />} priority="quiet">
               <ColorPresetField
                 label="Graph lines"
                 value={settings.gridLineColor}
                 colors={PRESET_GRAPH_LINE_COLORS}
                 normalizeColor={normalizeGraphLineColor}
                 onChange={(value) => updateSetting("gridLineColor", value)}
+                expanded={!collapsedSections.graphLines}
+                onExpandedChange={() => toggleSection("graphLines")}
               />
-            </CollapsibleSection>
-          </InspectorGroup>
+            </InspectorGroup>
+            <InspectorGroup title="Chart palette" tabLabel="Palette" icon={<Palette size={15} aria-hidden="true" />} priority="quiet">
+              {palette.length ? (
+                <div className="editor-inspector__palette-list" role="list" aria-label="Generated chart palette">
+                  {palette.map((color, index) => (
+                    <div
+                      key={`${color.id ?? color.hex}-${index}`}
+                      className="editor-inspector__palette-row"
+                      role="listitem"
+                    >
+                      <span
+                        className="editor-inspector__palette-swatch"
+                        style={{ backgroundColor: color.hex }}
+                        aria-hidden="true"
+                      />
+                      <span className="editor-inspector__palette-copy">
+                        <strong>{color.name}</strong>
+                        <span>{color.hex.toUpperCase()}</span>
+                      </span>
+                      <span className="editor-inspector__palette-count">
+                        {color.cellCount.toLocaleString("en-US")} cells
+                      </span>
+                      <span
+                        className="editor-inspector__palette-lock"
+                        title={color.locked ? "Palette color locked" : "Palette color unlocked"}
+                        aria-label={color.locked ? "Palette color locked" : "Palette color unlocked"}
+                      >
+                        {color.locked ? <Lock size={13} aria-hidden="true" /> : <Unlock size={13} aria-hidden="true" />}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="editor-inspector__hint">Palette counts appear after the canvas finishes processing.</p>
+              )}
+            </InspectorGroup>
+          </InspectorSections>
+        </div>
         </div>
       </div>
+      </div>
+      </div>
+      </div>
 
-      <button
-        type="button"
-        aria-label="Resize controls panel"
-        title="Resize controls panel"
-        onPointerDown={(event) => beginPanelResize(event, "right")}
-        onPointerMove={resizePanel}
-        onPointerUp={endPanelResize}
-        onPointerCancel={endPanelResize}
-        className="group absolute inset-y-0 left-0 hidden w-3 cursor-col-resize touch-none place-items-center lg:grid"
-      >
-        <span
-          className="absolute top-1/2 left-1.5 h-[50vh] w-px -translate-y-1/2 bg-slate-200 opacity-0 transition-colors transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-hover:bg-[var(--teal)]"
-          aria-hidden="true"
-        />
-        <span
-          className={`grid h-6 w-6 place-items-center rounded-full border border-[var(--line)] bg-[#141b28] text-[#8592a6] shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 ${
-            resizingPanelSide === "right" ? "opacity-100" : "opacity-0"
-          }`}
-          aria-hidden="true"
-        >
-          <MoveHorizontal size={14} strokeWidth={2.25} />
-        </span>
-      </button>
     </aside>
   );
 }

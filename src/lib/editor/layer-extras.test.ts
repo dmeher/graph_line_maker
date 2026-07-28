@@ -86,3 +86,87 @@ test("signatures change when erase/background state changes", () => {
   assert.equal(backgroundRemovalSignature(undefined), "0");
   assert.notEqual(backgroundRemovalSignature({ enabled: true, tolerance: 0.1 }), backgroundRemovalSignature({ enabled: true, tolerance: 0.2 }));
 });
+
+test("erase strokes carry a brush shape, defaulting to circle", () => {
+  const [circle, square, legacy, bogus] = normalizeEraseStrokes([
+    { points: [{ x: 0.1, y: 0.1 }], radius: 0.02, shape: "circle" },
+    { points: [{ x: 0.2, y: 0.2 }], radius: 0.02, shape: "square" },
+    // Saved before the square brush existed — must stay a circle.
+    { points: [{ x: 0.3, y: 0.3 }], radius: 0.02 },
+    { points: [{ x: 0.4, y: 0.4 }], radius: 0.02, shape: "triangle" },
+  ]);
+
+  assert.equal(circle.shape, "circle");
+  assert.equal(square.shape, "square");
+  assert.equal(legacy.shape, "circle");
+  assert.equal(bogus.shape, "circle");
+});
+
+test("the erase signature changes with brush shape", () => {
+  // Switching shape changes which pixels are erased, so a cached processed
+  // layer must not survive the change.
+  const points = [{ x: 0.5, y: 0.5 }];
+  const circle = eraseStrokesSignature(normalizeEraseStrokes([{ points, radius: 0.02, shape: "circle" }]));
+  const square = eraseStrokesSignature(normalizeEraseStrokes([{ points, radius: 0.02, shape: "square" }]));
+
+  assert.notEqual(circle, square);
+});
+
+test("polygon regions need three vertices and may carry a fill", () => {
+  const strokes = normalizeEraseStrokes([
+    // A closed region: three vertices is the minimum that encloses area.
+    { points: [{ x: 0.1, y: 0.1 }, { x: 0.4, y: 0.1 }, { x: 0.4, y: 0.4 }], radius: 0.02, shape: "polygon" },
+    // Two vertices enclose nothing, so this is dropped rather than stored.
+    { points: [{ x: 0.5, y: 0.5 }, { x: 0.6, y: 0.6 }], radius: 0.02, shape: "polygon" },
+    { points: [{ x: 0.1, y: 0.5 }, { x: 0.4, y: 0.5 }, { x: 0.4, y: 0.8 }], radius: 0.02, shape: "polygon", fill: "#ffffff" },
+    { points: [{ x: 0.1, y: 0.6 }, { x: 0.4, y: 0.6 }, { x: 0.4, y: 0.9 }], radius: 0.02, shape: "polygon", fill: "#ff0000" },
+  ]);
+
+  assert.equal(strokes.length, 3);
+  assert.equal(strokes[0].shape, "polygon");
+  assert.equal(strokes[0].fill, undefined, "no fill means erase to transparent");
+  assert.equal(strokes[1].fill, "#ffffff");
+  // Only the canvas colour policy's values are accepted.
+  assert.equal(strokes[2].fill, undefined);
+});
+
+test("fill is ignored on brush strokes, which always erase", () => {
+  const [stroke] = normalizeEraseStrokes([
+    { points: [{ x: 0.2, y: 0.2 }], radius: 0.02, shape: "circle", fill: "#000000" },
+  ]);
+
+  assert.equal(stroke.shape, "circle");
+  assert.equal(stroke.fill, undefined);
+});
+
+test("the erase signature distinguishes erase from fill", () => {
+  const points = [{ x: 0.1, y: 0.1 }, { x: 0.4, y: 0.1 }, { x: 0.4, y: 0.4 }];
+  const erased = eraseStrokesSignature(normalizeEraseStrokes([{ points, radius: 0.02, shape: "polygon" }]));
+  const filled = eraseStrokesSignature(normalizeEraseStrokes([{ points, radius: 0.02, shape: "polygon", fill: "#000000" }]));
+
+  assert.notEqual(erased, filled);
+});
+
+test("lasso vertices may sit outside the image, brush points may not", () => {
+  // A region traced across the graph legitimately overshoots the layer. Canvas
+  // fill() clips it, so the vertices are kept unclamped to preserve the shape.
+  const [region] = normalizeEraseStrokes([
+    { points: [{ x: -0.5, y: 0.2 }, { x: 1.6, y: 0.2 }, { x: 1.6, y: 1.4 }], radius: 0.01, shape: "polygon" },
+  ]);
+  assert.equal(region.points[0].x, -0.5);
+  assert.equal(region.points[1].x, 1.6);
+  assert.equal(region.points[2].y, 1.4);
+
+  // Brush strokes are painted inside the image; out-of-range values there mean
+  // a legacy pixel-space draft and are still dropped.
+  assert.equal(normalizeEraseStrokes([{ points: [{ x: 1.6, y: 0.2 }], radius: 0.02, shape: "circle" }]).length, 0);
+});
+
+test("wildly out-of-range coordinates are still rejected as corrupt", () => {
+  // Pixel-space drafts (values in the hundreds) must not be mistaken for a
+  // region that merely overshoots the image.
+  const strokes = normalizeEraseStrokes([
+    { points: [{ x: 300, y: 200 }, { x: 400, y: 200 }, { x: 400, y: 300 }], radius: 0.01, shape: "polygon" },
+  ]);
+  assert.equal(strokes.length, 0);
+});

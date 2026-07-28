@@ -60,7 +60,7 @@ export function FeatureSuggestions() {
   return (
     <section className="rounded-xl border border-[#d7dde5] bg-white p-4 shadow-sm">
       <div className="mb-3 flex items-center gap-2">
-        <span className="text-[#008c8f]">
+        <span className="text-[var(--editor-accent)]">
           <Zap size={16} aria-hidden="true" />
         </span>
         <h3 className="text-[13px] font-bold uppercase tracking-wide text-[#101828]">
@@ -78,7 +78,7 @@ export function FeatureSuggestions() {
             <div key={category.title} className="rounded-lg border border-[#e8edf2] bg-[#f8fafc] p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="inline-flex min-w-0 items-center gap-2">
-                  <span className="text-[#008c8f]">
+                  <span className="text-[var(--editor-accent)]">
                     <Icon size={14} aria-hidden="true" />
                   </span>
                   <h4 className="truncate text-[12px] font-bold text-[#101828]">{category.title}</h4>
@@ -91,7 +91,7 @@ export function FeatureSuggestions() {
               <ul className="space-y-1.5">
                 {category.items.map((item, index) => (
                   <li key={`${category.title}-${index}`} className="flex items-start gap-2 text-[11px] leading-4 text-[#475467]">
-                    <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-[#008c8f]" />
+                    <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-[var(--editor-accent)]" />
                     <span>{item}</span>
                   </li>
                 ))}

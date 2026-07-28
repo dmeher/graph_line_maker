@@ -40,13 +40,17 @@ import { QuickCropControls } from "@/components/projects/quick-crop-controls";
 import {
   ALLOWED_IMAGE_LABEL,
   IMAGE_ACCEPT,
-  ORIGINAL_IMAGES_BUCKET,
   MAX_PROJECT_UPLOAD_FILES,
   MAX_PROJECT_UPLOAD_TOTAL_BYTES,
   MAX_UPLOAD_BYTES,
   isAllowedImageFile,
   isPdfFile,
 } from "@/lib/constants";
+import {
+  SOURCE_THUMBNAIL_MAX_EDGE,
+  uploadWithThumbnail,
+  type PresignedUpload,
+} from "@/lib/storage/upload-client";
 import { cropQueueItemId, cropQueueStatus } from "@/lib/projects/crop-queue";
 import {
   DEFAULT_BACKGROUND_TOLERANCE,
@@ -669,17 +673,11 @@ export function NewProjectForm() {
         throw new Error(prepared.message || "Unable to prepare project upload.");
       }
       pendingProject = { projectId: prepared.projectId, paths: prepared.uploads.map((upload: { path: string }) => upload.path) };
-      const { getSupabaseBrowser } = await import("@/lib/supabase/browser");
-      const supabase = getSupabaseBrowser();
-      await mapWithConcurrency(prepared.uploads, 2, async (upload: { path: string; token: string }, index) => {
-        const file = uploadFiles[index];
-        const { error } = await supabase.storage
-          .from(ORIGINAL_IMAGES_BUCKET)
-          .uploadToSignedUrl(upload.path, upload.token, file, {
-            cacheControl: "3600",
-            contentType: file.type || undefined,
-          });
-        if (error) throw new Error(error.message);
+      // Direct browser-to-R2 PUTs. Nothing transits the Next.js server, so a
+      // 150 MB create request no longer has to fit in a serverless function.
+      const thumbUploads = await mapWithConcurrency(prepared.uploads, 2, async (upload: PresignedUpload, index) => {
+        const result = await uploadWithThumbnail(upload, uploadFiles[index], SOURCE_THUMBNAIL_MAX_EDGE);
+        return result.thumbUploaded;
       });
 
       const finalizeResponse = await fetch("/api/projects", {
@@ -687,10 +685,11 @@ export function NewProjectForm() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           projectId: prepared.projectId,
-          uploads: prepared.uploads.map((upload: { id: string; name: string; path: string }) => ({
+          uploads: prepared.uploads.map((upload: { id: string; name: string; path: string }, index: number) => ({
             id: upload.id,
             name: upload.name,
             path: upload.path,
+            thumbUploaded: thumbUploads[index] === true,
           })),
         }),
       });
@@ -712,18 +711,64 @@ export function NewProjectForm() {
   }
 
   return (
-    <form onSubmit={submit} className={`create-workbench ${cropItems.length ? "has-files" : ""}`}>
-      <div className="create-workbench-main grid min-h-0 border-t border-[var(--line)]">
-        <aside className="create-workbench-details min-h-0 overflow-y-auto border-r border-[var(--line)] bg-[var(--panel)] p-5">
-          <h2 className="text-lg font-semibold text-[var(--foreground)]">Project details</h2>
-          <label className="mt-4 block text-sm font-medium text-[var(--foreground)]" htmlFor="title">Title *</label>
-          <input id="title" value={title} onChange={(event) => setTitle(event.target.value)} className="mock-input mt-2 h-10" required />
-          <label className="mt-4 block text-sm font-medium text-[var(--foreground)]" htmlFor="description">Description</label>
-          <textarea id="description" value={description} maxLength={500} onChange={(event) => setDescription(event.target.value)} className="mock-input mt-2 min-h-20 resize-none" />
-          <p className="mt-1 text-right text-xs text-[var(--muted)]">{description.length} / 500</p>
+    <form
+      onSubmit={submit}
+      className={`create-workbench create-studio ${cropItems.length ? "has-files" : ""}`}
+      data-workflow-state={cropItems.length ? "review" : "intake"}
+    >
+      <header className="create-studio__command">
+        <div className="create-studio__heading">
+          <span className="create-studio__eyebrow">New project</span>
+          <div>
+            <h1>Prepare source artwork</h1>
+            <p>Build the queue, frame every image, then open the graph editor.</p>
+          </div>
+        </div>
+        <div className="create-studio__brief" aria-label="Project brief">
+          <label className="create-studio__field" htmlFor="title">
+            <span>Project name</span>
+            <input
+              id="title"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="Untitled graph"
+              aria-label="Title"
+              required
+            />
+          </label>
+          <label className="create-studio__field create-studio__field--description" htmlFor="description">
+            <span>Brief <small>{description.length}/500</small></span>
+            <textarea
+              id="description"
+              value={description}
+              maxLength={500}
+              rows={1}
+              placeholder="Optional production notes"
+              aria-label="Description"
+              onChange={(event) => setDescription(event.target.value)}
+            />
+          </label>
+        </div>
+        <div className="create-studio__health" aria-label="Project preparation status">
+          <span className={isOnline ? "is-online" : "is-offline"}><i aria-hidden="true" />{isOnline ? "Online" : "Offline"}</span>
+          <strong>{progressCropped}/{progressTotal || 0}</strong>
+          <small>framed</small>
+        </div>
+      </header>
 
-          <h2 className="mt-5 text-lg font-semibold text-[var(--foreground)]">Upload files</h2>
-          <p className="mt-1 text-sm leading-5 text-[var(--muted)]">Images, PDF, or SVG line art. Up to {MAX_PROJECT_UPLOAD_FILES} files.</p>
+      <div className="create-workbench-main create-studio__workspace grid min-h-0 border-t border-[var(--line)]">
+        <aside
+          className="create-workbench-details create-source-queue min-h-0 overflow-y-auto border-r border-[var(--line)] bg-[var(--panel)] p-5"
+          aria-labelledby="project-intake-heading"
+        >
+          <div className="create-source-queue__header">
+            <div>
+              <p className="create-step-label"><span>01</span> Sources</p>
+              <h2 id="project-intake-heading">Artwork queue</h2>
+            </div>
+            <span className="create-source-queue__count">{cropItems.length}</span>
+          </div>
+          <p className="create-source-queue__hint">Drag in line art, then select a thumbnail to frame it.</p>
           <label
             onDragEnter={(event) => {
               event.preventDefault();
@@ -735,8 +780,8 @@ export function NewProjectForm() {
             }}
             onDragLeave={() => setIsDraggingFiles(false)}
             onDrop={handleUploadDrop}
-            className={`mt-4 grid min-h-[112px] cursor-pointer place-items-center rounded-lg border border-dashed bg-[var(--surface)] px-3 py-3 text-center hover:border-[var(--teal)] ${
-              isDraggingFiles ? "border-[var(--teal)] bg-[var(--teal-wash)]" : "border-[var(--line-strong)]"
+            className={`create-upload-dropzone mt-4 grid min-h-[112px] cursor-pointer place-items-center rounded-lg border border-dashed bg-[var(--surface)] px-3 py-3 text-center hover:border-[var(--teal)] ${
+              isDraggingFiles ? "is-dragging border-[var(--teal)] bg-[var(--teal-wash)]" : "border-[var(--line-strong)]"
             }`}
           >
             <span className="grid w-full min-w-0 place-items-center leading-tight">
@@ -744,55 +789,68 @@ export function NewProjectForm() {
               <span className="mt-2 block text-sm font-medium text-[var(--foreground)]">Drag & drop files here</span>
               <span className="text-sm font-medium text-[var(--teal)]">or click to browse</span>
               <span className="mt-2 block text-xs leading-4 text-[var(--muted)]">
-                <span className="block">PNG, JPG, SVG, PDF</span>
+                <span className="block">PNG, JPG, WEBP, SVG, PDF</span>
                 <span className="block">Max {MAX_PROJECT_UPLOAD_FILES} files, 50MB each</span>
               </span>
             </span>
             <input type="file" accept={IMAGE_ACCEPT} multiple className="sr-only" onChange={(event) => { const selectedFiles = Array.from(event.target.files ?? []); event.target.value = ""; selectFiles(selectedFiles); }} />
           </label>
 
-          <div className="mt-5 flex items-center justify-between">
-            <p className="text-sm font-semibold text-[var(--foreground)]">Files ({cropItems.length})</p>
-            <button type="button" className="text-sm font-semibold text-[var(--teal)] disabled:text-[var(--muted)]" onClick={clearCropItems} disabled={!cropItems.length}>Clear all</button>
+          <div className="create-source-queue__toolbar mt-5 flex items-center justify-between">
+            <p className="text-sm font-semibold text-[var(--foreground)]">In this project</p>
+            <button type="button" aria-label="Clear all" className="text-sm font-semibold text-[var(--teal)] disabled:text-[var(--muted)]" onClick={clearCropItems} disabled={!cropItems.length}>Clear queue</button>
           </div>
-          <div className="create-file-filmstrip mt-3 divide-y divide-[var(--line)] overflow-hidden rounded-md border border-[var(--line)]">
+          <div className="create-file-filmstrip create-source-queue__list mt-3 divide-y divide-[var(--line)] overflow-hidden rounded-md border border-[var(--line)]">
             {cropItems.length ? (
-              cropItems.map((item) => {
+              cropItems.map((item, itemIndex) => {
                 const selected = selectedItem?.id === item.id;
                 return (
-                  <div key={item.id} className={`create-file-row grid grid-cols-[44px_minmax(0,1fr)_auto_auto] items-center gap-3 p-2 ${selected ? "bg-[var(--teal-wash)] ring-1 ring-inset ring-[var(--teal)]" : "bg-[var(--surface)]"}`}>
-                    <button type="button" onClick={() => setSelectedItemId(item.id)} className="contents text-left">
-                      {item.previewUrl ? <img src={item.previewUrl} alt="" className="h-10 w-10 rounded border border-[var(--line)] object-contain p-1" /> : <span className="grid h-10 w-10 place-items-center rounded border border-[var(--line)]"><ImageIcon size={17} /></span>}
-                      <span className="min-w-0"><span className="block truncate text-sm font-medium text-[var(--foreground)]">{item.file.name}</span><span className="text-xs text-[var(--muted)]">{item.issue ?? formatDimensions(item)}</span></span>
-                      <span className={`min-w-0 truncate rounded px-2 py-0.5 text-xs font-medium ${item.issue ? "bg-[var(--danger-soft)] text-[var(--red)]" : item.transform.crop ? "bg-[var(--success-soft)] text-[var(--green)]" : "bg-[var(--surface-subtle)] text-[var(--muted)]"}`}>{item.issue ? "Issue" : cropQueueStatus(item.transform.crop)}</span>
+                  <div key={item.id} className={`create-file-row create-source-card ${selected ? "is-selected" : ""} ${item.issue ? "has-issue" : ""}`}>
+                    <button type="button" onClick={() => setSelectedItemId(item.id)} className="create-source-card__select text-left" aria-pressed={selected}>
+                      <span className="create-source-card__preview">
+                        {item.previewUrl ? <img src={item.previewUrl} alt="" /> : <ImageIcon size={19} aria-hidden="true" />}
+                        <i aria-hidden="true">{itemIndex + 1}</i>
+                      </span>
+                      <span className="create-source-card__copy">
+                        <strong>{item.file.name}</strong>
+                        <small>{item.issue ?? formatDimensions(item)}</small>
+                      </span>
+                      <span className={`create-source-card__status ${item.issue ? "is-error" : item.transform.crop ? "is-ready" : ""}`}>{item.issue ? "Issue" : cropQueueStatus(item.transform.crop)}</span>
                     </button>
-                    <button type="button" onClick={() => removeCropItem(item.id)} className="grid h-8 w-8 place-items-center rounded text-[var(--muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--foreground)]" title="Remove file">
+                    <button type="button" onClick={() => removeCropItem(item.id)} className="create-source-card__remove" title="Remove file" aria-label={`Remove ${item.file.name}`}>
                       <Trash2 size={15} aria-hidden="true" />
                     </button>
                   </div>
                 );
               })
             ) : (
-              <div className="grid min-h-[112px] place-items-center bg-[var(--surface)] p-4 text-center text-sm text-[var(--muted)]">
+              <div className="create-source-queue__empty grid min-h-[112px] place-items-center bg-[var(--surface)] p-4 text-center text-sm text-[var(--muted)]">
                 <span><ImageIcon size={22} className="mx-auto mb-2" />Select files to start crop review.</span>
               </div>
             )}
           </div>
-          {fileIssue ? <p className="mt-3 flex gap-2 rounded-md border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--amber)]"><AlertTriangle size={16} />{fileIssue}</p> : null}
-          {message ? <p className="mt-3 rounded-md border border-[var(--red)] bg-[var(--danger-soft)] p-3 text-sm text-[var(--red)]">{message}</p> : null}
+          {fileIssue ? <p role="alert" className="mt-3 flex gap-2 rounded-md border border-[var(--warning)] bg-[var(--warning-soft)] p-3 text-sm text-[var(--amber)]"><AlertTriangle size={16} aria-hidden="true" />{fileIssue}</p> : null}
+          {message ? <p role="status" aria-live="polite" className="mt-3 rounded-md border border-[var(--red)] bg-[var(--danger-soft)] p-3 text-sm text-[var(--red)]">{message}</p> : null}
         </aside>
 
-        <main className="create-workbench-stage grid min-h-0">
-          <div className="flex items-center justify-between border-b border-[var(--line)] bg-[var(--panel)] px-6">
-            <div className="flex items-center gap-2"><h1 className="text-lg font-semibold text-[var(--foreground)]">Crop review</h1><span className="text-sm text-[var(--muted)]">Crop each image for best results</span></div>
+        <main className="create-workbench-stage create-studio__crop-zone grid min-h-0">
+          <div className="create-stage-header flex items-center justify-between border-b border-[var(--line)] bg-[var(--panel)] px-6">
+            <div className="create-stage-heading">
+              <p className="create-step-label"><span>02</span> Production review</p>
+              <div className="mt-1 flex items-baseline gap-2">
+                <h1 className="text-lg font-semibold text-[var(--foreground)]">Crop studio</h1>
+                <span className="text-sm text-[var(--muted)]">Prepare each image for conversion</span>
+              </div>
+            </div>
             <div className="flex items-center gap-4">
               <div className="min-w-0 text-sm"><p className="truncate font-semibold text-[var(--foreground)]">{selectedItem?.file.name || "No file selected"}</p><p className="truncate text-[var(--muted)]">{selectedItem ? `${formatDimensions(selectedItem)} - ${selectedItem.file.type || "File"} - ${bytesToSize(selectedItem.file.size)}` : "Upload a source image to begin"}</p></div>
               <button type="button" onClick={viewSelectedOriginal} disabled={!selectedItem?.previewUrl} className="mock-btn">View original <ExternalLink size={15} /></button>
             </div>
           </div>
 
-          <div className="mock-checker create-crop-review relative grid min-h-0 gap-3 overflow-hidden">
-            <div className="create-crop-tooldock" aria-label="Crop tools">
+          <div className="mock-checker create-crop-review create-studio__crop-grid relative grid min-h-0 gap-3 overflow-hidden">
+            <section className="create-canvas-stage" aria-label="Crop canvas">
+              <div className="create-crop-tooldock" aria-label="Crop tools">
               <button
                 type="button"
                 onClick={() => setCropInteractionMode("crop")}
@@ -865,8 +923,8 @@ export function NewProjectForm() {
               >
                 <Redo2 size={15} aria-hidden="true" />
               </button>
-            </div>
-            <div className="create-crop-frame relative mx-auto h-full min-h-0 w-full max-h-[760px] max-w-[560px] border-2 border-[var(--teal)] bg-[var(--crop-stage-bg)]">
+              </div>
+              <div className="create-crop-frame relative mx-auto h-full min-h-0 w-full max-h-[760px] max-w-[560px] border-2 border-[var(--teal)] bg-[var(--crop-stage-bg)]">
               {selectedItem?.previewPending ? (
                 <div className="grid h-full place-items-center"><Loader2 className="animate-spin text-[var(--teal)]" /></div>
               ) : selectedItem?.previewUrl ? (
@@ -889,14 +947,16 @@ export function NewProjectForm() {
                   className="h-full"
                 />
               ) : (
-                <div className="grid h-full place-items-center p-8 text-center text-sm text-[var(--muted)]">
+                <div className="create-crop-empty grid h-full place-items-center p-8 text-center text-sm text-[var(--muted)]">
                   <span><ImageIcon size={34} className="mx-auto mb-3" />Upload a file to activate crop review.</span>
                 </div>
               )}
-            </div>
-            <aside className="create-transform-panel" aria-label="Crop transform controls">
+              </div>
+            </section>
+            <aside className="create-transform-panel create-adjustments-inspector" aria-label="Crop transform controls">
               <div className="create-transform-heading">
                 <div>
+                  <span className="create-step-label"><span>03</span> Adjust</span>
                   <p>Crop & transform</p>
                   <span>{cropSizeLabel(selectedItem)}</span>
                 </div>

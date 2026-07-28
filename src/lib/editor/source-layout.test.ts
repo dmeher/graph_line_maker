@@ -17,6 +17,7 @@ import {
   sourceRenderOrder,
   sourcesUseVerticalStackSlots,
   stackEndCell,
+  transformLayerOrientation,
 } from "./source-layout.ts";
 import type { GraphSourceImage } from "@/lib/types";
 
@@ -135,6 +136,30 @@ test("rotation normalizes to fifteen-degree steps", () => {
   assert.equal(normalizeRotationDegrees(44), 45);
   assert.equal(normalizeRotationDegrees(-15), 345);
   assert.equal(normalizeRotationDegrees(450), 90);
+});
+
+test("single-layer orientation transforms do not move or resize the layer", () => {
+  const original = source({ x: 2.5, y: 4, width: 7, height: 11, rotationDegrees: 345 });
+  const rotated = transformLayerOrientation(original, { type: "rotate", direction: 1 });
+  const flippedX = transformLayerOrientation(rotated, { type: "flip", axis: "x" });
+  const flippedY = transformLayerOrientation(flippedX, { type: "flip", axis: "y" });
+
+  assert.equal(rotated.rotationDegrees, 0);
+  assert.deepEqual(
+    { x: rotated.x, y: rotated.y, width: rotated.width, height: rotated.height },
+    { x: original.x, y: original.y, width: original.width, height: original.height },
+  );
+  assert.equal(flippedX.flipX, true);
+  assert.equal(flippedX.flipY, false);
+  assert.equal(flippedY.flipX, true);
+  assert.equal(flippedY.flipY, true);
+});
+
+test("single-layer orientation transforms leave locked layers unchanged", () => {
+  const original = source({ locked: true, rotationDegrees: 30, flipX: false, flipY: true });
+
+  assert.equal(transformLayerOrientation(original, { type: "rotate", direction: 1 }), original);
+  assert.equal(transformLayerOrientation(original, { type: "flip", axis: "x" }), original);
 });
 
 test("source processing cache key changes only for relevant source fields", () => {

@@ -5,15 +5,23 @@ import {
   MAX_PROJECT_UPLOAD_TOTAL_BYTES,
   MAX_UPLOAD_BYTES,
   ORIGINAL_IMAGES_BUCKET,
+  getAllowedImageContentType,
   getImageExtension,
   isAllowedImageFile,
 } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
-import { assertProjectOwner, sourceImagePath } from "@/lib/projects";
-import { getSupabaseAdmin } from "@/lib/supabase/server";
+import {
+  MAX_THUMBNAIL_BYTES,
+  THUMBNAIL_CONTENT_TYPE,
+  assertProjectOwner,
+  sourceImagePath,
+  thumbnailPathFor,
+} from "@/lib/projects";
+import { getObjectStore, mediaKey, mediaUrlsForBucket } from "@/lib/storage/media";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
 
 const MAX_SOURCE_UPLOADS = 100;
+const UPLOAD_URL_TTL_SECONDS = 15 * 60;
 
 type UploadMetadata = { name: string; type: string; size: number; id: string };
 
@@ -61,12 +69,26 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       if (file.size > MAX_UPLOAD_BYTES) return NextResponse.json({ message: "File is too large." }, { status: 400 });
     }
 
-    const supabase = getSupabaseAdmin();
+    const store = getObjectStore();
     const uploads = await mapWithConcurrency(files, 4, async (file) => {
       const path = sourceImagePath(session.userId, projectId, file.id, getExtension(file));
-      const { data, error } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).createSignedUploadUrl(path, { upsert: true });
-      if (error || !data?.token) throw new Error(error?.message || "Unable to prepare source upload.");
-      return { ...file, path, token: data.token };
+      const thumbPath = thumbnailPathFor(path);
+      // The browser must send exactly this content type and byte length: both
+      // are folded into the SigV4 signature, which is the only way to bound a
+      // presigned PUT. R2 has no POST-policy equivalent.
+      const contentType = getAllowedImageContentType(file) || "application/octet-stream";
+      const [url, thumbUrl] = await Promise.all([
+        store.presignPut(mediaKey(ORIGINAL_IMAGES_BUCKET, path), {
+          contentType,
+          contentLength: file.size,
+          ttlSeconds: UPLOAD_URL_TTL_SECONDS,
+        }),
+        store.presignPut(mediaKey(ORIGINAL_IMAGES_BUCKET, thumbPath), {
+          contentType: THUMBNAIL_CONTENT_TYPE,
+          ttlSeconds: UPLOAD_URL_TTL_SECONDS,
+        }),
+      ]);
+      return { ...file, path, url, contentType, thumbPath, thumbUrl, thumbContentType: THUMBNAIL_CONTENT_TYPE };
     });
     return NextResponse.json({ uploads });
   } catch (error) {
@@ -81,25 +103,59 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
     await assertProjectOwner(projectId);
     const body = await request.json().catch(() => ({}));
     const prefix = `${session.userId}/${projectId}/sources/`;
-    const images: Array<{ id: string; name: string; path: string }> = (Array.isArray(body.uploads) ? body.uploads : []).flatMap((item: unknown) => {
+    const images: Array<{ id: string; name: string; path: string; thumbPath: string | null }> = (Array.isArray(body.uploads) ? body.uploads : []).flatMap((item: unknown) => {
       if (!item || typeof item !== "object") return [];
       const upload = item as Record<string, unknown>;
       const id = String(upload.id || "");
       const name = String(upload.name || "");
       const path = String(upload.path || "");
       if (!/^[a-zA-Z0-9-]{1,80}$/.test(id) || !name || !path.startsWith(prefix)) return [];
-      return [{ id, name, path }];
+      // Only ever trust the derived thumbnail location, never a client-supplied one.
+      const thumbPath = upload.thumbUploaded === true ? thumbnailPathFor(path) : null;
+      return [{ id, name, path, thumbPath }];
     });
     if (!images.length || images.length > MAX_SOURCE_UPLOADS) return NextResponse.json({ message: "Invalid source upload metadata." }, { status: 400 });
-    const supabase = getSupabaseAdmin();
-    await mapWithConcurrency(images, 4, async (image) => {
-      const { data: exists, error } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).exists(image.path);
-      if (error || !exists) throw new Error(`Upload did not complete for ${image.name}.`);
+
+    const store = getObjectStore();
+    // A presigned PUT is not self-limiting, so the finalize step is where the
+    // size and type contract is actually enforced. Anything that slipped
+    // through is deleted rather than left orphaned in the bucket.
+    const verified = await mapWithConcurrency(images, 4, async (image) => {
+      const key = mediaKey(ORIGINAL_IMAGES_BUCKET, image.path);
+      const head = await store.headObject(key);
+      if (!head) throw new Error(`Upload did not complete for ${image.name}.`);
+      if (head.contentLength > MAX_UPLOAD_BYTES) {
+        await store.deleteObjects([key]);
+        throw new Error(`${image.name} is larger than the allowed upload size.`);
+      }
+
+      let thumbPath: string | null = null;
+      if (image.thumbPath) {
+        const thumbKey = mediaKey(ORIGINAL_IMAGES_BUCKET, image.thumbPath);
+        const thumbHead = await store.headObject(thumbKey);
+        if (thumbHead && thumbHead.contentLength <= MAX_THUMBNAIL_BYTES) {
+          thumbPath = image.thumbPath;
+        } else if (thumbHead) {
+          await store.deleteObjects([thumbKey]);
+        }
+      }
+      return { ...image, thumbPath };
     });
-    const { data: signed, error: signError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).createSignedUrls(images.map((image) => image.path), 60 * 60);
-    if (signError) throw new Error(signError.message);
-    const signedByPath = new Map((signed ?? []).flatMap((item) => item.path ? [[item.path, item.signedUrl ?? null] as const] : []));
-    return NextResponse.json({ images: images.map((image) => ({ ...image, url: signedByPath.get(image.path) ?? null })) });
+
+    const signed = mediaUrlsForBucket(ORIGINAL_IMAGES_BUCKET, [
+      ...verified.map((image) => image.path),
+      ...verified.map((image) => image.thumbPath),
+    ]);
+    return NextResponse.json({
+      images: verified.map((image) => ({
+        id: image.id,
+        name: image.name,
+        path: image.path,
+        url: signed.get(image.path) ?? null,
+        thumbPath: image.thumbPath,
+        thumbUrl: image.thumbPath ? signed.get(image.thumbPath) ?? null : null,
+      })),
+    });
   } catch (error) {
     return NextResponse.json({ message: error instanceof Error ? error.message : "Unable to finalize source uploads." }, { status: 500 });
   }
@@ -113,7 +169,15 @@ export async function DELETE(request: NextRequest, context: { params: Promise<{ 
     const body = await request.json().catch(() => ({}));
     const prefix = `${session.userId}/${projectId}/sources/`;
     const paths: string[] = (Array.isArray(body.paths) ? body.paths : []).map(String).filter((path: string) => path.startsWith(prefix));
-    if (paths.length) await getSupabaseAdmin().storage.from(ORIGINAL_IMAGES_BUCKET).remove(paths);
+    if (paths.length) {
+      // Remove each asset's derivative alongside it so cleanup cannot orphan thumbnails.
+      await getObjectStore().deleteObjects(
+        paths.flatMap((path) => [
+          mediaKey(ORIGINAL_IMAGES_BUCKET, path),
+          mediaKey(ORIGINAL_IMAGES_BUCKET, thumbnailPathFor(path)),
+        ]),
+      );
+    }
     return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json({ message: error instanceof Error ? error.message : "Unable to clean up source uploads." }, { status: 500 });

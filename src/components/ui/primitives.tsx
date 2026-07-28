@@ -5,7 +5,7 @@ import type {
   ReactNode,
   SelectHTMLAttributes,
 } from "react";
-import { Loader2 } from "lucide-react";
+import { ChevronDown, Loader2 } from "lucide-react";
 
 function classes(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
@@ -32,8 +32,10 @@ export function Button({
       aria-busy={pending || undefined}
       className={classes("ui-button", `ui-button--${tone}`, className)}
     >
-      {pending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : null}
-      {children}
+      <span className="ui-button__content">
+        {pending ? <Loader2 size={16} className="ui-button__spinner animate-spin" aria-hidden="true" /> : null}
+        {children}
+      </span>
     </button>
   );
 }
@@ -72,12 +74,23 @@ export function Field({
   label: string;
   hint?: string;
   error?: string;
+  leading?: ReactNode;
+  trailing?: ReactNode;
 }) {
   const description = error ?? hint;
+  const { leading, trailing, ...inputProps } = props;
   return (
     <label className={classes("ui-field", className)}>
       <span className="ui-field__label">{label}</span>
-      <input {...props} className="ui-field__control" aria-invalid={Boolean(error)} />
+      <span className="ui-field__frame">
+        {leading ? <span className="ui-field__leading" aria-hidden="true">{leading}</span> : null}
+        <input
+          {...inputProps}
+          className={classes("ui-field__control", leading ? "has-leading" : null, trailing ? "has-trailing" : null)}
+          aria-invalid={Boolean(error)}
+        />
+        {trailing ? <span className="ui-field__trailing">{trailing}</span> : null}
+      </span>
       {description ? <span className={classes("ui-field__hint", error && "ui-field__hint--error")}>{description}</span> : null}
     </label>
   );
@@ -100,9 +113,12 @@ export function SelectField({
   return (
     <label className={classes("ui-field", className)}>
       <span className="ui-field__label">{label}</span>
-      <select {...props} className="ui-field__control" aria-invalid={Boolean(error)}>
-        {children}
-      </select>
+      <span className="ui-field__frame ui-field__frame--select">
+        <select {...props} className="ui-field__control" aria-invalid={Boolean(error)}>
+          {children}
+        </select>
+        <ChevronDown className="ui-field__select-icon" size={15} aria-hidden="true" />
+      </span>
       {description ? <span className={classes("ui-field__hint", error && "ui-field__hint--error")}>{description}</span> : null}
     </label>
   );
@@ -118,7 +134,8 @@ export function StatusPill({
 }) {
   return (
     <span {...props} className={classes("ui-status-pill", `ui-status-pill--${tone}`, className)}>
-      {children}
+      <i className="ui-status-pill__dot" aria-hidden="true" />
+      <span>{children}</span>
     </span>
   );
 }
@@ -142,10 +159,12 @@ export function EmptyState({
 }) {
   return (
     <section className={classes("ui-empty-state", className)}>
-      {icon ? <span className="ui-empty-state__icon">{icon}</span> : null}
-      <h2>{title}</h2>
-      <p>{description}</p>
-      {action ? <div>{action}</div> : null}
+      {icon ? <span className="ui-empty-state__icon" aria-hidden="true">{icon}</span> : null}
+      <div className="ui-empty-state__copy">
+        <h2>{title}</h2>
+        <p>{description}</p>
+      </div>
+      {action ? <div className="ui-empty-state__action">{action}</div> : null}
     </section>
   );
 }

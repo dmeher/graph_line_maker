@@ -2,10 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireSession } from "@/lib/auth/session";
 import {
   DEFAULT_VECTORIZER_INK_THRESHOLD,
+  DEFAULT_VECTORIZER_SKETCH_REMOVAL,
   GRAPH_VECTORIZER_FIDELITY_KEYS,
   VECTORIZER_LINE_ADJUST_STEP,
   clampVectorizerInkThreshold,
   clampVectorizerLineAdjust,
+  clampVectorizerSketchRemoval,
   type GraphVectorizerFidelity,
 } from "@/lib/graph-paper";
 
@@ -107,6 +109,37 @@ function dilateMask(mask: Uint8Array, width: number, height: number, includeDiag
   return next;
 }
 
+/**
+ * Removes interior sketch/hatch strokes with a morphological opening.
+ *
+ * Hand-drawn art commonly shades the inside of a shape with thin scattered
+ * lines. Eroding by N steps deletes every stroke narrower than about 2N pixels;
+ * dilating by the same N restores the surviving thick outlines to their
+ * original weight. Strokes are removed regardless of whether they touch the
+ * outline, which connected-component filtering could not do — hatching usually
+ * runs edge to edge and is therefore part of the same component.
+ *
+ * The result is that the shape's interior becomes an empty enclosed region,
+ * which the processor then labels as a fill region the user can colour.
+ */
+function removeSketchStrokes(mask: Uint8Array, width: number, height: number, strength: number) {
+  if (strength <= 0) return mask;
+
+  let opened = mask;
+  for (let step = 0; step < strength; step += 1) {
+    opened = erodeMask(opened, width, height);
+  }
+  for (let step = 0; step < strength; step += 1) {
+    opened = dilateMask(opened, width, height);
+  }
+
+  // Erosion is destructive: on artwork whose outlines are themselves thinner
+  // than the chosen strength this deletes everything. Falling back to the
+  // original mask keeps a too-aggressive setting recoverable in the UI instead
+  // of rendering a blank layer.
+  return opened.some((value) => value) ? opened : mask;
+}
+
 function adjustMaskThickness(mask: Uint8Array, width: number, height: number, lineAdjust: number) {
   let adjusted = mask;
   const amount = Math.abs(lineAdjust);
@@ -137,10 +170,19 @@ function rawPixelsFromMask(mask: Uint8Array) {
   return pixels;
 }
 
-async function prepareRawVectorInput(vectorizer: VectorizerModule, image: File, lineAdjust: number, inkThreshold: number) {
+async function prepareRawVectorInput(
+  vectorizer: VectorizerModule,
+  image: File,
+  lineAdjust: number,
+  inkThreshold: number,
+  sketchRemoval: number,
+) {
   const decoded = await vectorizer.readImage(Buffer.from(await image.arrayBuffer()));
   const mask = imageMaskFromPixels(decoded.pixels, inkThreshold);
-  const adjustedMask = lineAdjust ? adjustMaskThickness(mask, decoded.width, decoded.height, lineAdjust) : mask;
+  // Strip sketch strokes before any thickness adjustment, so line adjust
+  // operates on the cleaned outlines rather than re-thickening the hatching.
+  const cleanedMask = removeSketchStrokes(mask, decoded.width, decoded.height, sketchRemoval);
+  const adjustedMask = lineAdjust ? adjustMaskThickness(cleanedMask, decoded.width, decoded.height, lineAdjust) : cleanedMask;
   return {
     pixels: rawPixelsFromMask(adjustedMask),
     width: decoded.width,
@@ -148,9 +190,15 @@ async function prepareRawVectorInput(vectorizer: VectorizerModule, image: File, 
   };
 }
 
-async function createSvg(image: File, lineAdjust: number, inkThreshold: number, fidelity: GraphVectorizerFidelity) {
+async function createSvg(
+  image: File,
+  lineAdjust: number,
+  inkThreshold: number,
+  fidelity: GraphVectorizerFidelity,
+  sketchRemoval: number,
+) {
   const vectorizer = await import("@neplex/vectorizer");
-  const rawInput = await prepareRawVectorInput(vectorizer, image, lineAdjust, inkThreshold);
+  const rawInput = await prepareRawVectorInput(vectorizer, image, lineAdjust, inkThreshold, sketchRemoval);
   const svg = await vectorizer.vectorizeRaw(
     rawInput.pixels,
     { width: rawInput.width, height: rawInput.height },
@@ -191,7 +239,8 @@ export async function POST(request: NextRequest) {
     const lineAdjust = clampVectorizerLineAdjust(formData.get("lineAdjust"));
     const inkThreshold = clampVectorizerInkThreshold(formData.get("inkThreshold") ?? DEFAULT_VECTORIZER_INK_THRESHOLD);
     const fidelity = normalizeFidelity(formData.get("fidelity"));
-    const svg = await createSvg(image, lineAdjust, inkThreshold, fidelity);
+    const sketchRemoval = clampVectorizerSketchRemoval(formData.get("sketchRemoval") ?? DEFAULT_VECTORIZER_SKETCH_REMOVAL);
+    const svg = await createSvg(image, lineAdjust, inkThreshold, fidelity, sketchRemoval);
 
     return new NextResponse(svg, {
       headers: {

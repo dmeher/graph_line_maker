@@ -9,7 +9,8 @@ import {
   isAllowedImageFile,
 } from "@/lib/constants";
 import { requireSession } from "@/lib/auth/session";
-import { assertProjectOwner, imagePath } from "@/lib/projects";
+import { assertProjectOwner, imagePath, thumbnailPathFor } from "@/lib/projects";
+import { getObjectStore, mediaKey } from "@/lib/storage/media";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 
 function getExtension(file: File) {
@@ -37,14 +38,14 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     if (file.size > MAX_UPLOAD_BYTES) return NextResponse.json({ message: "File is too large." }, { status: 400 });
 
     const supabase = getSupabaseAdmin();
+    const store = getObjectStore();
     const path = imagePath(session.userId, id, "original", getExtension(file));
-    const { error: uploadError } = await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).upload(path, file, {
-      cacheControl: "3600",
-      contentType: getAllowedImageContentType(file) || file.type,
-      upsert: true,
+    await store.putObject({
+      key: mediaKey(ORIGINAL_IMAGES_BUCKET, path),
+      body: Buffer.from(await file.arrayBuffer()),
+      contentType: getAllowedImageContentType(file) || file.type || "application/octet-stream",
+      cacheControl: "public, max-age=3600",
     });
-
-    if (uploadError) throw new Error(uploadError.message);
 
     const { error } = await supabase
       .from("projects")
@@ -54,7 +55,10 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
 
     if (error) throw new Error(error.message);
     if (owner.original_image_path && owner.original_image_path !== path) {
-      await supabase.storage.from(ORIGINAL_IMAGES_BUCKET).remove([owner.original_image_path]);
+      await store.deleteObjects([
+        mediaKey(ORIGINAL_IMAGES_BUCKET, owner.original_image_path),
+        mediaKey(ORIGINAL_IMAGES_BUCKET, thumbnailPathFor(owner.original_image_path)),
+      ]);
     }
     return NextResponse.json({ ok: true });
   } catch (error) {

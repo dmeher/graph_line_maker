@@ -72,6 +72,20 @@ export const DEFAULT_VECTORIZER_LINE_ADJUST = 0;
 export const MIN_VECTORIZER_INK_THRESHOLD = 1;
 export const MAX_VECTORIZER_INK_THRESHOLD = 254;
 export const DEFAULT_VECTORIZER_INK_THRESHOLD = 210;
+
+/**
+ * Strength of interior sketch/hatch removal, in erosion steps.
+ *
+ * Hand-drawn source art often shades the inside of a shape with thin scattered
+ * strokes. A morphological opening of radius N deletes any stroke narrower than
+ * roughly 2N pixels while leaving thicker outlines intact, so the shape's
+ * interior becomes an empty enclosed region the user can colour.
+ *
+ * Zero is off, which keeps existing projects rendering exactly as before.
+ */
+export const MIN_VECTORIZER_SKETCH_REMOVAL = 0;
+export const MAX_VECTORIZER_SKETCH_REMOVAL = 6;
+export const DEFAULT_VECTORIZER_SKETCH_REMOVAL = 0;
 export const GRAPH_VECTORIZER_FIDELITY_KEYS = ["exact", "smooth"] as const;
 export type GraphVectorizerFidelity = (typeof GRAPH_VECTORIZER_FIDELITY_KEYS)[number];
 export const DEFAULT_VECTORIZER_FIDELITY: GraphVectorizerFidelity = "exact";
@@ -155,6 +169,12 @@ export function clampVectorizerInkThreshold(value: unknown) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return DEFAULT_VECTORIZER_INK_THRESHOLD;
   return Math.max(MIN_VECTORIZER_INK_THRESHOLD, Math.min(MAX_VECTORIZER_INK_THRESHOLD, Math.round(numeric)));
+}
+
+export function clampVectorizerSketchRemoval(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_VECTORIZER_SKETCH_REMOVAL;
+  return Math.max(MIN_VECTORIZER_SKETCH_REMOVAL, Math.min(MAX_VECTORIZER_SKETCH_REMOVAL, Math.round(numeric)));
 }
 
 export function isGraphVectorizerFidelity(value: unknown): value is GraphVectorizerFidelity {

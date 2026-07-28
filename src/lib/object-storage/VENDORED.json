@@ -1,0 +1,12 @@
+{
+  "canonical": "packages/object-storage/src",
+  "files": {
+    "canonical.ts": "bef4f8dc6ab3e91dce747ac9e24089cb9a024992939132f3a255736bc56fbcc4",
+    "config.ts": "13fa07109eadf5378ff4178249c10587f4273a94334a9dfdfd0a249ab7f2d9e0",
+    "env.ts": "7a1ef2bcacacd70451e664dd5bfa0a5eba03d1812e5e67335bd0ce833ad6118c",
+    "index.ts": "41f4a2176fb0e0b3b5db91cbcc6086a52a4c1eed19297dc60cc8ad66edae6710",
+    "presign.ts": "e4abab31494ef26c82600c8bfcbe354ecee247ff38e540c81cca89a414298200",
+    "sign.ts": "09741d815f1c2c2ba38efd42af850479cc9ffef4dc1e273b721307d02a0073a3",
+    "store.ts": "bdf11fcee76dfcd8bc7f790c6428ca5e7011f1c9e7e0edc8f89ebe49d0beed58"
+  }
+}

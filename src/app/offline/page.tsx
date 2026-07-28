@@ -1,22 +1,27 @@
 import Link from "next/link";
-import { WifiOff } from "lucide-react";
+import { ArrowRight, CloudOff, HardDrive, WifiOff } from "lucide-react";
 
 export default function OfflinePage() {
   return (
-    <main className="grid min-h-dvh place-items-center bg-[var(--background)] p-6">
-      <section className="w-full max-w-md rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-8 text-center shadow-[var(--shadow-soft)]">
-        <div className="mx-auto grid h-13 w-13 place-items-center rounded-xl border border-[rgb(251_191_36_/_0.3)] bg-[rgb(251_191_36_/_0.12)] p-3 text-[var(--amber)]">
+    <main className="offline-page">
+      <section className="offline-card" aria-labelledby="offline-title">
+        <div className="offline-card__icon">
           <WifiOff size={22} aria-hidden="true" />
         </div>
-        <h1 className="mt-5 text-2xl font-semibold text-[var(--foreground)]">You are offline</h1>
-        <p className="mt-2 text-sm leading-6 text-[var(--muted)]">
+        <p className="page-eyebrow"><CloudOff size={13} aria-hidden="true" /> Connection unavailable</p>
+        <h1 id="offline-title">Your local studio is still open.</h1>
+        <p>
           Opened projects can keep working from this browser session. New online data needs a connection.
         </p>
-        <Link
-          href="/dashboard"
-          className="mt-6 inline-flex h-11 items-center justify-center rounded-xl bg-[var(--teal)] px-5 text-sm font-semibold text-[#052722]"
-        >
-          Try dashboard
+        <div className="offline-card__capability">
+          <HardDrive size={17} aria-hidden="true" />
+          <span>
+            <strong>Available offline</strong>
+            <small>Previously opened editable projects and local session drafts.</small>
+          </span>
+        </div>
+        <Link href="/dashboard" className="ui-btn ui-btn-primary offline-card__action">
+          Try your workspace <ArrowRight size={15} aria-hidden="true" />
         </Link>
       </section>
     </main>

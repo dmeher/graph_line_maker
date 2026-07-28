@@ -53,9 +53,28 @@ export type GraphRotationDegrees = number;
  * and `radius` is a fraction of the canvas width. This keeps strokes aligned
  * when working canvases are downscaled to the shared pixel budget.
  */
+/**
+ * `circle`/`square` are brush footprints stamped along a freehand path.
+ * `polygon` is different in kind: its points are the **vertices of a closed
+ * region**, not a path, and the whole region is affected at once.
+ */
+export type GraphEraseBrushShape = "circle" | "square" | "polygon";
+
+/**
+ * Paint applied to a closed polygon region. Absent means erase (the region
+ * becomes transparent), which is the default and the only behaviour brush
+ * strokes have. White and black paint over the artwork instead, matching the
+ * canvas colour policy in `graph-paper.ts`.
+ */
+export type GraphEraseRegionFill = "#ffffff" | "#000000";
+
 export type GraphEraseStroke = {
   points: { x: number; y: number }[];
   radius: number;
+  /** Brush footprint. Optional; strokes saved before square existed are circles. */
+  shape?: GraphEraseBrushShape;
+  /** Polygon regions only. Absent = erase to transparent. */
+  fill?: GraphEraseRegionFill;
 };
 
 /** Non-destructive background-removal configuration for an image layer. */
@@ -76,6 +95,13 @@ export type GraphSourceImage = {
   name: string;
   path: string | null;
   url?: string | null;
+  /**
+   * Bounded WebP derivative used by list and grid views. Persisted; null on
+   * assets uploaded before derivatives existed, which fall back to `url`.
+   */
+  thumbPath?: string | null;
+  /** Signed gateway URL for `thumbPath`; derived per request, never persisted. */
+  thumbUrl?: string | null;
   width: number;
   height: number;
   measurementUnit: MeasurementUnit;
@@ -89,6 +115,8 @@ export type GraphSourceImage = {
   imageColorQuantization: GraphImageColorQuantization;
   vectorizerLineAdjust: number;
   vectorizerInkThreshold: number;
+  /** Erosion steps used to strip interior sketch/hatch strokes. 0 = off. Optional for projects saved before the setting existed. */
+  vectorizerSketchRemoval?: number;
   vectorizerFidelity: GraphVectorizerFidelity;
   x: number;
   y: number;
@@ -142,6 +170,8 @@ export type GraphShapeDrawing = {
   strokeColor: string;
   fillColor: string;
   strokeWidth: number;
+  /** Defaults to solid for shapes saved before configurable stroke styles. */
+  strokeStyle?: GraphGridLineStyle;
   sides: GraphCellLineSide[];
   locked: boolean;
   visible: boolean;
@@ -156,6 +186,13 @@ export type GraphClipartAsset = {
   name: string;
   path: string | null;
   url?: string | null;
+  /**
+   * Bounded WebP derivative used by the library grid, which renders assets into
+   * 40x40 boxes. Persisted; null on assets uploaded before derivatives existed.
+   */
+  thumbPath?: string | null;
+  /** Signed gateway URL for `thumbPath`; derived per request, never persisted. */
+  thumbUrl?: string | null;
   dataUrl?: string | null;
   mimeType: string;
   width: number;
@@ -183,6 +220,8 @@ export type GraphClipartImage = {
   imageColorQuantization: GraphImageColorQuantization;
   vectorizerLineAdjust: number;
   vectorizerInkThreshold: number;
+  /** Erosion steps used to strip interior sketch/hatch strokes. 0 = off. Optional for projects saved before the setting existed. */
+  vectorizerSketchRemoval?: number;
   vectorizerFidelity: GraphVectorizerFidelity;
   locked: boolean;
   visible: boolean;
@@ -227,6 +266,8 @@ export type GraphSettings = {
   vectorizerStrokeColor: string;
   vectorizerLineAdjust: number;
   vectorizerInkThreshold: number;
+  /** Erosion steps used to strip interior sketch/hatch strokes. 0 = off. Optional for projects saved before the setting existed. */
+  vectorizerSketchRemoval?: number;
   vectorizerFidelity: GraphVectorizerFidelity;
   gridLineColor: string;
   gridLineLayer: GraphLineLayer;
@@ -276,6 +317,14 @@ export type Project = {
   palettes: PaletteColor[];
   originalImageUrl?: string | null;
   processedImageUrl?: string | null;
+  /**
+   * Bounded WebP derivative of the processed image, rendered by dashboard cards.
+   * Null for projects saved before derivatives existed; those fall back to the
+   * full-size processed image.
+   */
+  processedThumbPath?: string | null;
+  /** Signed gateway URL for `processedThumbPath`; derived per request. */
+  processedThumbUrl?: string | null;
 };
 
 export type ProjectSummary = Omit<Project, "settings" | "palettes"> & {

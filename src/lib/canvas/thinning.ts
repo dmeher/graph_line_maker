@@ -532,7 +532,7 @@ function paintComponent(
   }
 }
 
-function enclosedRegionMask(barrierMask: Uint8Array, width: number, height: number) {
+export function createEnclosedRegionMask(barrierMask: Uint8Array, width: number, height: number) {
   const outside = new Uint8Array(barrierMask.length);
   const enclosed = new Uint8Array(barrierMask.length);
   const queue = new Int32Array(barrierMask.length);
@@ -577,7 +577,7 @@ function enclosedRegionMask(barrierMask: Uint8Array, width: number, height: numb
 export function createThinArtworkMasks(inkMask: Uint8Array, width: number, height: number, options: ThinArtworkOptions = {}): ThinArtworkMasks {
   if (options.preserveSourceInk) {
     const sourceMask = copyMask(inkMask);
-    const enclosedFillMask = enclosedRegionMask(sourceMask, width, height);
+    const enclosedFillMask = createEnclosedRegionMask(sourceMask, width, height);
     return {
       enclosedFillMask,
       fillMask: copyMask(enclosedFillMask),
@@ -657,7 +657,7 @@ export function createThinArtworkMasks(inkMask: Uint8Array, width: number, heigh
 
   const thinnedStrokeMask = thinMask(strokeMask, width, height);
   const fillMask = new Uint8Array(sourceMask.length);
-  const enclosedFillMask = enclosedRegionMask(sourceMask, width, height);
+  const enclosedFillMask = createEnclosedRegionMask(sourceMask, width, height);
   for (let index = 0; index < fillMask.length; index += 1) {
     fillMask[index] = sourceFillMask[index] || enclosedFillMask[index] ? 1 : 0;
   }

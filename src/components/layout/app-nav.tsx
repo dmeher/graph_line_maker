@@ -2,16 +2,16 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutGrid, Loader2, LogOut, PlusCircle, Settings } from "lucide-react";
+import { LibraryBig, LoaderCircle, LogOut, PenTool, SlidersHorizontal } from "lucide-react";
 import { useState, type MouseEvent } from "react";
 import { OFFLINE_SESSION_STORAGE_KEY, USER_DATA_CLEAR_MESSAGE } from "@/lib/auth/offline-session";
 import { clearEditorSessionDrafts } from "@/lib/editor/session-draft";
 
 const navItems = [
-  { href: "/dashboard", label: "Projects", icon: LayoutGrid },
-  { href: "/projects/new", label: "Create", icon: PlusCircle },
-  { href: "/settings", label: "Settings", icon: Settings },
-];
+  { href: "/dashboard", label: "Projects", description: "Browse your studio", icon: LibraryBig },
+  { href: "/projects/new", label: "Create", description: "Convert new artwork", icon: PenTool },
+  { href: "/settings", label: "Settings", description: "Account and access", icon: SlidersHorizontal },
+] as const;
 
 function isActivePath(pathname: string, href: string) {
   if (pathname === href) return true;
@@ -68,19 +68,31 @@ export function SignOutButton({ variant }: { variant: "rail" | "dock" }) {
         type="button"
         onClick={logout}
         disabled={loggingOut}
-        className="shell-signout"
+        className="workspace-sidebar__action workspace-signout atelier-sidebar__signout"
         title={loggingOut ? "Signing out…" : "Sign out"}
         aria-label={loggingOut ? "Signing out" : "Sign out"}
       >
-        {loggingOut ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <LogOut size={17} strokeWidth={1.9} aria-hidden="true" />}
+        <span className="workspace-sidebar__action-icon" aria-hidden="true">
+          {loggingOut ? <LoaderCircle size={17} className="animate-spin" /> : <LogOut size={17} strokeWidth={1.8} />}
+        </span>
+        <span className="workspace-sidebar__action-copy">
+          <strong>{loggingOut ? "Signing out…" : "Sign out"}</strong>
+          <small>{loggingOut ? "Closing your session" : "End this workspace session"}</small>
+        </span>
       </button>
     );
   }
 
   return (
-    <button type="button" onClick={logout} disabled={loggingOut} aria-label={loggingOut ? "Signing out" : "Sign out"}>
-      {loggingOut ? <Loader2 size={18} className="animate-spin" aria-hidden="true" /> : <LogOut size={18} strokeWidth={1.9} aria-hidden="true" />}
-      Sign out
+    <button
+      type="button"
+      onClick={logout}
+      disabled={loggingOut}
+      className="atelier-dock__signout"
+      aria-label={loggingOut ? "Signing out" : "Sign out"}
+    >
+      {loggingOut ? <LoaderCircle size={19} className="animate-spin" aria-hidden="true" /> : <LogOut size={19} strokeWidth={1.8} aria-hidden="true" />}
+      <span>Sign out</span>
     </button>
   );
 }
@@ -90,7 +102,7 @@ export function AppNav({ variant }: { variant: "rail" | "dock" }) {
 
   if (variant === "rail") {
     return (
-      <nav className="shell-rail__nav" aria-label="Primary">
+      <nav className="workspace-nav atelier-sidebar-nav" aria-label="Primary">
         {navItems.map((item) => {
           const active = isActivePath(pathname, item.href);
           const Icon = item.icon;
@@ -99,11 +111,19 @@ export function AppNav({ variant }: { variant: "rail" | "dock" }) {
               key={item.href}
               href={item.href}
               prefetch={item.href === "/projects/new" ? false : null}
-              className={"shell-rail__item " + (active ? "is-active" : "")}
+              className={"workspace-nav__item atelier-nav__item " + (active ? "is-active" : "")}
               aria-current={active ? "page" : undefined}
+              aria-label={item.label}
+              title={item.label}
             >
-              <Icon size={20} strokeWidth={1.9} aria-hidden="true" />
-              <span>{item.label}</span>
+              <span className="workspace-nav__icon atelier-nav__icon" aria-hidden="true">
+                <Icon size={19} strokeWidth={1.8} />
+              </span>
+              <span className="workspace-nav__copy atelier-nav__copy">
+                <strong>{item.label}</strong>
+                <small>{item.description}</small>
+              </span>
+              <span className="atelier-nav__indicator" aria-hidden="true" />
             </Link>
           );
         })}
@@ -112,7 +132,7 @@ export function AppNav({ variant }: { variant: "rail" | "dock" }) {
   }
 
   return (
-    <nav className="shell-dock" aria-label="Primary">
+    <nav className="shell-dock atelier-dock" aria-label="Primary">
       {navItems.map((item) => {
         const active = isActivePath(pathname, item.href);
         const Icon = item.icon;
@@ -121,11 +141,13 @@ export function AppNav({ variant }: { variant: "rail" | "dock" }) {
             key={item.href}
             href={item.href}
             prefetch={item.href === "/projects/new" ? false : null}
-            className={active ? "is-active" : ""}
+            className={"atelier-dock__item " + (active ? "is-active" : "")}
             aria-current={active ? "page" : undefined}
           >
-            <Icon size={19} strokeWidth={1.9} aria-hidden="true" />
-            {item.label}
+            <span className="atelier-dock__icon" aria-hidden="true">
+              <Icon size={19} strokeWidth={1.8} />
+            </span>
+            <span>{item.label}</span>
           </Link>
         );
       })}

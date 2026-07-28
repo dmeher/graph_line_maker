@@ -1,9 +1,35 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, Grid3X3, ImageUp, Loader2, LockKeyhole, Mail, Palette, RefreshCw, Send, ShieldCheck } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  CheckCircle2,
+  Crop,
+  Eye,
+  Grid3X3,
+  Layers3,
+  Loader2,
+  LockKeyhole,
+  Mail,
+  MousePointer2,
+  Palette,
+  RefreshCw,
+  Send,
+  ShieldCheck,
+  WandSparkles,
+} from "lucide-react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { BrandMark } from "@/components/layout/brand-mark";
 import { OFFLINE_SESSION_CLEAR_MESSAGE, OFFLINE_SESSION_STORAGE_KEY } from "@/lib/auth/offline-session";
 import { clearEditorSessionDrafts } from "@/lib/editor/session-draft";
@@ -185,145 +211,262 @@ export function LoginForm() {
   }
 
   return (
-    <main className="auth-shell">
-      <aside className="auth-hero" aria-hidden="true">
-        <div className="auth-hero__copy">
+    <main className="atelier-auth">
+      <aside className="atelier-auth__showcase" aria-hidden="true">
+        <header className="atelier-auth__showcase-head">
           <BrandMark />
-          <h2>
-            Turn line art into <em>print-ready</em> graph charts.
-          </h2>
-          <p>Upload artwork, refine it on a precision pixel grid, and export tiled PDFs sized for real paper.</p>
+          <span><ShieldCheck size={13} /> Private workspace</span>
+        </header>
+
+        <div className="atelier-auth__story">
+          <p className="atelier-auth__kicker">Graph Pixel Maker / Studio access</p>
+          <h2>Make the grid feel like a creative surface.</h2>
+          <p>Every layer, cell, color, and measurement remains close to the canvas—and under your control.</p>
+
+          <div className="atelier-auth-preview">
+            <div className="atelier-auth-preview__bar">
+              <div><i /><i /><i /></div>
+              <strong>Border study</strong>
+              <span><Check size={11} /> Saved</span>
+            </div>
+            <div className="atelier-auth-preview__body">
+              <div className="atelier-auth-preview__tools">
+                <span className="is-active"><MousePointer2 size={14} /></span>
+                <span><Crop size={14} /></span>
+                <span><WandSparkles size={14} /></span>
+                <span><Palette size={14} /></span>
+              </div>
+              <div className="atelier-auth-preview__stage">
+                <div className="atelier-auth-preview__paper">
+                  <svg viewBox="0 0 320 184" focusable="false">
+                    <defs>
+                      <pattern id="atelier-auth-grid" width="16" height="16" patternUnits="userSpaceOnUse">
+                        <path d="M16 0H0V16" fill="none" stroke="currentColor" strokeOpacity=".15" />
+                      </pattern>
+                    </defs>
+                    <rect width="320" height="184" fill="url(#atelier-auth-grid)" />
+                    <path
+                      d="M32 132c28 0 36-82 78-82 34 0 39 65 72 65 43 0 47-82 94-82"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="8"
+                      strokeLinecap="square"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <span className="atelier-auth-preview__selection"><i /><i /><i /><i /></span>
+                </div>
+                <div className="atelier-auth-preview__layer-card">
+                  <Layers3 size={14} />
+                  <span><strong>Floral outline</strong><small>Source layer</small></span>
+                  <Eye size={13} />
+                </div>
+                <div className="atelier-auth-preview__palette"><span /><span /><span /><span /></div>
+              </div>
+            </div>
+          </div>
         </div>
-        <ul className="auth-hero__points">
-          <li><ImageUp size={17} /> PNG, JPG, WEBP, SVG, and PDF uploads</li>
-          <li><Grid3X3 size={17} /> Cell-perfect grids up to 20 × 125 cm</li>
-          <li><Palette size={17} /> Palette locks with live cell counts</li>
-          <li><ShieldCheck size={17} /> Private, allowlist-only workspace</li>
-        </ul>
+
+        <footer className="atelier-auth__showcase-foot">
+          <span><Grid3X3 size={14} /> Centimeter grid</span>
+          <span><Palette size={14} /> Count-aware color</span>
+          <span><Layers3 size={14} /> Editable layers</span>
+        </footer>
       </aside>
 
-      <section className="auth-pane" aria-labelledby="login-title">
-      <div className="auth-card">
-        <div className="auth-brand-row">
-          <Link href="/" aria-label="Graph Pixel Maker home" className="auth-brand-row__mark">
+      <section className="atelier-auth__access" aria-labelledby="login-title">
+        <header className="atelier-auth__access-head">
+          <Link href="/" aria-label="Graph Pixel Maker home" className="atelier-auth__mobile-brand">
             <BrandMark />
           </Link>
-          <span className="ui-chip">{progressLabel}</span>
-        </div>
+          <Link href="/" className="atelier-auth__back">
+            <ArrowLeft size={15} aria-hidden="true" />
+            Back to home
+          </Link>
+          <span className="atelier-auth__secure"><LockKeyhole size={13} /> Passwordless</span>
+        </header>
 
-        <div className="auth-progress" aria-hidden="true">
-          <span className={"auth-progress__step " + (step === "otp" ? "auth-progress__step--complete" : "auth-progress__step--active")}>
-            {step === "otp" ? <CheckCircle2 size={15} /> : "1"}
-          </span>
-          <span className={"auth-progress__line " + (step === "otp" ? "auth-progress__line--complete" : "")} />
-          <span className={"auth-progress__step " + (step === "otp" ? "auth-progress__step--active" : "")}>2</span>
-        </div>
-
-        {step === "email" ? (
-          <div className="auth-step">
-            <div className="auth-icon"><Mail size={22} aria-hidden="true" /></div>
-            <p className="auth-eyebrow">Secure workspace access</p>
-            <h1 id="login-title">Sign in with email</h1>
-            <p className="auth-copy">Enter an approved email address and we’ll send a one-time sign-in code.</p>
-
-            <form className="auth-form" onSubmit={sendOtp}>
-              <label htmlFor="email">Email address</label>
-              <input
-                ref={emailInputRef}
-                id="email"
-                name="email"
-                type="email"
-                inputMode="email"
-                autoComplete="email"
-                spellCheck={false}
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                className="ui-input auth-input"
-                placeholder="you@example.com"
-                required
-              />
-              {message ? <StatusMessage tone={messageTone}>{message}</StatusMessage> : null}
-              <button type="submit" disabled={pending || !email.trim()} className="ui-btn ui-btn-primary auth-submit">
-                {pendingAction === "send" ? <Loader2 size={17} className="animate-spin" /> : <Send size={17} />}
-                {pendingAction === "send" ? "Sending code…" : "Continue with email"}
-              </button>
-            </form>
-          </div>
-        ) : (
-          <div className="auth-step">
-            <div className="auth-icon"><LockKeyhole size={22} aria-hidden="true" /></div>
-            <p className="auth-eyebrow">Check your inbox</p>
-            <h1 id="login-title">Enter your code</h1>
-            <p className="auth-copy">
-              We sent a six-digit code to <strong>{email}</strong>.{" "}
-              <button type="button" onClick={editEmail}>Edit email</button>
-            </p>
-
-            <form className="auth-form" onSubmit={verifyOtp}>
-              <fieldset>
-                <legend>One-time password</legend>
-                <div
-                  className="auth-otp"
-                  onPaste={(event) => {
-                    event.preventDefault();
-                    applyOtpDigits(0, event.clipboardData.getData("text"));
-                  }}
-                >
-                  {otpDigits.map((digit, index) => (
-                    <input
-                      key={index}
-                      ref={(element) => { otpInputRefs.current[index] = element; }}
-                      aria-label={"Code digit " + (index + 1)}
-                      inputMode="numeric"
-                      autoComplete={index === 0 ? "one-time-code" : "off"}
-                      pattern="[0-9]*"
-                      maxLength={index === 0 ? OTP_LENGTH : 1}
-                      value={digit}
-                      onFocus={(event) => event.currentTarget.select()}
-                      onChange={(event) => {
-                        const digits = event.target.value.replace(/\D/g, "");
-                        if (digits.length > 1) applyOtpDigits(index, digits);
-                        else {
-                          setOtpDigits((current) => current.map((currentDigit, digitIndex) => (digitIndex === index ? digits : currentDigit)));
-                          if (digits && index < OTP_LENGTH - 1) otpInputRefs.current[index + 1]?.focus();
-                        }
-                      }}
-                      onKeyDown={(event) => handleOtpKeyDown(index, event)}
-                      className="auth-otp__input"
-                    />
-                  ))}
-                </div>
-              </fieldset>
-
-              {debugOtp ? <p className="auth-debug-code">Development code: <strong>{debugOtp}</strong></p> : null}
-              {message ? <StatusMessage tone={messageTone}>{message}</StatusMessage> : null}
-
-              <div className="auth-code-meta">
-                <span>{expirySeconds > 0 ? "Code expires in " + formatCountdown(expirySeconds) : "Code expired"}</span>
-                <button type="button" disabled={pending || resendSeconds > 0} onClick={() => void requestOtp("resend")}>
-                  {pendingAction === "resend" ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                  {resendSeconds > 0 ? "Resend in " + formatCountdown(resendSeconds) : "Resend code"}
-                </button>
+        <div className="atelier-auth__access-body">
+          <article className="atelier-access-card">
+            <header className="atelier-access-card__head">
+              <div className="atelier-access-card__progress" aria-label={progressLabel}>
+                <span className={step === "email" ? "is-active" : "is-complete"}>
+                  {step === "otp" ? <CheckCircle2 size={14} /> : "1"}
+                  <small>Email</small>
+                </span>
+                <i className={step === "otp" ? "is-complete" : ""} />
+                <span className={step === "otp" ? "is-active" : ""}>
+                  2
+                  <small>Verify</small>
+                </span>
               </div>
+              <span className="atelier-access-card__step">{progressLabel}</span>
+            </header>
 
-              <button type="submit" disabled={pending || otp.length !== OTP_LENGTH || expirySeconds === 0} className="ui-btn ui-btn-primary auth-submit">
-                {pendingAction === "verify" ? <Loader2 size={17} className="animate-spin" /> : <LockKeyhole size={17} />}
-                {pendingAction === "verify" ? "Verifying…" : "Verify and sign in"}
-              </button>
-            </form>
-          </div>
-        )}
+            {step === "email" ? (
+              <div className="atelier-access-step">
+                <div className="atelier-access-step__title">
+                  <span className="atelier-access-step__icon"><Mail size={20} aria-hidden="true" /></span>
+                  <div>
+                    <p>Workspace access</p>
+                    <h1 id="login-title">Welcome to the studio</h1>
+                  </div>
+                </div>
+                <p className="atelier-access-step__copy">
+                  Use your approved email address. We’ll send a secure six-digit code—no password required.
+                </p>
 
-        <p className="auth-security-note">Passwordless access · 10-minute code · Secure session</p>
-      </div>
+                <form className="atelier-access-form" onSubmit={sendOtp}>
+                  <div className="atelier-access-field">
+                    <div className="atelier-access-field__label">
+                      <label htmlFor="email">Email address</label>
+                      <span>Approved accounts only</span>
+                    </div>
+                    <div className="atelier-access-field__control">
+                      <Mail size={17} aria-hidden="true" />
+                      <input
+                        ref={emailInputRef}
+                        id="email"
+                        name="email"
+                        type="email"
+                        inputMode="email"
+                        autoComplete="email"
+                        spellCheck={false}
+                        value={email}
+                        onChange={(event) => setEmail(event.target.value)}
+                        placeholder="you@example.com"
+                        required
+                      />
+                    </div>
+                  </div>
+                  {message ? <StatusMessage tone={messageTone}>{message}</StatusMessage> : null}
+                  <button
+                    type="submit"
+                    disabled={pending || !email.trim()}
+                    className="atelier-access-button"
+                  >
+                    {pendingAction === "send" ? <Loader2 size={17} className="animate-spin" /> : <Send size={17} />}
+                    {pendingAction === "send" ? "Sending code…" : "Continue with email"}
+                    {pendingAction !== "send" ? <ArrowRight size={16} aria-hidden="true" /> : null}
+                  </button>
+                </form>
+
+                <div className="atelier-access-note">
+                  <ShieldCheck size={16} aria-hidden="true" />
+                  <p><strong>Private by design.</strong> Your administrator controls workspace access.</p>
+                </div>
+              </div>
+            ) : (
+              <div className="atelier-access-step">
+                <div className="atelier-access-step__title">
+                  <span className="atelier-access-step__icon atelier-access-step__icon--success">
+                    <LockKeyhole size={20} aria-hidden="true" />
+                  </span>
+                  <div>
+                    <p>Check your inbox</p>
+                    <h1 id="login-title">Enter your code</h1>
+                  </div>
+                </div>
+                <p className="atelier-access-step__copy">
+                  We sent a six-digit code to <strong>{email}</strong>.{" "}
+                  <button type="button" onClick={editEmail}>Edit email</button>
+                </p>
+
+                <form className="atelier-access-form" onSubmit={verifyOtp}>
+                  <fieldset className="atelier-otp-fieldset">
+                    <legend>One-time password</legend>
+                    <div
+                      className="atelier-otp"
+                      onPaste={(event) => {
+                        event.preventDefault();
+                        applyOtpDigits(0, event.clipboardData.getData("text"));
+                      }}
+                    >
+                      {otpDigits.map((digit, index) => (
+                        <input
+                          key={index}
+                          ref={(element) => { otpInputRefs.current[index] = element; }}
+                          aria-label={"Code digit " + (index + 1)}
+                          inputMode="numeric"
+                          autoComplete={index === 0 ? "one-time-code" : "off"}
+                          pattern="[0-9]*"
+                          maxLength={index === 0 ? OTP_LENGTH : 1}
+                          value={digit}
+                          onFocus={(event) => event.currentTarget.select()}
+                          onChange={(event) => {
+                            const digits = event.target.value.replace(/\D/g, "");
+                            if (digits.length > 1) applyOtpDigits(index, digits);
+                            else {
+                              setOtpDigits((current) =>
+                                current.map((currentDigit, digitIndex) => (digitIndex === index ? digits : currentDigit)),
+                              );
+                              if (digits && index < OTP_LENGTH - 1) otpInputRefs.current[index + 1]?.focus();
+                            }
+                          }}
+                          onKeyDown={(event) => handleOtpKeyDown(index, event)}
+                          className="atelier-otp__input"
+                        />
+                      ))}
+                    </div>
+                  </fieldset>
+
+                  {debugOtp ? (
+                    <p className="atelier-access-debug">Development code <strong>{debugOtp}</strong></p>
+                  ) : null}
+                  {message ? <StatusMessage tone={messageTone}>{message}</StatusMessage> : null}
+
+                  <div className="atelier-access-code-meta">
+                    <span>{expirySeconds > 0 ? `Code expires in ${formatCountdown(expirySeconds)}` : "Code expired"}</span>
+                    <button
+                      type="button"
+                      disabled={pending || resendSeconds > 0}
+                      onClick={() => void requestOtp("resend")}
+                    >
+                      {pendingAction === "resend" ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                      {resendSeconds > 0 ? `Resend in ${formatCountdown(resendSeconds)}` : "Resend code"}
+                    </button>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={pending || otp.length !== OTP_LENGTH || expirySeconds === 0}
+                    className="atelier-access-button"
+                  >
+                    {pendingAction === "verify" ? <Loader2 size={17} className="animate-spin" /> : <LockKeyhole size={17} />}
+                    {pendingAction === "verify" ? "Verifying…" : "Verify and sign in"}
+                    {pendingAction !== "verify" ? <ArrowRight size={16} aria-hidden="true" /> : null}
+                  </button>
+                </form>
+              </div>
+            )}
+
+            <footer className="atelier-access-card__foot">
+              <ShieldCheck size={14} aria-hidden="true" />
+              <span>Passwordless access</span>
+              <i />
+              <span>10-minute code</span>
+              <i />
+              <span>Secure session</span>
+            </footer>
+          </article>
+        </div>
+
+        <footer className="atelier-auth__access-foot">
+          <span>Graph Pixel Maker</span>
+          <span>Precision graph studio</span>
+        </footer>
       </section>
     </main>
   );
 }
 
-function StatusMessage({ tone, children }: { tone: "info" | "error" | "success"; children: React.ReactNode }) {
+function StatusMessage({ tone, children }: { tone: "info" | "error" | "success"; children: ReactNode }) {
   return (
-    <p role={tone === "error" ? "alert" : "status"} aria-live="polite" className={"auth-message auth-message--" + tone}>
+    <p
+      role={tone === "error" ? "alert" : "status"}
+      aria-live="polite"
+      className={`atelier-access-message atelier-access-message--${tone}`}
+    >
       {children}
     </p>
   );

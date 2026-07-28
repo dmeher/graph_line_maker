@@ -1,0 +1,3395 @@
+/* -------------------------------------------------------------------------- */
+/* Floating Focus Studio                                                       */
+/*                                                                            */
+/* This is the final editor composition layer. It deliberately leaves the     */
+/* editor state tree mounted and changes only presentation: the canvas is the  */
+/* single workspace, while scene, tools, view, status and inspector float.     */
+/* -------------------------------------------------------------------------- */
+
+.atelier-editor[data-editor-design="floating-studio"] {
+  --studio-command-inset: 12px;
+  --studio-panel-inset: 14px;
+  --studio-panel-radius: 18px;
+  --studio-float-border: color-mix(in srgb, var(--editor-line) 86%, transparent);
+  --studio-float-shadow:
+    0 22px 56px rgb(0 0 0 / 0.3),
+    0 3px 10px rgb(0 0 0 / 0.18),
+    inset 0 1px rgb(255 255 255 / 0.035);
+  --studio-chip-shadow:
+    0 12px 30px rgb(0 0 0 / 0.24),
+    inset 0 1px rgb(255 255 255 / 0.04);
+  background:
+    radial-gradient(circle at 50% 10%, color-mix(in srgb, var(--editor-accent) 7%, transparent), transparent 34rem),
+    var(--editor-shell-bg);
+}
+
+:root[data-editor-theme="light"] .atelier-editor[data-editor-design="floating-studio"] {
+  --studio-float-shadow:
+    0 22px 56px rgb(52 44 32 / 0.16),
+    0 3px 10px rgb(52 44 32 / 0.08),
+    inset 0 1px rgb(255 255 255 / 0.72);
+  --studio-chip-shadow:
+    0 12px 30px rgb(52 44 32 / 0.13),
+    inset 0 1px rgb(255 255 255 / 0.72);
+}
+
+/* Shared floating-surface language */
+.atelier-editor[data-editor-design="floating-studio"] :where(
+  .atelier-command-bar,
+  .atelier-tool-rail,
+  .atelier-view-controls,
+  .editor-canvas-panel__header,
+  .editor-status-bar__primary,
+  .editor-status-bar__metrics
+) {
+  border: 1px solid var(--studio-float-border);
+  background: color-mix(in srgb, var(--editor-floating-bg) 94%, transparent);
+  box-shadow: var(--studio-chip-shadow);
+  backdrop-filter: blur(18px) saturate(1.12);
+}
+
+/* Inspector information hierarchy */
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-group__header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-group__heading-copy {
+  min-width: 0;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-group__heading {
+  margin: 0 !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-group__description {
+  margin-top: 4px;
+  color: var(--editor-muted) !important;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-group__action {
+  flex: 0 0 auto;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-group[data-priority="primary"] {
+  border-color: color-mix(in srgb, var(--editor-accent) 38%, var(--editor-line)) !important;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--editor-accent-soft) 46%, var(--editor-panel-2)), var(--editor-panel-2) 58%) !important;
+  box-shadow:
+    inset 3px 0 var(--editor-accent),
+    inset 0 1px rgb(255 255 255 / 0.035),
+    0 10px 26px rgb(0 0 0 / 0.1) !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-group[data-priority="quiet"] {
+  border-color: var(--editor-line-soft) !important;
+  background: var(--editor-panel) !important;
+  box-shadow: none !important;
+}
+
+.editor-inspector-unit-switch {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--editor-line);
+  border-radius: 8px;
+  background: var(--editor-panel);
+  padding: 2px;
+}
+
+.editor-inspector-unit-switch button {
+  min-width: 30px;
+  height: 22px;
+  border-radius: 5px;
+  color: var(--editor-muted);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.editor-inspector-unit-switch button:hover,
+.editor-inspector-unit-switch button.is-active {
+  background: var(--editor-accent-soft);
+  color: var(--editor-accent-strong);
+}
+
+.editor-inspector-primary-grid .editor-number-field__label {
+  color: var(--editor-text) !important;
+  font-size: 10px !important;
+}
+
+.editor-inspector-primary-grid input {
+  min-height: 48px !important;
+  border-color: color-mix(in srgb, var(--editor-accent) 42%, var(--editor-control-border)) !important;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 15px !important;
+  font-weight: 720;
+}
+
+.editor-inspector-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.editor-inspector-metric {
+  min-width: 0;
+  border: 1px solid var(--editor-line-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--editor-panel) 76%, transparent);
+  padding: 8px;
+}
+
+.editor-inspector-metric dt,
+.editor-inspector-output-summary dt {
+  color: var(--editor-muted);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 7px;
+  font-weight: 720;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.editor-inspector-metric dd {
+  overflow: hidden;
+  margin-top: 4px;
+  color: var(--editor-text);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-inspector-limit-note {
+  margin: -2px 0 0;
+  color: var(--editor-muted) !important;
+  font-size: 9px !important;
+}
+
+.editor-inspector-disclosure {
+  overflow: hidden;
+  border: 1px solid var(--editor-line-soft);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--editor-panel) 78%, transparent);
+}
+
+.editor-inspector-disclosure > summary {
+  display: grid;
+  min-height: 38px;
+  cursor: pointer;
+  list-style: none;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  align-items: center;
+  gap: 8px;
+  color: var(--editor-text-dim);
+  padding: 7px 9px;
+  font-size: 10px;
+  font-weight: 680;
+}
+
+.editor-inspector-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.editor-inspector-disclosure > summary:hover {
+  background: var(--editor-control-hover-bg);
+  color: var(--editor-text);
+}
+
+.editor-inspector-disclosure > summary:focus-visible {
+  outline: 2px solid var(--editor-accent);
+  outline-offset: -2px;
+}
+
+.editor-inspector-disclosure__summary {
+  overflow: hidden;
+  max-width: 116px;
+  color: var(--editor-muted);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-inspector-disclosure__chevron {
+  transition: transform 150ms ease;
+}
+
+.editor-inspector-disclosure[open] .editor-inspector-disclosure__chevron {
+  transform: rotate(90deg);
+}
+
+.editor-inspector-disclosure__body {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--editor-line-soft);
+  padding: 10px;
+}
+
+.editor-inspector-toggle-row {
+  min-height: 38px;
+  border: 1px solid var(--editor-line-soft);
+  border-radius: 9px;
+  background: var(--editor-panel);
+  padding: 6px 8px;
+}
+
+.editor-inspector-output-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--editor-line-soft);
+  border-radius: 11px;
+  background: var(--editor-line-soft);
+}
+
+.editor-inspector-output-summary > div {
+  min-width: 0;
+  background: var(--editor-panel);
+  padding: 9px 10px;
+}
+
+.editor-inspector-output-summary dd {
+  overflow: hidden;
+  margin-top: 4px;
+  color: var(--editor-text-dim);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-inspector-action-strip {
+  padding-top: 2px;
+}
+
+.editor-inspector-action-strip .ui-btn-icon {
+  min-height: 36px;
+  border-color: var(--editor-line);
+  border-radius: 8px;
+  background: var(--editor-panel);
+  color: var(--editor-text-dim);
+}
+
+.editor-inspector-bounds {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--editor-line-soft);
+  border-radius: 9px;
+  background: var(--editor-line-soft);
+}
+
+.editor-inspector-bounds > div {
+  min-width: 0;
+  background: var(--editor-panel);
+  padding: 7px 6px;
+  text-align: center;
+}
+
+.editor-inspector-bounds dt {
+  color: var(--editor-muted);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 7px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.editor-inspector-bounds dd {
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--editor-text-dim);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+}
+
+.editor-inspector-reset-chip {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--editor-line);
+  border-radius: 8px;
+  background: var(--editor-panel);
+  color: var(--editor-text-dim);
+}
+
+.editor-inspector-reset-chip:hover {
+  border-color: var(--editor-accent);
+  background: var(--editor-accent-soft);
+  color: var(--editor-accent-strong);
+}
+
+.editor-inspector-context-hint {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 9px;
+  border: 1px dashed var(--editor-line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--editor-panel) 82%, transparent);
+  color: var(--editor-muted);
+  padding: 9px 10px;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.editor-inspector-context-hint svg {
+  flex: 0 0 auto;
+  color: var(--editor-accent);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Desktop: one full-bleed canvas with floating control surfaces               */
+/* -------------------------------------------------------------------------- */
+
+@media (min-width: 1024px) {
+  .atelier-editor[data-editor-design="floating-studio"] {
+    --editor-command-height: 76px;
+    grid-template-rows: var(--editor-command-height) minmax(0, 1fr);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar {
+    align-self: start;
+    width: auto;
+    height: 58px !important;
+    margin: 10px var(--studio-command-inset) 8px;
+    grid-template-columns: minmax(300px, 1fr) auto auto;
+    gap: 10px;
+    overflow: visible;
+    border-radius: 16px;
+    padding: 6px 7px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__identity {
+    gap: 8px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__home {
+    width: 42px;
+    height: 42px;
+    border: 0;
+    border-radius: 11px !important;
+    background: color-mix(in srgb, var(--editor-panel-2) 84%, transparent);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__product {
+    min-width: 62px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__product strong {
+    font-size: 11px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__product span {
+    font-size: 6px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__divider {
+    height: 24px;
+    margin-inline: 2px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document {
+    max-width: 440px;
+    grid-template-rows: 9px 25px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document input {
+    height: 25px;
+    border-radius: 6px;
+    padding-inline: 6px;
+    font-size: 13px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__history {
+    height: 42px !important;
+    gap: 2px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--editor-panel-2);
+    padding: 3px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__history .editor-command-bar__group-label {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__history button {
+    width: 34px !important;
+    min-width: 34px;
+    height: 34px !important;
+    justify-content: center;
+    border-radius: 8px;
+    padding: 0;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__history button:hover {
+    background: var(--editor-control-hover-bg);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__history kbd {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__actions {
+    gap: 5px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-command-bar__panel-actions,
+    .editor-command-bar__workspace-actions,
+    .editor-command-bar__output-actions
+  ) {
+    gap: 4px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-command-bar__panel-actions,
+    .editor-command-bar__workspace-actions
+  ) {
+    margin-right: 2px;
+    border-right: 1px solid var(--editor-line-soft);
+    padding-right: 6px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar :where(.editor-dark-btn, .theme-toggle) {
+    min-width: 36px;
+    height: 38px;
+    border-color: transparent;
+    border-radius: 9px;
+    background: transparent;
+    padding-inline: 9px;
+    font-size: 9px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar :where(.editor-dark-btn, .theme-toggle):hover {
+    border-color: var(--editor-line);
+    background: var(--editor-panel-2);
+    transform: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .editor-command-bar__save {
+    min-width: 72px;
+    border-color: color-mix(in srgb, var(--editor-success) 52%, var(--editor-line));
+    background: var(--editor-success-soft);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .editor-command-bar__export {
+    min-width: 104px;
+    border-color: var(--editor-accent);
+    background: var(--editor-accent);
+    box-shadow: 0 8px 18px color-mix(in srgb, var(--editor-accent) 20%, transparent);
+    color: var(--editor-on-accent);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__workspace {
+    position: relative;
+    display: block !important;
+    min-width: 0;
+    min-height: 0;
+    grid-row: 2;
+    overflow: hidden !important;
+    background: var(--editor-canvas-panel-bg);
+    padding: 0 !important;
+    --studio-document-size: min(var(--editor-left-panel-width), 32vw);
+    --studio-inspector-size: min(var(--editor-right-panel-width), 35vw);
+    --studio-stage-left: 24px;
+    --studio-stage-right: 24px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__canvas-host {
+    position: absolute !important;
+    z-index: 1;
+    inset: 0 !important;
+    display: block !important;
+    width: 100%;
+    height: 100% !important;
+    overflow: hidden;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-canvas-panel {
+    position: relative;
+    display: block !important;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__stage {
+    position: absolute !important;
+    inset: 0;
+    overflow: auto;
+    padding:
+      74px
+      var(--studio-stage-right)
+      104px
+      var(--studio-stage-left) !important;
+    scroll-padding:
+      74px
+      var(--studio-stage-right)
+      104px
+      var(--studio-stage-left);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-context-toolbar-wrap {
+    margin: -58px 0 18px !important;
+    padding: 8px 0 0 !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-context-toolbar {
+    max-width: min(760px, 100%);
+    border-radius: 12px;
+    box-shadow: var(--studio-chip-shadow);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-notice {
+    top: 62px !important;
+    left: var(--studio-stage-left) !important;
+    width: min(520px, calc(100% - var(--studio-stage-left) - var(--studio-stage-right))) !important;
+    border-radius: 10px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-processing {
+    top: 62px !important;
+    right: var(--studio-stage-right) !important;
+    border-radius: 10px;
+    box-shadow: var(--studio-chip-shadow);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header {
+    position: absolute;
+    z-index: 52;
+    top: 14px;
+    left: var(--studio-stage-left);
+    display: flex;
+    width: auto;
+    min-width: 154px;
+    height: 40px;
+    gap: 18px;
+    border-radius: 11px;
+    padding: 5px 10px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header h1 {
+    color: var(--editor-text);
+    font-size: 8px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header p,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header > div:last-child {
+    font-size: 8px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-view-controls {
+    z-index: 52;
+    top: 14px !important;
+    right: var(--studio-stage-right) !important;
+    height: 40px !important;
+    border-radius: 11px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-status-bar {
+    position: absolute;
+    z-index: 52;
+    inset: auto 0 78px;
+    display: block;
+    min-height: 0;
+    overflow: visible;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    pointer-events: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-status-bar__primary,
+    .editor-status-bar__metrics
+  ) {
+    position: absolute;
+    bottom: 0;
+    display: flex;
+    min-height: 32px;
+    align-items: center;
+    gap: 9px;
+    border-radius: 9px;
+    padding: 5px 9px;
+    color: var(--editor-text-dim);
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+    font-size: 8px;
+    pointer-events: auto;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__primary {
+    left: var(--studio-stage-left);
+    max-width: min(300px, 26vw);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__metrics {
+    right: var(--studio-stage-right);
+  }
+
+  /* Tool rail becomes a thumb-friendly command shelf instead of a second
+     permanent column. Labels remain available as hover/focus tooltips. */
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail {
+    position: absolute !important;
+    z-index: 64;
+    top: auto !important;
+    right: auto !important;
+    bottom: 14px !important;
+    left: 50% !important;
+    display: flex !important;
+    width: max-content !important;
+    max-width: min(620px, calc(100% - 40px));
+    height: 58px !important;
+    min-height: 58px;
+    transform: translateX(-50%);
+    flex-direction: row;
+    align-items: center;
+    gap: 4px !important;
+    overflow: visible;
+    border-radius: 15px !important;
+    padding: 5px 7px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-tool-rail__heading,
+    .editor-tool-rail__group-label
+  ) {
+    display: none !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-tool-rail__group,
+    .editor-tool-rail__group-items
+  ) {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 3px;
+    border: 0 !important;
+    padding: 0;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-tool-rail__group + .editor-tool-rail__group::before {
+    width: 1px;
+    height: 28px;
+    margin-inline: 4px;
+    background: var(--editor-line);
+    content: "";
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail .editor-tool-rail__item {
+    width: 44px !important;
+    height: 44px !important;
+    flex: 0 0 auto;
+    border-radius: 10px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail .editor-tool-rail__item.is-active {
+    box-shadow:
+      0 7px 16px color-mix(in srgb, var(--editor-accent) 24%, transparent),
+      inset 0 1px rgb(255 255 255 / 0.22);
+    color: var(--editor-on-accent);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-tool-rail__icon i {
+    top: auto;
+    bottom: -9px;
+    left: 50%;
+    width: 14px;
+    height: 2px;
+    transform: translateX(-50%);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail .editor-tool-rail__label {
+    top: auto !important;
+    right: auto !important;
+    bottom: calc(100% + 10px) !important;
+    left: 50% !important;
+    transform: translateX(-50%) translateY(4px) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail .editor-tool-rail__item:hover .editor-tool-rail__label,
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail .editor-tool-rail__item:focus-visible .editor-tool-rail__label {
+    transform: translateX(-50%) translateY(0) !important;
+  }
+
+  /* Floating side cards */
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column {
+    position: absolute;
+    z-index: 58;
+    top: var(--studio-panel-inset);
+    bottom: var(--studio-panel-inset);
+    display: block;
+    height: auto;
+    max-height: none;
+    overflow: visible;
+    border: 1px solid var(--studio-float-border);
+    border-radius: var(--studio-panel-radius);
+    background: var(--editor-panel);
+    box-shadow: var(--studio-float-shadow);
+    opacity: 1;
+    visibility: visible;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column--document {
+    left: var(--studio-panel-inset);
+    width: var(--studio-document-size);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column--inspector {
+    right: var(--studio-panel-inset);
+    width: var(--studio-inspector-size);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column--collapsed {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column > .editor-panel {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    overflow: hidden !important;
+    border: 0;
+    border-radius: calc(var(--studio-panel-radius) - 1px);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-document-panel .editor-document-panel__header {
+    border-bottom-color: var(--editor-line-soft) !important;
+    border-radius: calc(var(--studio-panel-radius) - 1px) calc(var(--studio-panel-radius) - 1px) 0 0;
+    padding: 14px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__masthead {
+    align-items: center;
+    margin-bottom: 10px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__eyebrow {
+    font-size: 7px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__masthead p:first-of-type {
+    margin-top: 2px;
+    font-size: 14px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__summary {
+    margin-top: 2px !important;
+    font-size: 8px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-document-panel .editor-document-panel__tabs {
+    border: 1px solid var(--editor-line-soft) !important;
+    border-radius: 10px !important;
+    background: color-mix(in srgb, var(--editor-panel-2) 78%, var(--editor-panel)) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-document-panel .editor-document-panel__tab {
+    min-height: 36px !important;
+    border-radius: 7px !important;
+    font-size: 9px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-layer-virtual-row {
+    margin: 3px 5px;
+    border-radius: 9px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-layer-row__layout {
+    height: 58px !important;
+    grid-template-columns: 17px 26px 38px minmax(0, 1fr) 28px 26px !important;
+    gap: 5px !important;
+    padding: 5px 7px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-layer-row__preview {
+    width: 38px !important;
+    height: 38px !important;
+    border-radius: 7px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-layer-row__action,
+    .editor-layer-row__grip
+  ) {
+    width: 27px;
+    height: 30px;
+    border-radius: 7px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer {
+    width: 14px !important;
+    opacity: 0;
+    transition: opacity 140ms ease;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column:hover .editor-panel-resizer,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer:focus-visible,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer[data-resizing="true"] {
+    opacity: 1;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer__grip {
+    width: 8px;
+    height: 34px;
+    border-color: color-mix(in srgb, var(--editor-line) 72%, transparent);
+    background: var(--editor-panel-2);
+    box-shadow: 0 5px 12px rgb(0 0 0 / 0.18);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer__grip svg {
+    width: 9px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-inspector .editor-inspector__header {
+    border-bottom-color: var(--editor-line-soft) !important;
+    background: var(--editor-panel) !important;
+    padding: 12px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-inspector .editor-inspector__heading {
+    min-height: 34px;
+    margin-bottom: 9px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector__heading-icon {
+    width: 32px;
+    height: 32px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector__heading-copy > span {
+    font-size: 7px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector__heading-copy h2 {
+    font-size: 13px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector__heading-copy p {
+    font-size: 9px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-inspector-tabs {
+    height: 44px;
+    border: 1px solid var(--editor-line-soft) !important;
+    border-radius: 10px !important;
+    background: color-mix(in srgb, var(--editor-panel-2) 78%, var(--editor-panel)) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-inspector-tabs .editor-inspector__tab {
+    min-height: 36px !important;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: 5px !important;
+    padding: 4px 6px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector__tab-copy strong {
+    font-size: 8px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector__tab-copy small {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-inspector .editor-inspector__body {
+    padding: 10px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-inspector .editor-inspector__tab-panel {
+    gap: 10px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-inspector .editor-inspector-group {
+    padding: 12px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-inspector :where(
+    input:not([type="checkbox"]):not([type="range"]):not([type="color"]),
+    select,
+    textarea,
+    .editor-inspector-control
+  ) {
+    min-height: 38px;
+    border-radius: 8px !important;
+    font-size: 11px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-unit-control__suffix {
+    height: 38px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-mobile-sheet-backdrop,
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__mobile-dock {
+    display: none !important;
+  }
+}
+
+/* On wide desktop, reserve real canvas room for both floating cards. */
+@media (min-width: 1280px) {
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__workspace[data-document-panel="open"] {
+    --studio-stage-left: calc(var(--studio-document-size) + 42px);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__workspace[data-inspector-panel="open"] {
+    --studio-stage-right: calc(var(--studio-inspector-size) + 42px);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .editor-command-bar__menu-button {
+    min-width: 112px;
+    justify-content: center;
+  }
+}
+
+/* Compact desktop treats panels as palettes over the canvas. */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .atelier-editor[data-editor-design="floating-studio"] {
+    --editor-command-height: 70px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar {
+    height: 54px !important;
+    grid-template-columns: minmax(230px, 1fr) auto auto;
+    margin-top: 8px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-command-bar__product,
+    .editor-command-bar__workspace-actions .editor-dark-btn span,
+    .editor-command-bar__document > span
+  ) {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document {
+    display: block;
+    max-width: 250px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document input {
+    height: 34px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column--document {
+    --studio-document-size: min(var(--editor-left-panel-width), 292px);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column--inspector {
+    --studio-inspector-size: min(var(--editor-right-panel-width), 330px);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail {
+    max-width: calc(100% - 660px);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__selection,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__dimensions,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__snap {
+    display: none;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Tablet/mobile: keep one mounted canvas and turn the same surfaces into      */
+/* drawers/sheets. The existing mobileTab state remains the only controller.   */
+/* -------------------------------------------------------------------------- */
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .atelier-editor[data-editor-design="floating-studio"] {
+    --editor-command-height: 64px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar {
+    width: auto;
+    height: 52px !important;
+    margin: 6px 8px;
+    border-radius: 14px;
+    padding: 5px 6px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document > span,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__product,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__history kbd {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document {
+    display: block;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document input {
+    height: 34px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column {
+    top: 72px;
+    bottom: calc(76px + env(safe-area-inset-bottom));
+    border-radius: 18px;
+    box-shadow: var(--studio-float-shadow);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column > .editor-panel {
+    border-radius: 17px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail {
+    border-radius: 14px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header {
+    border-radius: 10px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-view-controls {
+    border-radius: 10px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__mobile-dock {
+    margin: 0 8px 8px;
+    min-height: calc(56px + env(safe-area-inset-bottom));
+    border: 1px solid var(--studio-float-border);
+    border-radius: 14px;
+    background: var(--editor-floating-bg);
+    box-shadow: var(--studio-chip-shadow);
+    padding-inline: 5px;
+  }
+}
+
+@media (max-width: 767px) {
+  .atelier-editor[data-editor-design="floating-studio"] {
+    --editor-command-height: 58px;
+    grid-template-rows: var(--editor-command-height) minmax(0, 1fr) calc(62px + env(safe-area-inset-bottom));
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar {
+    position: relative;
+    display: grid !important;
+    width: auto;
+    height: 50px !important;
+    margin: 4px 5px;
+    grid-template-columns: minmax(118px, 1fr) auto;
+    gap: 4px;
+    overflow: visible;
+    border-radius: 13px;
+    padding: 4px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__identity {
+    min-width: 0;
+    flex-basis: auto;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__home {
+    width: 36px;
+    height: 36px;
+    border: 0;
+    background: var(--editor-panel-2);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document {
+    display: block;
+    min-width: 0;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document > span {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document input {
+    height: 34px;
+    font-size: 11px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__history {
+    position: fixed;
+    z-index: 78;
+    top: 66px;
+    left: 8px;
+    height: 40px !important;
+    border: 1px solid var(--studio-float-border);
+    border-radius: 11px;
+    background: var(--editor-floating-bg);
+    box-shadow: var(--studio-chip-shadow);
+    padding: 3px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__history button {
+    width: 32px !important;
+    min-width: 32px;
+    height: 32px !important;
+    padding: 0;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__actions {
+    justify-self: end;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__workspace-actions {
+    margin: 0;
+    border-right: 1px solid var(--editor-line-soft);
+    padding-right: 3px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar :where(.editor-dark-btn, .theme-toggle) {
+    width: 34px;
+    min-width: 34px;
+    height: 36px;
+    border-color: transparent;
+    background: transparent;
+    padding: 0;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .editor-command-bar__export {
+    border-color: var(--editor-accent);
+    background: var(--editor-accent);
+    color: var(--editor-on-accent);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header {
+    position: absolute;
+    z-index: 48;
+    top: 8px;
+    left: 82px;
+    width: auto;
+    height: 36px;
+    border-radius: 10px;
+    padding: 4px 8px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header > div:last-child {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-view-controls {
+    top: 52px !important;
+    border-radius: 10px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__stage {
+    padding: 58px 12px 100px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail {
+    bottom: 40px !important;
+    border-radius: 14px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-status-bar {
+    position: absolute;
+    z-index: 46;
+    right: 8px;
+    bottom: 8px;
+    left: auto;
+    width: auto;
+    min-height: 30px;
+    border: 0;
+    background: transparent;
+    padding: 0;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__primary {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__metrics {
+    min-height: 30px;
+    gap: 7px;
+    border-radius: 9px;
+    padding: 4px 8px;
+    font-size: 8px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__dimensions,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__snap {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column {
+    border-radius: 20px 20px 14px 14px;
+    box-shadow: var(--studio-float-shadow);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column > .editor-panel {
+    border-radius: inherit;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__mobile-dock {
+    margin: 0 5px 5px;
+    min-height: calc(56px + env(safe-area-inset-bottom));
+    border: 1px solid var(--studio-float-border);
+    border-radius: 14px;
+    background: var(--editor-floating-bg);
+    box-shadow: var(--studio-chip-shadow);
+    padding: 3px 4px env(safe-area-inset-bottom);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__mobile-dock button {
+    min-height: 46px;
+    border-radius: 10px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-inspector .editor-inspector__body {
+    padding: 10px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector-metrics,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector-output-summary {
+    grid-template-columns: repeat(3, minmax(86px, 1fr));
+    overflow-x: auto;
+  }
+}
+
+@media (max-height: 720px) and (min-width: 1024px) {
+  .atelier-editor[data-editor-design="floating-studio"] {
+    --editor-command-height: 66px;
+    --studio-panel-inset: 8px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar {
+    height: 50px !important;
+    margin-top: 7px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header,
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-view-controls {
+    top: 9px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail {
+    bottom: 8px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-status-bar {
+    bottom: 70px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-inspector-disclosure__chevron,
+    .editor-panel-resizer,
+    .editor-tool-rail__item,
+    .editor-tool-rail__label
+  ) {
+    transition: none !important;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Editor Workbench 2.0 authority                                             */
+/*                                                                            */
+/* The rules below intentionally win over the earlier exploratory composition. */
+/* Scene remains the left anchor, tools follow it, and the canvas consumes the  */
+/* rest of the workspace. No editor state or mounting contract changes here.   */
+/* -------------------------------------------------------------------------- */
+
+.atelier-editor[data-editor-design="floating-studio"] {
+  --workbench-tool-width: 48px;
+  --workbench-tool-gap: 10px;
+  --workbench-control-height: 38px;
+  --workbench-section-gap: 8px;
+}
+
+/* The editor switch is intentionally wider than adjacent icon buttons. Its
+   internal track no longer overflows the button and remains easy to parse. */
+@media (min-width: 768px) {
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .theme-toggle {
+    width: 60px !important;
+    min-width: 60px !important;
+    height: 38px !important;
+    padding: 0 !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .theme-toggle__track {
+    width: 50px;
+    height: 26px;
+    padding-inline: 5px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .theme-toggle__thumb {
+    top: 2px;
+    left: 2px;
+    width: 20px;
+    height: 20px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar
+    .theme-toggle[data-theme-value="dark"]
+    .theme-toggle__thumb {
+    transform: translateX(24px);
+  }
+}
+
+/* Compact, balanced command surface. */
+@media (min-width: 1024px) {
+  .atelier-editor[data-editor-design="floating-studio"] {
+    --editor-command-height: 66px;
+    grid-template-rows: var(--editor-command-height) minmax(0, 1fr);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar {
+    width: auto;
+    height: 52px !important;
+    margin: 7px 10px;
+    grid-template-columns: minmax(220px, 1fr) auto max-content;
+    gap: 8px;
+    border-radius: 14px;
+    padding: 5px 6px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__identity {
+    gap: 7px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__home {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document {
+    max-width: min(380px, 32vw);
+    grid-template-rows: 8px 24px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document input {
+    height: 24px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__history {
+    height: 38px !important;
+    gap: 2px;
+    padding: 3px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__history button {
+    width: 32px !important;
+    min-width: 32px;
+    height: 32px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-command-bar__actions,
+    .editor-command-bar__panel-actions,
+    .editor-command-bar__workspace-actions,
+    .editor-command-bar__output-actions
+  ) {
+    gap: 4px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-command-bar__panel-actions,
+    .editor-command-bar__workspace-actions
+  ) {
+    margin-right: 2px;
+    padding-right: 5px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .editor-dark-btn {
+    min-width: 36px;
+    height: var(--workbench-control-height);
+    border-radius: 9px;
+    padding-inline: 8px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .editor-command-bar__save {
+    min-width: 68px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .editor-command-bar__export {
+    min-width: 96px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__workspace {
+    --studio-stage-left: calc(var(--studio-panel-inset) + var(--workbench-tool-width) + 12px);
+    --studio-stage-right: 24px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-editor__workspace[data-document-panel="open"] {
+    --studio-stage-left:
+      calc(
+        var(--studio-document-size) +
+        var(--studio-panel-inset) +
+        var(--workbench-tool-gap) +
+        var(--workbench-tool-width) +
+        14px
+      );
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-editor__workspace[data-inspector-panel="open"] {
+    --studio-stage-right: calc(var(--studio-inspector-size) + 42px);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__stage {
+    padding:
+      64px
+      var(--studio-stage-right)
+      56px
+      var(--studio-stage-left) !important;
+    scroll-padding:
+      64px
+      var(--studio-stage-right)
+      56px
+      var(--studio-stage-left);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-context-toolbar-wrap {
+    margin: -50px 0 14px !important;
+    padding-top: 7px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header,
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-view-controls {
+    top: 12px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header {
+    min-width: 68px;
+    height: 36px;
+    gap: 0;
+    border-radius: 10px;
+    padding: 4px 9px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-notice,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-processing {
+    top: 56px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-status-bar {
+    inset: auto 0 12px;
+  }
+
+  /* Scene remains the far-left surface. */
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column--document {
+    left: var(--studio-panel-inset);
+  }
+
+  /* The tool deck follows Scene. When Scene is closed it returns to the
+     workspace edge without changing the mounted canvas or active tool. */
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail {
+    position: absolute !important;
+    z-index: 64;
+    top: var(--studio-panel-inset) !important;
+    right: auto !important;
+    bottom: auto !important;
+    left: var(--studio-panel-inset) !important;
+    display: flex !important;
+    width: var(--workbench-tool-width) !important;
+    max-width: none;
+    height: auto !important;
+    min-height: 0;
+    max-height: calc(100% - (var(--studio-panel-inset) * 2));
+    transform: none !important;
+    flex-direction: column;
+    align-items: center;
+    gap: 0 !important;
+    overflow: visible;
+    border-radius: 14px !important;
+    padding: 5px 4px !important;
+    scrollbar-width: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail::-webkit-scrollbar {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-editor__workspace[data-document-panel="open"]
+    .atelier-tool-rail {
+    left:
+      calc(
+        var(--studio-panel-inset) +
+        var(--studio-document-size) +
+        var(--workbench-tool-gap)
+      ) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-tool-rail__heading,
+    .editor-tool-rail__group-label
+  ) {
+    display: none !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-tool-rail__group,
+    .editor-tool-rail__group-items
+  ) {
+    display: flex;
+    width: 100%;
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    border: 0 !important;
+    padding: 0;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-tool-rail__group + .editor-tool-rail__group {
+    margin-top: 5px;
+    padding-top: 6px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-tool-rail__group + .editor-tool-rail__group::before {
+    width: 28px;
+    height: 1px;
+    margin: -6px 0 3px;
+    background: var(--editor-line);
+    content: "";
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail .editor-tool-rail__item {
+    width: 38px !important;
+    height: 38px !important;
+    flex: 0 0 auto;
+    border-radius: 9px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-tool-rail__icon i {
+    top: 50%;
+    bottom: auto;
+    left: -9px;
+    width: 2px;
+    height: 14px;
+    transform: translateY(-50%);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail .editor-tool-rail__label {
+    top: 50% !important;
+    right: auto !important;
+    bottom: auto !important;
+    left: calc(100% + 10px) !important;
+    transform: translateY(-50%) translateX(-4px) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-tool-rail
+    .editor-tool-rail__item:hover
+    .editor-tool-rail__label,
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-tool-rail
+    .editor-tool-rail__item:focus-visible
+    .editor-tool-rail__label {
+    transform: translateY(-50%) translateX(0) !important;
+  }
+
+  /* A stable hit area with a restrained grip replaces the shifting resize
+     ornament. It remains inside the clipped panel on both sides. */
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer {
+    z-index: 70 !important;
+    width: 14px !important;
+    opacity: 0;
+    transition: opacity 140ms ease;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer__grip {
+    width: 12px;
+    height: 40px;
+    border-color: color-mix(in srgb, var(--editor-line) 82%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--editor-panel-2) 92%, transparent);
+    box-shadow:
+      0 6px 14px rgb(0 0 0 / 0.18),
+      inset 0 1px rgb(255 255 255 / 0.05);
+    color: var(--editor-muted);
+    opacity: 0;
+    transform: none;
+    transition:
+      border-color 140ms ease,
+      background-color 140ms ease,
+      color 140ms ease,
+      opacity 140ms ease;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-side-column:hover .editor-panel-resizer {
+    opacity: 0;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer:hover,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer:focus-visible,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer[data-resizing="true"],
+  .atelier-editor[data-editor-design="floating-studio"]
+    .editor-side-column:hover
+    .editor-panel-resizer:hover,
+  .atelier-editor[data-editor-design="floating-studio"]
+    .editor-side-column:hover
+    .editor-panel-resizer:focus-visible,
+  .atelier-editor[data-editor-design="floating-studio"]
+    .editor-side-column:hover
+    .editor-panel-resizer[data-resizing="true"] {
+    opacity: 1;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer:hover .editor-panel-resizer__grip,
+  .atelier-editor[data-editor-design="floating-studio"] .editor-panel-resizer:focus-visible .editor-panel-resizer__grip,
+  .atelier-editor[data-editor-design="floating-studio"]
+    .editor-panel-resizer[data-resizing="true"]
+    .editor-panel-resizer__grip {
+    width: 12px;
+    border-color: var(--editor-accent);
+    background: color-mix(in srgb, var(--editor-accent-soft) 70%, var(--editor-panel-2));
+    color: var(--editor-accent-strong);
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (min-width: 1024px) and (max-width: 1439px) {
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-command-bar__product,
+    .editor-command-bar__divider
+  ) {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__menu-button > span {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .editor-command-bar__menu-button {
+    min-width: 36px;
+    width: 36px;
+    padding: 0;
+  }
+}
+
+/* Keep a usable central work area even when both resizable panels are pushed
+   toward their limits. The inspector keeps priority at the desktop threshold;
+   wider screens grow both panels against a shared canvas-space budget. */
+@media (min-width: 1280px) and (max-width: 1439px) {
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__workspace {
+    --studio-document-size: min(var(--editor-left-panel-width), 288px);
+    --studio-inspector-size: min(var(--editor-right-panel-width), 368px);
+  }
+}
+
+@media (min-width: 1440px) {
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__workspace {
+    --studio-balanced-panel-max:
+      clamp(368px, calc((100vw - 644px) / 2), 560px);
+    --studio-document-size:
+      min(var(--editor-left-panel-width), var(--studio-balanced-panel-max));
+    --studio-inspector-size:
+      min(var(--editor-right-panel-width), var(--studio-balanced-panel-max));
+  }
+}
+
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .atelier-editor[data-editor-design="floating-studio"] {
+    --editor-command-height: 62px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar {
+    height: 50px !important;
+    margin-block: 6px;
+    grid-template-columns: minmax(210px, 1fr) auto max-content;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__workspace {
+    --studio-document-size: min(var(--editor-left-panel-width), 292px);
+    --studio-inspector-size: min(var(--editor-right-panel-width), 330px);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document {
+    display: block;
+    max-width: 250px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document > span {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-command-bar__document input {
+    height: 34px;
+  }
+
+  /* Compact desktop panels are palettes over the mounted canvas. Keep the
+     canvas track stable and reserve only the persistent tool gutter. */
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__workspace,
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-editor__workspace[data-document-panel="open"],
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-editor__workspace[data-inspector-panel="open"] {
+    --studio-stage-left: calc(var(--studio-panel-inset) + var(--workbench-tool-width) + 12px);
+    --studio-stage-right: 24px;
+    --studio-overlay-left: var(--studio-stage-left);
+    --studio-overlay-right: var(--studio-stage-right);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-editor__workspace[data-document-panel="open"] {
+    --studio-overlay-left:
+      calc(
+        var(--studio-panel-inset) +
+        var(--studio-document-size) +
+        var(--workbench-tool-gap) +
+        var(--workbench-tool-width) +
+        14px
+      );
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-editor__workspace[data-inspector-panel="open"] {
+    --studio-overlay-right: calc(var(--studio-inspector-size) + 28px);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-canvas-panel__header,
+    .editor-canvas-notice
+  ) {
+    left: var(--studio-overlay-left) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-notice {
+    width:
+      min(
+        520px,
+        calc(100% - var(--studio-overlay-left) - var(--studio-overlay-right))
+      ) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-view-controls {
+    right: var(--studio-overlay-right) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-processing {
+    right: var(--studio-overlay-right) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__primary {
+    left: var(--studio-overlay-left);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__metrics {
+    right: var(--studio-overlay-right);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-view-controls .editor-view-controls__mode span {
+    display: none;
+  }
+}
+
+/* Tablet retains the mounted canvas and overlay drawers, but the tool deck is
+   vertical until the phone breakpoint. */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .atelier-editor[data-editor-design="floating-studio"] {
+    --editor-command-height: 62px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar {
+    height: 50px !important;
+    margin: 6px 8px;
+    gap: 5px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-editor__canvas-host {
+    position: relative !important;
+    display: block !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-canvas-panel {
+    width: 100%;
+    height: 100%;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail {
+    position: absolute !important;
+    z-index: 64;
+    top: 54px !important;
+    right: auto !important;
+    bottom: auto !important;
+    left: 10px !important;
+    display: flex !important;
+    width: 48px !important;
+    height: auto !important;
+    max-height: calc(100% - 132px);
+    transform: none !important;
+    flex-direction: column;
+    align-items: center;
+    gap: 0 !important;
+    overflow: visible;
+    border-radius: 14px !important;
+    padding: 5px 4px !important;
+    scrollbar-width: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-tool-rail__heading,
+    .editor-tool-rail__group-label
+  ) {
+    display: none !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-tool-rail__group,
+    .editor-tool-rail__group-items
+  ) {
+    display: flex;
+    width: 100%;
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    border: 0 !important;
+    padding: 0;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-tool-rail__group + .editor-tool-rail__group {
+    margin-top: 5px;
+    padding-top: 6px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-tool-rail__group + .editor-tool-rail__group::before {
+    width: 28px;
+    height: 1px;
+    margin: -6px 0 3px;
+    background: var(--editor-line);
+    content: "";
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail .editor-tool-rail__item {
+    width: 38px !important;
+    height: 38px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-tool-rail__icon i {
+    top: 50%;
+    bottom: auto;
+    left: -9px;
+    width: 2px;
+    height: 14px;
+    transform: translateY(-50%);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail .editor-tool-rail__label {
+    top: 50% !important;
+    bottom: auto !important;
+    left: calc(100% + 10px) !important;
+    transform: translateY(-50%) translateX(-4px) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-tool-rail
+    .editor-tool-rail__item:hover
+    .editor-tool-rail__label,
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-tool-rail
+    .editor-tool-rail__item:focus-visible
+    .editor-tool-rail__label {
+    transform: translateY(-50%) translateX(0) !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__stage {
+    padding: 58px 12px 66px 70px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__header {
+    left: 70px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"]
+    .atelier-editor__workspace:has(.editor-side-column--document.editor-mobile-sheet--open)
+    .atelier-tool-rail {
+    left: calc(min(370px, calc(100vw - 28px)) + 24px) !important;
+  }
+}
+
+/* Phone remains thumb-first: the existing horizontal strip and sheets win. */
+@media (max-width: 767px) {
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .theme-toggle {
+    width: 38px !important;
+    min-width: 38px !important;
+    padding: 0 !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .theme-toggle__track {
+    width: 30px;
+    height: 18px;
+    padding-inline: 3px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar .theme-toggle__thumb {
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar
+    .theme-toggle[data-theme-value="dark"]
+    .theme-toggle__thumb {
+    transform: translateX(12px);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Scene: explicit tab panels and independently scrolling asset panes          */
+/* -------------------------------------------------------------------------- */
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__body {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__tab-panel {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__tab-panel[hidden] {
+  display: none !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"]
+  .editor-document-panel__tab-panel--layers:not([hidden]) {
+  display: flex !important;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__layer-list {
+  order: 1;
+  min-height: 0;
+  max-height: none !important;
+  flex: 1 1 auto;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-virtual-row {
+  position: relative;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-row__layout {
+  height: 54px !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-virtual-row:hover:not([data-selected="true"]) {
+  background: var(--editor-control-hover-bg) !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-virtual-row[data-dragging="true"] {
+  opacity: 0.46;
+  transform: scale(0.985);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-virtual-row[data-drop-target="true"]::before {
+  position: absolute;
+  z-index: 2;
+  top: -3px;
+  right: 6px;
+  left: 6px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--editor-accent);
+  box-shadow: 0 0 0 2px var(--editor-accent-soft);
+  content: "";
+  pointer-events: none;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] :where(
+  .editor-layer-row__action,
+  .editor-layer-row__grip
+) {
+  opacity: 0.58;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] :where(
+  .editor-layer-virtual-row:hover,
+  .editor-layer-virtual-row:focus-within,
+  .editor-layer-virtual-row[data-selected="true"]
+) :where(
+  .editor-layer-row__action,
+  .editor-layer-row__grip
+) {
+  opacity: 1;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__layer-actions {
+  position: absolute;
+  z-index: 8;
+  right: 6px;
+  bottom: 6px;
+  left: 6px;
+  overflow: hidden;
+  border: 1px solid var(--editor-line);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--editor-floating-bg) 94%, transparent);
+  box-shadow: 0 12px 28px rgb(0 0 0 / 0.26);
+  backdrop-filter: blur(14px);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-actions {
+  border: 0 !important;
+  background: transparent !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"]
+  .editor-document-panel__tab-panel--layers:has(.editor-document-panel__layer-actions)
+  .editor-document-panel__layer-list {
+  padding-bottom: 80px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-actions__selection {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border-bottom: 1px solid var(--editor-line-soft);
+  padding: 3px 5px 3px 8px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-actions__label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--editor-muted);
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-actions__label strong {
+  color: var(--editor-accent-strong);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 9px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-actions__selection-tools {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-action {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--editor-text-dim);
+  padding: 0;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-action:hover:not(:disabled, .is-disabled) {
+  border-color: var(--editor-line);
+  background: var(--editor-control-hover-bg);
+  color: var(--editor-text);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-action:focus-visible {
+  outline: 2px solid var(--editor-accent);
+  outline-offset: -1px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-action:is(:disabled, .is-disabled) {
+  cursor: not-allowed;
+  opacity: 0.32;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-actions__tools {
+  display: flex !important;
+  min-width: 0;
+  height: 38px;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  background: color-mix(in srgb, var(--editor-panel) 84%, transparent);
+  padding: 4px 5px;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-actions__tools::-webkit-scrollbar {
+  display: none;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-actions__divider {
+  width: 1px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin-inline: 2px;
+  background: var(--editor-line);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-action--delete {
+  color: var(--danger);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-layer-action--delete:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--editor-line));
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.atelier-editor[data-editor-design="floating-studio"]
+  .editor-document-panel__tab-panel--assets:not([hidden]) {
+  display: grid !important;
+  grid-template-rows: minmax(0, 3fr) minmax(0, 2fr);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__asset-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  flex: none !important;
+  flex-direction: column;
+  overflow: hidden !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] :where(
+  .editor-document-panel__source-list,
+  .editor-document-panel__library-scroll
+) {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-source-card {
+  min-height: 56px;
+  grid-template-columns: 42px minmax(0, 1fr) 26px !important;
+  gap: 8px !important;
+  padding: 6px 10px !important;
+  transition:
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-source-card > :first-child {
+  width: 42px !important;
+  height: 42px !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-source-card:hover {
+  transform: translateX(2px);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-source-card[data-selected="true"] {
+  box-shadow: inset 3px 0 var(--editor-accent);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__library-scroll {
+  padding: 8px !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__library-scroll > div {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__clipart-list {
+  display: grid;
+  gap: 2px;
+  border: 0 !important;
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__tabpanel {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__tabpanel.hidden {
+  display: none !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__tabpanel--layers {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.atelier-editor[data-editor-design="floating-studio"]
+  .editor-document-panel__tabpanel--layers
+  .editor-document-panel__layers {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.atelier-editor[data-editor-design="floating-studio"]
+  .editor-document-panel__tabpanel--layers
+  .editor-document-panel__layers
+  > :last-child {
+  min-height: 0;
+  max-height: none !important;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.atelier-editor[data-editor-design="floating-studio"]
+  .editor-document-panel__tabpanel--layers
+  .editor-document-panel__layers
+  [class*="max-h-"] {
+  max-height: none !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-document-panel__tabpanel--assets {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-assets-split {
+  display: grid;
+  min-height: 0;
+  height: 100%;
+  grid-template-rows: minmax(150px, 0.9fr) minmax(180px, 1.1fr);
+  overflow: hidden;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-assets-pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-bottom: 1px solid var(--editor-line-soft);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-assets-pane:last-child {
+  border-bottom: 0;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] :where(
+  .editor-assets-pane__scroll,
+  .editor-assets-pane > [class*="overflow-y-auto"],
+  .editor-assets-pane > [class*="scrollbar-thin"]
+) {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Inspector: 44px mode rail, context deck, focus shelf, and flat sections    */
+/* -------------------------------------------------------------------------- */
+
+.atelier-editor[data-editor-design="floating-studio"] .atelier-inspector {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden !important;
+  background: var(--editor-panel);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .atelier-inspector .editor-inspector__content {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  padding: 0 !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__layout {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  grid-template-columns: 44px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__mode-rail {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  overflow: visible;
+  border-right: 1px solid var(--editor-line-soft);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--editor-panel-2) 88%, var(--editor-panel)), var(--editor-panel));
+  padding: 6px 4px;
+  scrollbar-width: none;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__mode-rail::-webkit-scrollbar {
+  display: none;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__mode-button {
+  position: relative;
+  display: grid;
+  width: 36px;
+  height: 40px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--editor-muted);
+  padding: 0;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__mode-button:hover {
+  border-color: var(--editor-line);
+  background: var(--editor-control-hover-bg);
+  color: var(--editor-text);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__mode-button[aria-selected="true"] {
+  border-color: color-mix(in srgb, var(--editor-accent) 52%, var(--editor-line));
+  background: var(--editor-accent-soft);
+  color: var(--editor-accent-strong);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__mode-button:focus-visible {
+  outline: 2px solid var(--editor-accent);
+  outline-offset: 1px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__mode-icon {
+  display: grid;
+  place-items: center;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__mode-indicator {
+  position: absolute;
+  top: 50%;
+  left: -4px;
+  width: 2px;
+  height: 16px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: var(--editor-accent);
+  opacity: 0;
+}
+
+.atelier-editor[data-editor-design="floating-studio"]
+  .editor-inspector__mode-button[aria-selected="true"]
+  .editor-inspector__mode-indicator {
+  opacity: 1;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__mode-label {
+  position: absolute;
+  z-index: 12;
+  top: 50%;
+  left: calc(100% + 10px);
+  width: max-content;
+  max-width: 160px;
+  transform: translateY(-50%) translateX(-4px);
+  border: 1px solid var(--editor-line);
+  border-radius: 7px;
+  background: var(--editor-floating-bg);
+  box-shadow: var(--studio-chip-shadow);
+  color: var(--editor-text);
+  padding: 6px 8px;
+  font-size: 9px;
+  font-weight: 680;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.atelier-editor[data-editor-design="floating-studio"]
+  .editor-inspector__mode-button:hover
+  .editor-inspector__mode-label,
+.atelier-editor[data-editor-design="floating-studio"]
+  .editor-inspector__mode-button:focus-visible
+  .editor-inspector__mode-label {
+  transform: translateY(-50%) translateX(0);
+  opacity: 1;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__deck {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__context-header {
+  display: flex;
+  min-width: 0;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--editor-line-soft);
+  background: color-mix(in srgb, var(--editor-panel) 96%, transparent);
+  padding: 9px 11px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__context-copy {
+  min-width: 0;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__context-kicker {
+  display: block;
+  color: var(--editor-accent);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 7px;
+  font-weight: 740;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__context-title {
+  overflow: hidden;
+  margin-top: 2px;
+  color: var(--editor-text);
+  font-size: 13px;
+  font-weight: 720;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__context-description {
+  overflow: hidden;
+  margin-top: 2px;
+  color: var(--editor-muted);
+  font-size: 9px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__context-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .atelier-inspector .editor-inspector__body,
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__panel-host {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden !important;
+  padding: 0 !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__tab-panel {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__tab-panel.hidden {
+  display: none !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__tab-panel:not(.hidden) {
+  display: grid !important;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0 !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__focus-shelf {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  border: 0 !important;
+  border-bottom: 1px solid var(--editor-line-soft) !important;
+  border-radius: 0 !important;
+  background:
+    linear-gradient(
+      145deg,
+      color-mix(in srgb, var(--editor-accent-soft) 38%, var(--editor-panel-2)),
+      var(--editor-panel) 64%
+    ) !important;
+  padding: 10px;
+  box-shadow: 0 8px 20px rgb(0 0 0 / 0.08) !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__focus-shelf:empty {
+  display: none;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__sections {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  align-content: start;
+  gap: var(--workbench-section-gap);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--editor-panel);
+  padding: 8px 10px 14px;
+  scrollbar-width: thin;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__selection-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__focus-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] :where(
+  .editor-inspector__focus-heading,
+  .editor-inspector__selection-identity
+) h3 {
+  overflow: hidden;
+  margin-top: 2px;
+  color: var(--editor-text);
+  font-size: 13px;
+  font-weight: 720;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__focus-kicker {
+  display: block;
+  color: var(--editor-accent-strong);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 7px;
+  font-weight: 740;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__selection-status {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 5px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--editor-panel);
+  color: var(--editor-muted);
+  padding: 2px 7px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 8px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__selection-status::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__selection-status[data-status="ready"] {
+  color: var(--editor-success);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__selection-status[data-status="error"] {
+  color: var(--danger);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__focus-footer {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__create-mode {
+  width: min(136px, 46%);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__focus-primary {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__tool-focus {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding-block: 2px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__tool-focus strong {
+  color: var(--editor-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__tool-focus > span:last-child {
+  color: var(--editor-muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__place-action {
+  min-width: 92px;
+  height: 38px;
+  border: 1px solid var(--editor-accent);
+  border-radius: 8px;
+  background: var(--editor-accent);
+  box-shadow: 0 7px 16px color-mix(in srgb, var(--editor-accent) 18%, transparent);
+  color: var(--editor-on-accent);
+  padding-inline: 10px;
+  font-size: 9px;
+  font-weight: 720;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__place-action[data-active="true"] {
+  background: color-mix(in srgb, var(--editor-accent) 70%, var(--editor-panel));
+  box-shadow:
+    0 0 0 2px var(--editor-accent-soft),
+    0 7px 16px color-mix(in srgb, var(--editor-accent) 22%, transparent);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__place-action:disabled {
+  border-color: var(--editor-line);
+  background: var(--editor-panel-2);
+  box-shadow: none;
+  color: var(--editor-muted);
+  opacity: 0.55;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__wide-action {
+  display: inline-flex;
+  width: 100%;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--editor-line);
+  border-radius: 8px;
+  background: var(--editor-panel-2);
+  color: var(--editor-text-dim);
+  padding: 7px 10px;
+  font-size: 10px;
+  font-weight: 670;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__wide-action:hover {
+  border-color: var(--editor-accent);
+  background: var(--editor-accent-soft);
+  color: var(--editor-accent-strong);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__hint {
+  color: var(--editor-muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-field {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-field__label {
+  color: var(--editor-text-dim);
+  font-size: 9px;
+  font-weight: 640;
+  line-height: 1.25;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-object-properties {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"]
+  .editor-object-properties
+  > .editor-object-properties {
+  display: contents;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-object-properties__sides {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-object-properties__side {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--editor-line-soft);
+  border-radius: 7px;
+  background: var(--editor-panel);
+  color: var(--editor-text-dim);
+  padding: 6px 8px;
+  font-size: 9px;
+  font-weight: 630;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-object-properties__side input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--editor-accent);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-object-properties__actions .ui-btn-icon,
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-action-strip .ui-btn-icon {
+  width: auto;
+  min-width: 36px;
+  height: 36px;
+  border-color: var(--editor-line);
+  border-radius: 8px;
+  background: var(--editor-panel);
+  color: var(--editor-text-dim);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-object-properties__actions .ui-btn-icon:hover,
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-action-strip .ui-btn-icon:hover {
+  border-color: var(--editor-accent);
+  background: var(--editor-accent-soft);
+  color: var(--editor-accent-strong);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-color-field {
+  overflow: hidden;
+  border-color: var(--editor-line-soft) !important;
+  border-radius: 8px !important;
+  background: var(--editor-panel) !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-color-field__trigger {
+  min-height: 38px;
+  color: var(--editor-text-dim);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-color-field__palette {
+  border-color: var(--editor-line-soft) !important;
+  background: color-mix(in srgb, var(--editor-panel-2) 72%, var(--editor-panel));
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-transparent-checker {
+  background-color: var(--artboard-bg);
+  background-image:
+    linear-gradient(
+      45deg,
+      color-mix(in srgb, var(--editor-text) 16%, transparent) 25%,
+      transparent 25%
+    ),
+    linear-gradient(
+      -45deg,
+      color-mix(in srgb, var(--editor-text) 16%, transparent) 25%,
+      transparent 25%
+    ),
+    linear-gradient(
+      45deg,
+      transparent 75%,
+      color-mix(in srgb, var(--editor-text) 16%, transparent) 75%
+    ),
+    linear-gradient(
+      -45deg,
+      transparent 75%,
+      color-mix(in srgb, var(--editor-text) 16%, transparent) 75%
+    );
+  background-position:
+    0 0,
+    0 5px,
+    5px -5px,
+    -5px 0;
+  background-size: 10px 10px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__shape-kind {
+  min-height: 36px;
+  border: 1px solid var(--editor-line-soft);
+  border-radius: 8px;
+  background: var(--editor-panel);
+  color: var(--editor-text-dim);
+  padding: 6px 8px;
+  font-size: 9px;
+  font-weight: 670;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    color 140ms ease,
+    transform 140ms ease;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__shape-kind:hover {
+  transform: translateY(-1px);
+  border-color: var(--editor-line);
+  background: var(--editor-control-hover-bg);
+  color: var(--editor-text);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__shape-kind[data-active="true"] {
+  border-color: var(--editor-accent);
+  background: var(--editor-accent-soft);
+  color: var(--editor-accent-strong);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__placement-preview {
+  overflow: hidden;
+  border: 1px solid var(--editor-line-soft);
+  border-radius: 10px;
+  background: var(--editor-panel);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__placement-stage {
+  display: grid;
+  height: 96px;
+  place-items: center;
+  background:
+    linear-gradient(45deg, var(--editor-panel-2) 25%, transparent 25%) 0 0 / 12px 12px,
+    linear-gradient(-45deg, var(--editor-panel-2) 25%, transparent 25%) 0 6px / 12px 12px,
+    var(--editor-panel);
+  padding: 10px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__upload-action,
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__secondary-action {
+  display: inline-flex;
+  width: 100%;
+  min-height: 36px;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--editor-line);
+  border-radius: 8px;
+  background: var(--editor-panel);
+  color: var(--editor-text-dim);
+  padding: 6px 10px;
+  font-size: 9px;
+  font-weight: 670;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] :where(
+  .editor-inspector__upload-action,
+  .editor-inspector__secondary-action
+):hover {
+  border-color: var(--editor-accent);
+  background: var(--editor-accent-soft);
+  color: var(--editor-accent-strong);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__secondary-action.is-danger {
+  color: var(--danger);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] :where(
+  .editor-inspector__upload-action,
+  .editor-inspector__secondary-action
+):has(:disabled),
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__secondary-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__clipart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__clipart-tile {
+  display: grid;
+  min-width: 0;
+  min-height: 58px;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--editor-line-soft);
+  border-radius: 8px;
+  background: var(--editor-panel);
+  padding: 6px;
+  text-align: left;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__clipart-tile:hover {
+  border-color: var(--editor-line);
+  background: var(--editor-control-hover-bg);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__clipart-tile[data-selected="true"] {
+  border-color: var(--editor-accent);
+  background: var(--editor-accent-soft);
+  color: var(--editor-accent-strong);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__clipart-tile > :last-child:is(svg) {
+  display: none;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__palette-list {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--editor-line-soft);
+  border-radius: 9px;
+  background: var(--editor-panel);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__palette-row {
+  display: grid;
+  min-width: 0;
+  min-height: 42px;
+  grid-template-columns: 24px minmax(0, 1fr) auto 24px;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--editor-line-soft);
+  padding: 6px 8px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__palette-row:last-child {
+  border-bottom: 0;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__palette-swatch {
+  width: 24px;
+  height: 24px;
+  border: 1px solid color-mix(in srgb, var(--editor-text) 22%, transparent);
+  border-radius: 7px;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.12);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__palette-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__palette-copy strong {
+  overflow: hidden;
+  color: var(--editor-text);
+  font-size: 9px;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__palette-copy span,
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__palette-count {
+  color: var(--editor-muted);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 8px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__palette-count {
+  white-space: nowrap;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector__palette-lock {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--editor-panel-2);
+  color: var(--editor-muted);
+}
+
+/* Flat sections make the focus shelf the primary surface instead of stacking
+   nested cards inside a narrow inspector. */
+.atelier-editor[data-editor-design="floating-studio"] .atelier-inspector .editor-inspector-group,
+.atelier-editor[data-editor-design="floating-studio"]
+  .atelier-inspector
+  .editor-inspector-group[data-priority="primary"],
+.atelier-editor[data-editor-design="floating-studio"]
+  .atelier-inspector
+  .editor-inspector-group[data-priority="quiet"] {
+  overflow: visible;
+  border: 0 !important;
+  border-bottom: 1px solid var(--editor-line-soft) !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  padding: 10px 2px 12px !important;
+  box-shadow: none !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"]
+  .atelier-inspector
+  .editor-inspector-group:last-child {
+  border-bottom: 0 !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-group__header {
+  align-items: center;
+  margin-bottom: 9px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-group__description {
+  margin-top: 2px;
+  font-size: 9px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-group__body {
+  display: grid;
+  min-width: 0;
+  gap: 9px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-row {
+  min-width: 0;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-row[data-layout="inline"] {
+  display: grid;
+  grid-template-columns: minmax(76px, 94px) minmax(0, 1fr) !important;
+  align-items: center;
+  gap: 9px !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-row[data-layout="stacked"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 6px !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-row__label {
+  min-width: 0;
+  color: var(--editor-text-dim) !important;
+  font-size: 10px !important;
+  font-weight: 620;
+  line-height: 1.25;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-row__control {
+  min-width: 0;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-field-grid {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-field-grid[data-columns="1"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-field-grid[data-columns="2"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-field-grid[data-columns="4"] {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-metric-grid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .atelier-inspector :where(
+  input:not([type="checkbox"]):not([type="range"]):not([type="color"]),
+  select,
+  textarea,
+  .editor-inspector-control
+) {
+  min-height: 38px !important;
+  height: 38px;
+  border-color: var(--editor-control-border) !important;
+  border-radius: 8px !important;
+  padding-inline: 10px;
+  font-size: 11px !important;
+  line-height: 1.2;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .atelier-inspector textarea {
+  height: auto;
+  min-height: 72px !important;
+  padding-block: 9px;
+  resize: vertical;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-number-field {
+  min-width: 0;
+  gap: 5px !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-number-field__label {
+  min-height: 0;
+  font-size: 9px !important;
+  line-height: 1.25;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-number-field__control {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  height: 38px;
+  align-items: stretch;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-number-field__control input {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-number-field__control:has(.editor-number-field__unit) input {
+  border-radius: 8px 0 0 8px !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-number-field__unit {
+  display: grid;
+  min-width: 42px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  margin-left: -1px;
+  border: 1px solid var(--editor-control-border);
+  border-radius: 0 8px 8px 0;
+  background: var(--editor-panel);
+  color: var(--editor-muted);
+  padding-inline: 7px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 8px;
+  font-weight: 680;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-unit-control__suffix {
+  height: 38px !important;
+}
+
+.atelier-editor[data-editor-design="floating-studio"] .editor-inspector-action-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(36px, 1fr));
+  gap: 6px;
+  padding-top: 1px;
+}
+
+@container atelier-inspector (max-width: 330px) {
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector-row[data-layout="inline"] {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 6px !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector-field-grid[data-columns="4"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-inspector-metric-grid,
+    .editor-inspector-metrics,
+    .editor-inspector-output-summary
+  ) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container atelier-inspector (max-width: 270px) {
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-inspector-field-grid[data-columns="2"],
+    .editor-inspector-field-grid[data-columns="4"],
+    .editor-inspector-metric-grid,
+    .editor-inspector-metrics,
+    .editor-inspector-output-summary
+  ) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-inspector__context-description {
+    display: none;
+  }
+}
+
+@media (max-height: 720px) and (min-width: 1024px) {
+  .atelier-editor[data-editor-design="floating-studio"] {
+    --editor-command-height: 60px;
+    --studio-panel-inset: 8px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-command-bar {
+    height: 48px !important;
+    margin-block: 6px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail {
+    top: var(--studio-panel-inset) !important;
+    bottom: auto !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-status-bar {
+    bottom: 8px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__stage {
+    padding-top: 58px !important;
+    padding-bottom: 48px !important;
+  }
+}
+
+@media (max-width: 767px) {
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-canvas-panel {
+    position: relative;
+    display: block !important;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-canvas-panel__stage {
+    position: absolute !important;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-status-bar {
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+    display: flex;
+    width: auto;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__primary {
+    position: static;
+    display: flex;
+    min-width: 0;
+    max-width: calc(100% - 104px);
+    flex: 0 1 auto;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__state {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__selection {
+    display: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .editor-status-bar__metrics {
+    position: static;
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+}
+
+@media (max-height: 560px) and (min-width: 768px) {
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail {
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-width: none;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] .atelier-tool-rail .editor-tool-rail__label {
+    display: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-source-card,
+    .editor-layer-virtual-row,
+    .editor-layer-action,
+    .editor-layer-row__action,
+    .editor-layer-row__grip,
+    .editor-inspector__mode-button,
+    .editor-inspector__mode-label,
+    .editor-inspector__place-action,
+    .editor-inspector__shape-kind,
+    .editor-inspector__clipart-tile,
+    .editor-inspector__upload-action,
+    .editor-inspector__secondary-action,
+    .editor-inspector__wide-action,
+    .editor-panel-resizer__grip
+  ) {
+    transition: none !important;
+  }
+
+  .atelier-editor[data-editor-design="floating-studio"] :where(
+    .editor-source-card,
+    .editor-layer-virtual-row,
+    .editor-inspector__shape-kind
+  ):hover {
+    transform: none !important;
+  }
+}

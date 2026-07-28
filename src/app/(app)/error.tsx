@@ -6,8 +6,9 @@ import { Button, EmptyState } from "@/components/ui/primitives";
 
 export default function AppError({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
   return (
-    <main className="grid min-h-[70dvh] place-items-center p-5">
+    <main className="system-state-page">
       <EmptyState
+        className="system-state-card system-state-card--error"
         icon={<AlertTriangle size={28} />}
         title="This workspace could not be loaded"
         description="Your projects are unchanged. Check your connection and try loading this page again."

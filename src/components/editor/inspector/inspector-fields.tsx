@@ -27,6 +27,8 @@ export const NumberField = memo(function NumberField({
   disabled = false,
   readOnly = false,
   hideLabel = false,
+  unit,
+  emphasis = "normal",
   wrapperClassName,
   inputClassName,
   onChange,
@@ -41,12 +43,13 @@ export const NumberField = memo(function NumberField({
   disabled?: boolean;
   readOnly?: boolean;
   hideLabel?: boolean;
+  unit?: string;
+  emphasis?: "primary" | "normal";
   wrapperClassName?: string;
   inputClassName?: string;
   onChange: (value: number) => void;
 }) {
   const [draftValue, setDraftValue] = useState(() => String(value));
-  const [isFocused, setIsFocused] = useState(false);
 
   useEffect(() => {
     setDraftValue(String(value));
@@ -88,39 +91,46 @@ export const NumberField = memo(function NumberField({
   }
 
   return (
-    <label className={wrapperClassName ?? "grid min-w-0 gap-1.5"}>
-      <span className={hideLabel ? "sr-only" : "text-xs font-semibold text-[#8592a6]"}>
+    <label
+      className={`editor-number-field ${wrapperClassName ?? "grid min-w-0 gap-1.5"}`}
+      data-emphasis={emphasis}
+      data-read-only={readOnly ? "true" : undefined}
+    >
+      <span className={hideLabel ? "sr-only" : "editor-number-field__label text-xs font-semibold text-[var(--editor-text-dim)]"}>
         {label}
       </span>
-      <input
-        type="number"
-        inputMode={allowDecimalInput || step < 1 ? "decimal" : "numeric"}
-        step={step}
-        value={draftValue}
-        disabled={disabled}
-        readOnly={readOnly}
-        aria-readonly={readOnly || undefined}
-        onFocus={() => setIsFocused(true)}
-        onBlur={() => {
-          setIsFocused(false);
-          if (!readOnly) commitDraft();
-        }}
-        onChange={(event) => {
-          if (readOnly) return;
-          const nextValue = event.target.value;
-          const parsed = parseDraft(nextValue);
-          setDraftValue(nextValue);
-          if (parsed === null) return;
-          const clamped = Math.max(min, Math.min(max, parsed));
-          const normalized = normalizeSteppedValue(clamped);
-          if (normalized !== parsed) setDraftValue(String(normalized));
-          onChange(normalized);
-        }}
-        className={
-          inputClassName ??
-          `h-10 w-full min-w-0 rounded-md border border-[var(--line)] bg-[#141b28] px-3 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-teal-100 disabled:bg-slate-100 disabled:text-[#6b7688]${readOnly ? " cursor-default" : ""}`
-        }
-      />
+      <span className="editor-number-field__control">
+        <input
+          type="number"
+          inputMode={allowDecimalInput || step < 1 ? "decimal" : "numeric"}
+          min={min}
+          max={max}
+          step={step}
+          value={draftValue}
+          disabled={disabled}
+          readOnly={readOnly}
+          aria-readonly={readOnly || undefined}
+          onBlur={() => {
+            if (!readOnly) commitDraft();
+          }}
+          onChange={(event) => {
+            if (readOnly) return;
+            const nextValue = event.target.value;
+            const parsed = parseDraft(nextValue);
+            setDraftValue(nextValue);
+            if (parsed === null) return;
+            const clamped = Math.max(min, Math.min(max, parsed));
+            const normalized = normalizeSteppedValue(clamped);
+            if (normalized !== parsed) setDraftValue(String(normalized));
+            onChange(normalized);
+          }}
+          className={`editor-number-field__input ${
+            inputClassName ??
+            `h-10 w-full min-w-0 rounded-md border border-[var(--editor-control-border)] bg-[var(--editor-panel)] px-3 text-sm text-[var(--editor-text)] outline-none disabled:bg-[var(--editor-panel-2)] disabled:text-[var(--editor-muted)]${readOnly ? " cursor-default" : ""}`
+          }`}
+        />
+        {unit ? <span className="editor-number-field__unit">{unit}</span> : null}
+      </span>
     </label>
   );
 });
@@ -132,6 +142,8 @@ export const ColorPresetField = memo(function ColorPresetField({
   colors = PRESET_GRAPH_COLORS,
   allowTransparent = false,
   normalizeColor = normalizeCanvasColor,
+  expanded,
+  onExpandedChange,
 }: {
   label: string;
   value: string;
@@ -139,35 +151,46 @@ export const ColorPresetField = memo(function ColorPresetField({
   colors?: readonly { name: string; hex: string }[];
   allowTransparent?: boolean;
   normalizeColor?: (value: unknown) => string;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = expanded ?? internalOpen;
   const normalizedValue = allowTransparent ? normalizeCanvasFillColor(value) : normalizeColor(value);
   const transparentSelected = isTransparentFillColor(normalizedValue);
 
+  function setOpen(nextOpen: boolean) {
+    if (onExpandedChange) {
+      onExpandedChange(nextOpen);
+      return;
+    }
+    setInternalOpen(nextOpen);
+  }
+
   return (
-    <div className="min-w-0 rounded-md border border-[#2a3344] bg-[#141b28]">
+    <div className="editor-color-field min-w-0 rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel)]" data-expanded={open ? "true" : "false"}>
       <button
         type="button"
-        onClick={() => setOpen((current) => !current)}
-        className="flex h-10 w-full min-w-0 items-center justify-between gap-2 px-2.5 text-left"
+        onClick={() => setOpen(!open)}
+        className="editor-color-field__trigger flex h-10 w-full min-w-0 items-center justify-between gap-2 px-2.5 text-left"
         aria-expanded={open}
       >
-        <span className="min-w-0 truncate text-xs font-semibold text-[#8592a6]">{label}</span>
+        <span className="min-w-0 truncate text-xs font-semibold text-[var(--editor-text-dim)]">{label}</span>
         <span className="ml-auto inline-flex min-w-0 items-center gap-2">
           <ColorSummary value={normalizedValue} />
-          <span className="max-w-24 truncate font-mono text-[11px] font-semibold text-[#9aa7ba]">
+          <span className="max-w-24 truncate font-mono text-[11px] font-semibold text-[var(--editor-muted)]">
             {transparentSelected ? "Transparent" : normalizedValue.toUpperCase()}
           </span>
           {open ? (
-            <ChevronDown size={14} className="shrink-0 text-[#9aa7ba]" aria-hidden="true" />
+            <ChevronDown size={14} className="shrink-0 text-[var(--editor-muted)]" aria-hidden="true" />
           ) : (
-            <ChevronRight size={14} className="shrink-0 text-[#9aa7ba]" aria-hidden="true" />
+            <ChevronRight size={14} className="shrink-0 text-[var(--editor-muted)]" aria-hidden="true" />
           )}
         </span>
       </button>
       {open ? (
-        <div className="grid min-w-0 gap-2 border-t border-[#232c3c] p-2">
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(1.75rem,1fr))] gap-1.5">
+        <div className="editor-color-field__palette grid min-w-0 gap-2 border-t border-[var(--editor-line-soft)] p-2">
+          <div className="editor-color-field__swatches grid grid-cols-[repeat(auto-fit,minmax(1.75rem,1fr))] gap-1.5">
             {colors.map((color) => {
               const selected = color.hex === normalizedValue;
               return (
@@ -175,7 +198,7 @@ export const ColorPresetField = memo(function ColorPresetField({
                   key={`${label}-${color.hex}`}
                   type="button"
                   onClick={() => onChange(color.hex)}
-                  className={`h-7 rounded-sm border ${selected ? "border-[#0b0f16] ring-2 ring-slate-300" : "border-[#2a3344]"}`}
+                  className={`editor-color-field__swatch h-7 rounded-sm border ${selected ? "border-[var(--editor-text)] ring-2 ring-[var(--editor-accent-soft)]" : "border-[var(--editor-line)]"}`}
                   style={{ backgroundColor: color.hex }}
                   title={color.name}
                   aria-label={`${label}: ${color.name}`}
@@ -186,7 +209,7 @@ export const ColorPresetField = memo(function ColorPresetField({
               <button
                 type="button"
                 onClick={() => onChange(TRANSPARENT_FILL_COLOR)}
-                className={`h-7 rounded-sm border bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:10px_10px] bg-[position:0_0,0_5px,5px_-5px,-5px_0] ${transparentSelected ? "border-[#0b0f16] ring-2 ring-slate-300" : "border-[#2a3344]"}`}
+                className={`editor-color-field__swatch editor-transparent-checker h-7 rounded-sm border ${transparentSelected ? "border-[var(--editor-text)] ring-2 ring-[var(--editor-accent-soft)]" : "border-[var(--editor-line)]"}`}
                 title="Transparent"
                 aria-label={`${label}: Transparent`}
               />
@@ -214,11 +237,11 @@ export function CollapsibleSection({
   className?: string;
 }) {
   return (
-    <section className={`border-t border-[var(--line)] pt-3 first:border-t-0 first:pt-0 ${className}`}>
+    <section className={`border-t border-[var(--editor-line)] pt-3 first:border-t-0 first:pt-0 ${className}`}>
       <button
         type="button"
         onClick={onToggle}
-        className="flex w-full items-center justify-between gap-3 text-left text-sm font-semibold text-[#e7edf5]"
+        className="flex w-full items-center justify-between gap-3 text-left text-sm font-semibold text-[var(--editor-text)]"
         aria-expanded={open}
       >
         <span className="min-w-0 truncate">{title}</span>
@@ -232,15 +255,40 @@ export function CollapsibleSection({
   );
 }
 
+export function InspectorDisclosure({
+  title,
+  summary,
+  children,
+  defaultOpen = false,
+}: {
+  title: string;
+  summary?: ReactNode;
+  children: ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  return (
+    <details
+      className="editor-inspector-disclosure"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <span>{title}</span>
+        {summary ? <span className="editor-inspector-disclosure__summary">{summary}</span> : null}
+        <ChevronRight className="editor-inspector-disclosure__chevron" size={15} aria-hidden="true" />
+      </summary>
+      <div className="editor-inspector-disclosure__body">{children}</div>
+    </details>
+  );
+}
+
 export function ColorSummary({ value }: { value: string }) {
   const transparent = isTransparentFillColor(value);
   return (
     <span
-      className={`h-5 w-5 rounded-sm border border-[#2a3344] ${
-        transparent
-          ? "bg-[linear-gradient(45deg,#cbd5e1_25%,transparent_25%),linear-gradient(-45deg,#cbd5e1_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#cbd5e1_75%),linear-gradient(-45deg,transparent_75%,#cbd5e1_75%)] bg-[length:8px_8px] bg-[position:0_0,0_4px,4px_-4px,-4px_0]"
-          : ""
-      }`}
+      className={`h-5 w-5 rounded-sm border border-[var(--editor-line)] ${transparent ? "editor-transparent-checker" : ""}`}
       style={transparent ? undefined : { backgroundColor: value }}
       aria-hidden="true"
     />
@@ -287,7 +335,7 @@ export const ShapePreviewSvg = memo(function ShapePreviewSvg({
 
   return (
     <svg viewBox="0 0 120 90" className={className} role="img" aria-label={GRAPH_SHAPE_KIND_LABELS[kind] ?? "Shape preview"}>
-      <rect x="1" y="1" width="118" height="88" rx="5" fill="#ffffff" stroke="#232c3c" />
+      <rect x="1" y="1" width="118" height="88" rx="5" fill="var(--artboard-bg)" stroke="var(--editor-line)" />
       {circleLike ? (
         <ellipse
           cx={left + width / 2}
@@ -335,7 +383,7 @@ export function InspectorSegmented({
 }) {
   return (
     <div
-      className="grid rounded-md border border-[#2a3344] bg-[#161f2e] p-0.5"
+      className="grid rounded-md border border-[var(--editor-line)] bg-[var(--editor-panel-2)] p-0.5"
       style={{ gridTemplateColumns: `repeat(${Math.max(1, options.length)}, minmax(0, 1fr))` }}
       role="group"
       aria-label={label}
@@ -345,8 +393,9 @@ export function InspectorSegmented({
           key={option.value}
           type="button"
           onClick={() => onChange(option.value)}
+          aria-pressed={option.value === value}
           className={`inline-flex h-8 min-w-0 items-center justify-center gap-1 rounded text-[12px] font-semibold ${
-            option.value === value ? "bg-[#008c8f] text-white shadow-sm" : "text-[#9aa7ba] hover:bg-[#1b2433]"
+            option.value === value ? "bg-[var(--editor-accent)] text-[var(--editor-on-accent)] shadow-sm" : "text-[var(--editor-muted)] hover:bg-[var(--editor-control-hover-bg)]"
           }`}
         >
           {option.icon}

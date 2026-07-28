@@ -1,45 +1,46 @@
-import { useId } from "react";
-
 export function LogoMark({ className = "h-10 w-10" }: { className?: string }) {
-  const gradientId = useId();
-  const glowId = useId();
-
   return (
-    <svg viewBox="0 0 64 64" role="img" aria-label="Graph Pixel Maker" className={className}>
-      <defs>
-        <linearGradient id={gradientId} x1="8" y1="4" x2="56" y2="60" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#0F172A" />
-          <stop offset="1" stopColor="#122C3A" />
-        </linearGradient>
-        <linearGradient id={glowId} x1="14" y1="14" x2="50" y2="50" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#2DD4BF" />
-          <stop offset="1" stopColor="#008C8F" />
-        </linearGradient>
-      </defs>
-      <rect x="2" y="2" width="60" height="60" rx="16" fill={"url(#" + gradientId + ")"} />
-      <path d="M14 16H50M14 27H50M14 38H50M14 49H50M16 14V50M27 14V50M38 14V50M49 14V50" stroke="#FFFFFF" strokeOpacity=".08" strokeWidth="1" />
-      <g fill={"url(#" + glowId + ")"}>
-        <rect x="15" y="15" width="8" height="8" rx="2.25" />
-        <rect x="26" y="15" width="8" height="8" rx="2.25" />
-        <rect x="37" y="15" width="8" height="8" rx="2.25" />
-        <rect x="15" y="26" width="8" height="8" rx="2.25" />
-        <rect x="15" y="37" width="8" height="8" rx="2.25" />
-        <rect x="26" y="37" width="8" height="8" rx="2.25" />
-        <rect x="37" y="37" width="8" height="8" rx="2.25" />
-      </g>
-      <rect x="37" y="26" width="8" height="8" rx="2.25" fill="#F8FAFC" />
-      <circle cx="49" cy="15" r="3" fill="#F59E0B" />
+    <svg
+      viewBox="0 0 48 48"
+      aria-hidden="true"
+      focusable="false"
+      className={`brand-mark__logo ${className}`}
+    >
+      <rect x="2" y="2" width="44" height="44" rx="13" fill="#1C2230" />
+      <path
+        d="M12 8V40M20 8V40M28 8V40M36 8V40M8 12H40M8 20H40M8 28H40M8 36H40"
+        fill="none"
+        stroke="#FFFFFF"
+        strokeOpacity=".09"
+        strokeWidth=".8"
+      />
+      <path
+        d="M10 34.5C13.5 34.5 14.5 27 18 27C21.5 27 22.5 31 26 31C30.5 31 30.5 16 36 16H39"
+        fill="none"
+        stroke="#8DA8FF"
+        strokeWidth="3.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <rect x="7.5" y="32" width="5" height="5" rx="1.4" fill="#F7F7F9" />
+      <rect x="23.5" y="28.5" width="5" height="5" rx="1.4" fill="#ED6548" />
+      <rect x="33.5" y="13.5" width="5" height="5" rx="1.4" fill="#8DA8FF" />
+      <circle cx="40" cy="16" r="2.4" fill="#ED6548" />
     </svg>
   );
 }
 
 export function BrandMark() {
   return (
-    <div className="flex min-w-0 items-center gap-3">
+    <div className="brand-mark flex min-w-0 items-center gap-3">
       <LogoMark className="h-9 w-9 shrink-0" />
-      <div className="min-w-0">
-        <p className="truncate text-[15px] font-semibold leading-5 tracking-[-0.015em] text-[var(--brand-text,var(--ink))]">Graph Pixel Maker</p>
-        <p className="truncate text-[9px] font-bold uppercase tracking-[0.14em] text-[var(--brand-muted,#64748b)]">Precision graph studio</p>
+      <div className="brand-mark__copy min-w-0">
+        <p className="brand-mark__title truncate text-[15px] font-semibold leading-5 tracking-[-0.015em] text-[var(--brand-text,var(--ink))]">
+          Graph Pixel Maker
+        </p>
+        <p className="brand-mark__tagline truncate text-[9px] font-bold uppercase tracking-[0.14em] text-[var(--brand-muted,var(--muted))]">
+          Visual chart atelier
+        </p>
       </div>
     </div>
   );

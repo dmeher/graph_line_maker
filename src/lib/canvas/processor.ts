@@ -4,7 +4,7 @@ import { maskFromImageData, maskFromVectorizedImageData, type ImageDataLike } fr
 import { fillRegionNumberForRender, mergeLayerPixelMasks } from "@/lib/canvas/layer-mask-merge";
 import { isPdfSource, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
 import { createEnclosedRegionMask, createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
-import { createStableFillRegionId } from "@/lib/canvas/fill-region-identity";
+import { createLegacyCardinalFillRegionId, createStableFillRegionId } from "@/lib/canvas/fill-region-identity";
 import { generatedShapeFillColorAtPoint } from "@/lib/canvas/generated-artwork";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import {
@@ -44,6 +44,8 @@ export type FillRegion = {
   mapId: number;
   /** Numeric IDs from projects saved before layer-scoped fill keys existed. */
   legacyId?: string;
+  /** Read-time aliases for earlier scoped-ID calculations; never newly persisted. */
+  fallbackIds?: readonly string[];
   /** Base color before a persisted per-region override is applied. */
   defaultColor?: string;
   color: string;
@@ -77,6 +79,12 @@ export type VectorizerSourcePlacement = {
 export type VectorizerSource = {
   canvas: HTMLCanvasElement;
   placement: VectorizerSourcePlacement;
+  /**
+   * The source's immutable artwork frame. Destructive edits operate on a
+   * working canvas, but must never cause the placed source to be re-cropped
+   * and fitted into a different box.
+   */
+  contentBounds?: ContentBounds;
 };
 
 export type FittedImageLayer = {
@@ -719,12 +727,31 @@ function placeSourceCanvasImageData(
   };
 }
 
+function placementContentBounds(canvas: CanvasLike, stableBounds?: ContentBounds): ContentBounds {
+  if (
+    stableBounds
+    && Number.isFinite(stableBounds.x)
+    && Number.isFinite(stableBounds.y)
+    && Number.isFinite(stableBounds.width)
+    && Number.isFinite(stableBounds.height)
+    && stableBounds.x >= 0
+    && stableBounds.y >= 0
+    && stableBounds.width > 0
+    && stableBounds.height > 0
+    && stableBounds.x + stableBounds.width <= canvas.width
+    && stableBounds.y + stableBounds.height <= canvas.height
+  ) {
+    return stableBounds;
+  }
+  return findContentBounds(canvas);
+}
+
 function placeVectorizedSourceImageData(
   vectorizedImageData: ImageDataLike,
-  sourceCanvas: HTMLCanvasElement,
   placement: VectorizerSourcePlacement,
   outputWidth: number,
   outputHeight: number,
+  stableBounds?: ContentBounds,
 ) {
   const nativeImageData = nativeImageDataFrom(vectorizedImageData);
   if (!nativeImageData) return null;
@@ -733,7 +760,13 @@ function placeVectorizedSourceImageData(
   const vectorizedContext = getProcessingContext(vectorizedCanvas, { willReadFrequently: true });
   if (!vectorizedContext) return null;
   vectorizedContext.putImageData(nativeImageData, 0, 0);
-  return placeSourceCanvasImageData(vectorizedCanvas, findContentBounds(sourceCanvas), placement, outputWidth, outputHeight);
+  return placeSourceCanvasImageData(
+    vectorizedCanvas,
+    placementContentBounds(vectorizedCanvas, stableBounds),
+    placement,
+    outputWidth,
+    outputHeight,
+  );
 }
 
 function placeSourceImageData(
@@ -741,8 +774,15 @@ function placeSourceImageData(
   placement: VectorizerSourcePlacement,
   outputWidth: number,
   outputHeight: number,
+  stableBounds?: ContentBounds,
 ) {
-  return placeSourceCanvasImageData(sourceCanvas, findContentBounds(sourceCanvas), placement, outputWidth, outputHeight);
+  return placeSourceCanvasImageData(
+    sourceCanvas,
+    placementContentBounds(sourceCanvas, stableBounds),
+    placement,
+    outputWidth,
+    outputHeight,
+  );
 }
 
 async function buildLayerArtworkMasksAsync(
@@ -807,7 +847,13 @@ async function buildLayerArtworkMasksAsync(
   }
 
   function fallbackMasks() {
-    const placedSource = placeSourceImageData(vectorizerSource!.canvas, vectorizerSource!.placement, width, height);
+    const placedSource = placeSourceImageData(
+      vectorizerSource!.canvas,
+      vectorizerSource!.placement,
+      width,
+      height,
+      vectorizerSource!.contentBounds,
+    );
     if (placedSource) return resultFromPlaced(placedSource);
     if (!fallbackImageData) return null;
     const masks = buildArtworkMasks(fallbackImageData, layer.settings);
@@ -836,10 +882,10 @@ async function buildLayerArtworkMasksAsync(
 
   const placedImage = placeVectorizedSourceImageData(
     vectorized.imageData,
-    vectorizerSource.canvas,
     vectorizerSource.placement,
     width,
     height,
+    vectorizerSource.contentBounds,
   );
   if (!placedImage) return fallbackMasks();
   const placedInk = maskFromVectorizedImageData(placedImage.imageData);
@@ -856,7 +902,12 @@ function colorForRegion(settings: GraphSettings, region: FillRegion) {
   const customColor = settings.fillRegions?.[region.id];
   if (customColor && isFillColor(customColor)) return customColor;
   const legacyColor = region.legacyId ? settings.fillRegions?.[region.legacyId] : undefined;
-  return legacyColor && isFillColor(legacyColor) ? legacyColor : region.color;
+  if (legacyColor && isFillColor(legacyColor)) return legacyColor;
+  for (const fallbackId of region.fallbackIds ?? []) {
+    const fallbackColor = settings.fillRegions?.[fallbackId];
+    if (fallbackColor && isFillColor(fallbackColor)) return fallbackColor;
+  }
+  return region.color;
 }
 
 function labelFillRegions(fillLayers: FillMaskLayer[], width: number, height: number, settings: GraphSettings) {
@@ -1674,11 +1725,22 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
         centerY,
         placement: layer.vectorizerSource?.placement,
       });
+      const placement = layer.vectorizerSource?.placement;
+      const legacyCardinalId = placement && normalizeRotationDegrees(placement.rotationDegrees) % 90 !== 0
+        ? createLegacyCardinalFillRegionId({
+            layerId: layer.id ?? `layer:${layerIndex}`,
+            kind: region.kind,
+            centerX,
+            centerY,
+            placement,
+          })
+        : stableId;
       regions.push({
         ...region,
         id: stableId,
         mapId: nextRegionId,
         legacyId,
+        fallbackIds: legacyCardinalId !== stableId ? [legacyCardinalId] : undefined,
         centerX,
         centerY,
         color: defaultFillColorForRegion(layer.settings, region.kind),
@@ -1872,11 +1934,22 @@ export async function pixelateLayeredCanvasesAsync(
         centerY,
         placement: layer.vectorizerSource?.placement,
       });
+      const placement = layer.vectorizerSource?.placement;
+      const legacyCardinalId = placement && normalizeRotationDegrees(placement.rotationDegrees) % 90 !== 0
+        ? createLegacyCardinalFillRegionId({
+            layerId: layer.id ?? `layer:${layerIndex}`,
+            kind: region.kind,
+            centerX,
+            centerY,
+            placement,
+          })
+        : stableId;
       regions.push({
         ...region,
         id: stableId,
         mapId: nextRegionId,
         legacyId,
+        fallbackIds: legacyCardinalId !== stableId ? [legacyCardinalId] : undefined,
         centerX,
         centerY,
         color: defaultFillColorForRegion(layer.settings, region.kind),

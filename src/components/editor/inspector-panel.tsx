@@ -16,10 +16,7 @@ import {
   ArrowRight,
   ArrowUp,
   Check,
-  ClipboardPaste,
   Copy,
-  FlipHorizontal,
-  FlipVertical,
   Grid3X3,
   ImageIcon,
   Loader2,
@@ -28,8 +25,6 @@ import {
   Palette,
   Printer,
   RefreshCw,
-  RotateCcw,
-  RotateCw,
   Ruler,
   Search,
   Settings2,
@@ -57,6 +52,7 @@ import type {
   GraphCellPaint,
   GraphClipartAsset,
   GraphClipartImage,
+  GraphEraseRegionFill,
   GraphSettings,
   GraphShapeDrawing,
   GraphShapeKind,
@@ -164,6 +160,12 @@ export interface InspectorPanelProps {
   setDraftShapeFillColor: (value: string) => void;
   setPlacingClipartAssetId: (value: string | null | ((prev: string | null) => string | null)) => void;
 
+  lassoFill: GraphEraseRegionFill | "erase";
+  setLassoFill: (value: GraphEraseRegionFill | "erase") => void;
+  lassoVertexCount: number;
+  commitLasso: () => void;
+  cancelLasso: () => void;
+
   draftClipartWidthCm: number;
   draftClipartHeightCm: number;
   draftClipartStrokeColor: string;
@@ -238,14 +240,8 @@ export interface SelectionConsoleModel {
   kind: SelectionConsoleKind;
   count: number;
   status: SelectionConsoleStatus;
-  clipboardCount: number;
+  preview: ReactNode;
   actions: {
-    copy: SelectionConsoleAction;
-    paste: SelectionConsoleAction;
-    rotateLeft: SelectionConsoleAction;
-    rotateRight: SelectionConsoleAction;
-    flipHorizontal: SelectionConsoleAction;
-    flipVertical: SelectionConsoleAction;
     nudgeLeft: SelectionConsoleAction;
     nudgeUp: SelectionConsoleAction;
     nudgeDown: SelectionConsoleAction;
@@ -312,16 +308,19 @@ function FocusConsoleActionButton({
   label,
   title,
   icon,
+  direction,
 }: {
   action: SelectionConsoleAction;
   label: string;
   title?: string;
   icon: ReactNode;
+  direction?: "up" | "right" | "down" | "left";
 }) {
   return (
     <button
       type="button"
       className="focus-console__command"
+      data-direction={direction}
       disabled={action.disabled}
       onClick={action.onAction}
       aria-label={label}
@@ -347,83 +346,55 @@ function SelectionCommandShelf({ model }: { model: SelectionConsoleModel }) {
       data-selection-kind={model.kind}
       data-selection-status={model.status}
     >
-      <div className="focus-console__selection-summary">
-        <span className="focus-console__shelf-kicker">Selection</span>
-        <strong>{selectionLabel}</strong>
-        <span className="focus-console__status" data-status={model.status}>
-          <i aria-hidden="true" />
-          {statusLabel}
-        </span>
+      <div
+        className="focus-console__selection-identity"
+        data-has-preview={Boolean(model.preview)}
+      >
+        {model.preview ? (
+          <span className="focus-console__selection-preview" aria-hidden="true">
+            {model.preview}
+            {model.count > 1 ? (
+              <span className="focus-console__selection-preview-count">{model.count}</span>
+            ) : null}
+          </span>
+        ) : null}
+        <div className="focus-console__selection-summary">
+          <span className="focus-console__shelf-kicker">Selection</span>
+          <strong>{selectionLabel}</strong>
+          <span className="focus-console__status" data-status={model.status}>
+            <i aria-hidden="true" />
+            {statusLabel}
+          </span>
+        </div>
       </div>
 
       <div className="focus-console__selection-toolbar" role="toolbar" aria-label="Selection commands">
-        <div className="focus-console__command-pair">
-          <FocusConsoleActionButton
-            action={model.actions.copy}
-            label="Copy selection"
-            icon={<Copy size={15} aria-hidden="true" />}
-          />
-          <FocusConsoleActionButton
-            action={model.actions.paste}
-            label="Paste layers"
-            title={
-              model.clipboardCount > 0
-                ? `Paste ${model.clipboardCount} ${model.clipboardCount === 1 ? "layer" : "layers"}`
-                : "Paste layers"
-            }
-            icon={<ClipboardPaste size={15} aria-hidden="true" />}
-          />
-        </div>
-
-        <div className="focus-console__command-grid focus-console__command-grid--transform">
-          <FocusConsoleActionButton
-            action={model.actions.rotateLeft}
-            label="Rotate selection left"
-            icon={<RotateCcw size={15} aria-hidden="true" />}
-          />
-          <FocusConsoleActionButton
-            action={model.actions.rotateRight}
-            label="Rotate selection right"
-            icon={<RotateCw size={15} aria-hidden="true" />}
-          />
-          <FocusConsoleActionButton
-            action={model.actions.flipHorizontal}
-            label="Flip selection horizontally"
-            icon={<FlipHorizontal size={15} aria-hidden="true" />}
-          />
-          <FocusConsoleActionButton
-            action={model.actions.flipVertical}
-            label="Flip selection vertically"
-            icon={<FlipVertical size={15} aria-hidden="true" />}
-          />
-        </div>
-
         <div className="focus-console__nudge-pad" role="group" aria-label="Nudge selection">
-          <span aria-hidden="true" />
           <FocusConsoleActionButton
             action={model.actions.nudgeUp}
             label="Nudge selection up"
+            direction="up"
             icon={<ArrowUp size={15} aria-hidden="true" />}
           />
-          <span aria-hidden="true" />
           <FocusConsoleActionButton
             action={model.actions.nudgeLeft}
             label="Nudge selection left"
+            direction="left"
             icon={<ArrowLeft size={15} aria-hidden="true" />}
           />
           <span className="focus-console__nudge-center" aria-hidden="true" />
           <FocusConsoleActionButton
             action={model.actions.nudgeRight}
             label="Nudge selection right"
+            direction="right"
             icon={<ArrowRight size={15} aria-hidden="true" />}
           />
-          <span aria-hidden="true" />
           <FocusConsoleActionButton
             action={model.actions.nudgeDown}
             label="Nudge selection down"
+            direction="down"
             icon={<ArrowDown size={15} aria-hidden="true" />}
           />
-          <span aria-hidden="true" />
         </div>
       </div>
     </div>
@@ -511,6 +482,7 @@ function InspectorSections({
     ? requestedId
     : entries[0]?.id ?? null;
   const activeEntry = entries.find((entry) => entry.id === activeId);
+  const singleView = entries.length === 1;
 
   if (!entries.length) return null;
 
@@ -534,54 +506,57 @@ function InspectorSections({
       <div
         className="editor-inspector__lens-workspace"
         data-has-inline-shelf="false"
+        data-single-view={singleView ? "true" : "false"}
       >
-        <div
-          className="editor-inspector__lens-tabs"
-          role="tablist"
-          aria-label={`${label} views`}
-          aria-orientation="horizontal"
-        >
-          {entries.map(({ id, group }, index) => {
-            const active = id === activeId;
-            return (
-              <button
-                key={id}
-                type="button"
-                id={`${baseId}-tab-${id}`}
-                className="editor-inspector__lens-tab"
-                role="tab"
-                aria-selected={active}
-                aria-controls={`${baseId}-panel-${id}`}
-                tabIndex={active ? 0 : -1}
-                onClick={() => activate(index)}
-                onKeyDown={(event) => {
-                  const lastIndex = entries.length - 1;
-                  const nextIndex =
-                    event.key === "Home"
-                      ? 0
-                      : event.key === "End"
-                        ? lastIndex
-                        : event.key === "ArrowRight" || event.key === "ArrowDown"
-                          ? (index + 1) % entries.length
-                          : event.key === "ArrowLeft" || event.key === "ArrowUp"
-                            ? (index - 1 + entries.length) % entries.length
-                            : null;
-                  if (nextIndex === null) return;
-                  event.preventDefault();
-                  activate(nextIndex, true);
-                }}
-              >
-                {group.props.icon ? (
-                  <span className="editor-inspector__lens-tab-icon" aria-hidden="true">
-                    {group.props.icon}
-                  </span>
-                ) : null}
-                <span>{group.props.tabLabel ?? group.props.title}</span>
-                <i aria-hidden="true" />
-              </button>
-            );
-          })}
-        </div>
+        {singleView ? null : (
+          <div
+            className="editor-inspector__lens-tabs"
+            role="tablist"
+            aria-label={`${label} views`}
+            aria-orientation="horizontal"
+          >
+            {entries.map(({ id, group }, index) => {
+              const active = id === activeId;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  id={`${baseId}-tab-${id}`}
+                  className="editor-inspector__lens-tab"
+                  role="tab"
+                  aria-selected={active}
+                  aria-controls={`${baseId}-panel-${id}`}
+                  tabIndex={active ? 0 : -1}
+                  onClick={() => activate(index)}
+                  onKeyDown={(event) => {
+                    const lastIndex = entries.length - 1;
+                    const nextIndex =
+                      event.key === "Home"
+                        ? 0
+                        : event.key === "End"
+                          ? lastIndex
+                          : event.key === "ArrowRight" || event.key === "ArrowDown"
+                            ? (index + 1) % entries.length
+                            : event.key === "ArrowLeft" || event.key === "ArrowUp"
+                              ? (index - 1 + entries.length) % entries.length
+                              : null;
+                    if (nextIndex === null) return;
+                    event.preventDefault();
+                    activate(nextIndex, true);
+                  }}
+                >
+                  {group.props.icon ? (
+                    <span className="editor-inspector__lens-tab-icon" aria-hidden="true">
+                      {group.props.icon}
+                    </span>
+                  ) : null}
+                  <span>{group.props.tabLabel ?? group.props.title}</span>
+                  <i aria-hidden="true" />
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         <div
           className="editor-inspector__lens-deck"
@@ -594,8 +569,9 @@ function InspectorSections({
                 key={id}
                 id={`${baseId}-panel-${id}`}
                 className="editor-inspector-group"
-                role="tabpanel"
-                aria-labelledby={`${baseId}-tab-${id}`}
+                role={singleView ? "region" : "tabpanel"}
+                aria-label={singleView ? group.props.title : undefined}
+                aria-labelledby={singleView ? undefined : `${baseId}-tab-${id}`}
                 data-priority={group.props.priority ?? "secondary"}
                 data-layout={group.props.layout ?? "card"}
                 hidden={!active}
@@ -668,6 +644,11 @@ export function InspectorPanel(props: InspectorPanelProps) {
     setDraftShapeStrokeStyle,
     setDraftShapeFillColor,
     setPlacingClipartAssetId,
+    lassoFill,
+    setLassoFill,
+    lassoVertexCount,
+    commitLasso,
+    cancelLasso,
     draftClipartWidthCm,
     draftClipartHeightCm,
     draftClipartStrokeColor,
@@ -920,15 +901,15 @@ export function InspectorPanel(props: InspectorPanelProps) {
             </InspectorGroup>
             {selectedShapeLayer ? (
               <InspectorGroup title="Shape appearance" tabLabel="Appearance" icon={<Shapes size={15} aria-hidden="true" />}>
-                <div className="editor-object-properties">{renderShapeAdvanced(selectedShapeLayer)}</div>
+                {renderShapeAdvanced(selectedShapeLayer)}
               </InspectorGroup>
             ) : selectedClipartLayer ? (
               <InspectorGroup title="Clipart appearance" tabLabel="Appearance" icon={<ImageIcon size={15} aria-hidden="true" />}>
-                <div className="editor-object-properties">{renderClipartAdvanced(selectedClipartLayer)}</div>
+                {renderClipartAdvanced(selectedClipartLayer)}
               </InspectorGroup>
             ) : selectedCellLayer ? (
               <InspectorGroup title="Cell paint appearance" tabLabel="Appearance" icon={<MousePointer2 size={15} aria-hidden="true" />}>
-                <div className="editor-object-properties">{renderCellAdvanced(selectedCellLayer)}</div>
+                {renderCellAdvanced(selectedCellLayer)}
               </InspectorGroup>
             ) : null}
             <InspectorGroup title="Object placement" tabLabel="Placement" icon={<Ruler size={15} aria-hidden="true" />} priority="quiet">
@@ -954,7 +935,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
 
   return (
     <aside
-      className="editor-inspector atelier-inspector editor-panel focus-console relative space-y-0"
+      className="editor-inspector editor-panel focus-console relative space-y-0"
       aria-label="Properties inspector"
       data-editor-region="inspector"
       data-inspector-context={inspectorTab}
@@ -1271,10 +1252,10 @@ export function InspectorPanel(props: InspectorPanelProps) {
             </InspectorGroup>
 
             <InspectorGroup title="Grid" icon={<Grid3X3 size={15} aria-hidden="true" />}>
-              <InspectorRow label="Line color">
+              <InspectorRow label="Line color" layout="inline">
                 <InspectorColorControl label="Graph line color" value={settings.gridLineColor} onChange={(value) => updateSetting("gridLineColor", value)} />
               </InspectorRow>
-              <InspectorRow label="Major every">
+              <InspectorRow label="Major every" layout="inline">
                 <InspectorSelect
                   label="Major grid interval"
                   value={String(settings.majorGridEvery)}
@@ -1564,18 +1545,42 @@ export function InspectorPanel(props: InspectorPanelProps) {
                       </div>
                     )}
                   </div>
+                ) : drawingTool === "lasso" ? (
+                  <div className="editor-inspector__create-content">
+                    <section className="editor-inspector__create-section" aria-labelledby="create-lasso-label">
+                      <div className="editor-inspector__create-section-heading">
+                        <span id="create-lasso-label">Lasso region</span>
+                        <span>{lassoVertexCount ? `${lassoVertexCount} point${lassoVertexCount === 1 ? "" : "s"}` : "No points"}</span>
+                      </div>
+                      <InspectorSegmented
+                        label="Lasso result"
+                        value={lassoFill}
+                        options={[
+                          { value: "erase", label: "Erase" },
+                          { value: "#ffffff", label: "White" },
+                          { value: "#000000", label: "Black" },
+                        ]}
+                        onChange={(value) => setLassoFill(value as GraphEraseRegionFill | "erase")}
+                      />
+                      <div className="editor-inspector-action-strip" aria-label="Lasso actions">
+                        <button type="button" onClick={commitLasso} disabled={lassoVertexCount < 3}>
+                          <Check size={14} aria-hidden="true" />
+                          Close region
+                        </button>
+                        <button type="button" onClick={cancelLasso} disabled={!lassoVertexCount}>
+                          <RefreshCw size={14} aria-hidden="true" />
+                          Cancel path
+                        </button>
+                      </div>
+                      <p className="editor-inspector__hint">Click the starting point to close, Enter to apply, Escape to cancel, or Backspace to remove the last point.</p>
+                    </section>
+                  </div>
                 ) : (
                   <div className="editor-inspector__create-content">
                     <div className="editor-inspector__shape-empty">
                       <MousePointer2 size={20} aria-hidden="true" />
-                      <strong>
-                        {drawingTool === "lasso" ? "Click points on the graph" : "No creation tool active"}
-                      </strong>
-                      <span>
-                        {drawingTool === "lasso"
-                          ? "Escape cancels. Backspace removes the last vertex."
-                          : "Use the left tool deck to start drawing."}
-                      </span>
+                      <strong>No creation tool active</strong>
+                      <span>Use the left tool deck to start drawing.</span>
                     </div>
                   </div>
                 )}
@@ -1613,7 +1618,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                 </InspectorFieldGrid>
                 <label className={`editor-inspector__upload-action ${uploadingCliparts ? "opacity-60" : ""}`}>
                   {uploadingCliparts ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Upload size={16} aria-hidden="true" />}
-                  Upload cliparts
+                  <span className="editor-inspector__upload-action-label">Upload cliparts</span>
                   <input
                     type="file"
                     accept={CLIPART_ACCEPT}
@@ -1629,14 +1634,14 @@ export function InspectorPanel(props: InspectorPanelProps) {
                 </label>
                 <label className="editor-inspector-field">
                   <span className="editor-inspector-field__label">Search clipart by name</span>
-                  <div className="relative">
-                    <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--editor-muted)]" aria-hidden="true" />
+                  <div className="editor-inspector__search-shell">
+                    <Search size={14} className="editor-inspector__search-icon" aria-hidden="true" />
                     <input
                       type="text"
                       value={clipartSearch}
                       onChange={(event) => setClipartSearch(event.target.value)}
                       placeholder="Search clipart"
-                      className="editor-inspector-control w-full py-2 pr-3 pl-9"
+                      className="editor-inspector-control editor-inspector__search-input"
                     />
                   </div>
                 </label>
@@ -1646,7 +1651,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                     <div className="editor-inspector__clipart-grid">
                       {filteredClipartAssets.map((asset) => {
                         const selected = selectedClipartAsset?.id === asset.id;
-                        const previewUrl = asset.url ?? asset.dataUrl ?? null;
+                        const previewUrl = asset.thumbUrl ?? asset.url ?? asset.dataUrl ?? null;
                         return (
                           <button
                             key={`clipart-asset-${asset.id}`}
@@ -1658,6 +1663,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                             }}
                             className="editor-inspector__clipart-tile"
                             data-selected={selected ? "true" : "false"}
+                            aria-pressed={selected}
                           >
                             {previewUrl ? (
                               <img src={previewUrl} alt="" className="h-11 w-11 rounded border border-[var(--editor-line)] bg-[var(--artboard-bg)] object-contain p-1" />
@@ -1666,7 +1672,7 @@ export function InspectorPanel(props: InspectorPanelProps) {
                                 <ImageIcon size={15} aria-hidden="true" />
                               </span>
                             )}
-                            <span className="min-w-0">
+                            <span className="editor-inspector__clipart-copy min-w-0">
                               <span className="block truncate text-[12px] font-semibold text-[var(--editor-text)]">{asset.name}</span>
                               <span className="block truncate text-[11px] text-[var(--editor-muted)]">{asset.width} x {asset.height}</span>
                             </span>

@@ -276,15 +276,10 @@ test.describe("redesigned app screens", () => {
     const focusConsole = page.locator('[data-editor-pod="focus"]');
     const selectionShelf = focusConsole.locator('[data-focus-command-shelf="selection"]');
     await expect(selectionShelf).toBeVisible();
+    await expect(selectionShelf.locator(".focus-console__selection-preview")).toBeVisible();
     const selectionCommands = selectionShelf.getByRole("toolbar", { name: "Selection commands" });
     await expect(selectionCommands).toBeVisible();
     for (const action of [
-      "Copy selection",
-      "Paste layers",
-      "Rotate selection left",
-      "Rotate selection right",
-      "Flip selection horizontally",
-      "Flip selection vertically",
       "Nudge selection left",
       "Nudge selection up",
       "Nudge selection down",
@@ -292,9 +287,27 @@ test.describe("redesigned app screens", () => {
     ]) {
       await expect(selectionCommands.getByRole("button", { name: action, exact: true })).toBeVisible();
     }
-    await expect(selectionCommands.getByRole("button", { name: "Copy selection", exact: true })).toBeEnabled();
-    await selectionCommands.getByRole("button", { name: "Copy selection", exact: true }).click();
-    await expect(selectionCommands.getByRole("button", { name: "Paste layers", exact: true })).toBeEnabled();
+    for (const [action, direction] of [
+      ["Nudge selection up", "up"],
+      ["Nudge selection right", "right"],
+      ["Nudge selection down", "down"],
+      ["Nudge selection left", "left"],
+    ] as const) {
+      await expect(selectionCommands.getByRole("button", { name: action, exact: true })).toHaveAttribute(
+        "data-direction",
+        direction,
+      );
+    }
+    for (const removedAction of [
+      "Copy selection",
+      "Paste layers",
+      "Rotate selection left",
+      "Rotate selection right",
+      "Flip selection horizontally",
+      "Flip selection vertically",
+    ]) {
+      await expect(focusConsole.getByRole("button", { name: removedAction, exact: true })).toHaveCount(0);
+    }
     await expect(focusConsole.getByRole("button", { name: "Duplicate selection", exact: true })).toHaveCount(0);
     await expect(focusConsole.getByRole("button", { name: "Lock selection", exact: true })).toHaveCount(0);
     await expect(focusConsole.getByRole("button", { name: "Unlock selection", exact: true })).toHaveCount(0);

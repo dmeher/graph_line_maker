@@ -1579,14 +1579,8 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   <div className="editor-inspector__create-content">
                     <div className="editor-inspector__shape-empty">
                       <MousePointer2 size={20} aria-hidden="true" />
-                      <strong>
-                        {drawingTool === "lasso" ? "Click points on the graph" : "No creation tool active"}
-                      </strong>
-                      <span>
-                        {drawingTool === "lasso"
-                          ? "Escape cancels. Backspace removes the last vertex."
-                          : "Use the left tool deck to start drawing."}
-                      </span>
+                      <strong>No creation tool active</strong>
+                      <span>Use the left tool deck to start drawing.</span>
                     </div>
                   </div>
                 )}

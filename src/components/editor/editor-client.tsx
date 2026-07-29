@@ -3043,12 +3043,15 @@ export function EditorClient({ project }: { project: Project }) {
         flipY: source.flipY,
       };
       const brushRadius = options.brushRadius;
+      // Lasso uses the shared `GraphEraseBrushShape` union too, but a
+      // pointer-driven brush can only render a circle or square footprint.
+      const brushShape = options.brushShape === "square" ? "square" : "circle";
       const intersects = brushRadius && brushRadius > 0
         ? graphBrushIntersectsPlacedContent(
             graphPixelX,
             graphPixelY,
             brushRadius,
-            options.brushShape ?? "circle",
+            brushShape,
             placement,
             bounds,
           )

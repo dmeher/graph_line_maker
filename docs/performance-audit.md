@@ -133,6 +133,22 @@ Bottom-reach follow-up validation on 2026-07-28: the Command Canvas layout-model
 
 Selection-action follow-up validation on 2026-07-28: the source-layout suite passed **17/17**, including single-layer rotate/flip orientation and locked-layer no-op coverage. The affected TS/TSX files passed static parser checks and `git diff --check`; Playwright, rendered screenshots, full lint/type checks, and a production build were intentionally not run.
 
+## Remediation update - 2026-07-29 (stable destructive source edits)
+
+| Issue IDs | Implemented evidence |
+|---|---|
+| `PERF-CANVAS-002/003/005` | Derived background-removal/eraser canvases retain immutable content bounds captured from their pristine decoded source whenever they are placed or vectorized. Removing edge pixels therefore cannot recrop, rescale, or shift the remaining artwork. `eraseStrokesSignature` serializes every normalized stroke point, radius, shape, and fill, so cache identities cannot collide when earlier stroke geometry changes. The eraser owns one graph-output-pixel radius and converts it to every target source's local radius before hit testing, immediate preview, and normalized-UV persistence, so source resolution or placement scale cannot change the on-graph footprint. Destructive hit testing inverse-maps through transformed pristine content frames (including offset, rotation, and flips): each brush sample independently updates every intersected visible, unlocked source in one existing history transaction, while lasso clips one polygon to every intersected source-local content frame before persisting UV points. Neither tool selects or falls back to a selected/topmost source. The drag-time preview applies the same source-local footprint immediately with `destination-out`, but clips it to each transformed pristine content frame; the settled bounded processing pass remains authoritative. These are pure placement/key/hit-test changes: they add no canvas allocation, processing pass, API payload, or persistence contract. |
+
+Targeted validation on 2026-07-29: erase geometry (including graph-space brush conversion across source resolutions, rotated/flipped brush-edge intersections, and per-source lasso clipping), erase normalization, and history tests passed **30/30**. The affected TS/TSX files passed static parser checks and `git diff --check`; rendered browser validation, Playwright, full lint/type checks, and a production build were intentionally not run.
+
+## Remediation update - 2026-07-29 (durable fill-region overrides)
+
+| Issue IDs | Implemented evidence |
+|---|---|
+| `PERF-REACT-005` | Persisted fill overrides now use the exact editor 15-degree rotation transform, with pre-correction cardinal scoped keys retained as read-time aliases and promoted on the next settled result. The client retains only the last settled fill-region frame and reconciles a changed result by artwork scope/kind plus region-pixel coverage before committing it. A same-colour parent can fan out to split children, and same-colour children recombine during undo/redo; competing colours do not silently win. Graph resizes compare the shared graph-coordinate rectangle instead of unrelated linear map indexes. Stale vector/render completions are rejected by both document revision and processing signature. The reconciliation exits before any map walk when no user fill override exists; it adds no canvas, API field, or database value, and only holds the prior bounded map reference until the next settled frame replaces it. |
+
+Targeted validation on 2026-07-29: fill-identity, fill-reconciliation (including split/undo-merge, resize, legacy alias, scope isolation, and explicit-colour precedence), history, and source-layout tests passed **38/38**. Rendered browser validation, Playwright, full lint/type checks, and a production build were intentionally not run.
+
 ## Build update - 2026-07-17 (Webpack production compiler)
 
 `next build` with the default Turbopack compiler can remain indefinitely at `Creating an optimized production build` with a flat CPU counter and no compiler diagnostics in this workspace. `next build --webpack` completes compilation and reaches TypeScript checking, so the `build` script explicitly selects Webpack until the Turbopack stall can be reproduced and resolved upstream. Do not remove the flag without a successful Turbopack production build. The Webpack build also catches strict TypeScript errors that the stalled path never reports.
@@ -170,8 +186,8 @@ Validation on 2026-07-17: `npm run build` completed compilation, TypeScript chec
 ### `PERF-CANVAS-003` - processing invalidation is both coarse and incomplete
 
 - **Priority / status:** P1 / Partial
-- **Evidence:** `buildProcessingSignature` and the processing effect in `src/components/editor/editor-client.tsx`. The signature serializes large arrays but omits processing inputs including global outline/fill colors, fill-region overrides, and grid/render settings.
-- **Impact:** Unrelated edits can repeat decode, mask, thinning, region labeling, and composition, while omitted fields can leave a stale preview. Building the signature is itself linear in all source, paint, shape, asset, and clipart records.
+- **Evidence:** `buildProcessingSignature` and the processing effect in `src/components/editor/editor-client.tsx`. The signature serializes global outline/fill colours, fill-region overrides, grid/render settings, and all source/shape/clipart inputs; settled async results also gate on both the request revision and the current signature.
+- **Impact:** Unrelated edits can still repeat decode, mask, thinning, region labeling, and composition, and building the signature is itself linear in all source, paint, shape, asset, and clipart records. The prior missing-input stale-preview path is resolved.
 - **Solution:** Split the pipeline into typed stages: decode, placement, source analysis, merged masks/region IDs, and cheap composite/grid/manual overlays. Give each stage an explicit dependency key or revision counter and test that every setting invalidates exactly the required stages.
 - **Risks / validation:** Incorrect stage boundaries can reuse stale masks. Build a setting-to-stage test matrix and pixel-regression fixtures before removing the current full rerender fallback.
 

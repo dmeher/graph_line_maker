@@ -5,6 +5,7 @@ import {
   MAX_BACKGROUND_TOLERANCE,
   MAX_ERASE_POINTS_PER_LAYER,
   MAX_ERASE_STROKES_PER_LAYER,
+  MAX_POLYGON_UV_OVERSHOOT,
   backgroundRemovalSignature,
   eraseStrokesSignature,
   normalizeBackgroundRemoval,
@@ -85,6 +86,30 @@ test("signatures change when erase/background state changes", () => {
   assert.notEqual(b, c);
   assert.equal(backgroundRemovalSignature(undefined), "0");
   assert.notEqual(backgroundRemovalSignature({ enabled: true, tolerance: 0.1 }), backgroundRemovalSignature({ enabled: true, tolerance: 0.2 }));
+});
+
+test("the erase signature includes each normalized stroke point and configuration", () => {
+  const base = [
+    { points: [{ x: 0.1, y: 0.1 }, { x: 0.3, y: 0.3 }], radius: 0.02, shape: "circle" as const },
+    { points: [{ x: 0.7, y: 0.7 }], radius: 0.03, shape: "square" as const },
+  ];
+  const changedInteriorPoint = [
+    { ...base[0], points: [{ x: 0.2, y: 0.1 }, { x: 0.3, y: 0.3 }] },
+    base[1],
+  ];
+  const changedEarlierRadius = [{ ...base[0], radius: 0.04 }, base[1]];
+  const changedEarlierShape = [{ ...base[0], shape: "square" as const }, base[1]];
+  const polygon = [
+    { points: [{ x: 0.1, y: 0.1 }, { x: 0.4, y: 0.1 }, { x: 0.4, y: 0.4 }], radius: 0.01, shape: "polygon" as const },
+    base[1],
+  ];
+  const filledPolygon = [{ ...polygon[0], fill: "#000000" as const }, base[1]];
+
+  const signature = eraseStrokesSignature(base);
+  assert.notEqual(signature, eraseStrokesSignature(changedInteriorPoint));
+  assert.notEqual(signature, eraseStrokesSignature(changedEarlierRadius));
+  assert.notEqual(signature, eraseStrokesSignature(changedEarlierShape));
+  assert.notEqual(eraseStrokesSignature(polygon), eraseStrokesSignature(filledPolygon));
 });
 
 test("erase strokes carry a brush shape, defaulting to circle", () => {
@@ -169,4 +194,20 @@ test("wildly out-of-range coordinates are still rejected as corrupt", () => {
     { points: [{ x: 300, y: 200 }, { x: 400, y: 200 }, { x: 400, y: 300 }], radius: 0.01, shape: "polygon" },
   ]);
   assert.equal(strokes.length, 0);
+});
+
+test("a single out-of-bound vertex discards the whole region", () => {
+  // This is why the editor must range-check a lasso before committing it. On a
+  // tall multi-image graph, resolving the region against the wrong layer put
+  // vertices many image-heights away; the region then vanished here with no
+  // signal, which is what made the lasso look like it silently did nothing.
+  const justInside = normalizeEraseStrokes([
+    { points: [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.5, y: 1 + MAX_POLYGON_UV_OVERSHOOT }], radius: 0.01, shape: "polygon" },
+  ]);
+  assert.equal(justInside.length, 1, "the bound itself is still accepted");
+
+  const justOutside = normalizeEraseStrokes([
+    { points: [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.5, y: 1 + MAX_POLYGON_UV_OVERSHOOT + 0.001 }], radius: 0.01, shape: "polygon" },
+  ]);
+  assert.equal(justOutside.length, 0, "one bad vertex drops every other vertex with it");
 });

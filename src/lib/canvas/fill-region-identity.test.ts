@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   copyFillRegionOverrides,
+  createLegacyCardinalFillRegionId,
   createStableFillRegionId,
   fillRegionLayerScope,
   isStoredFillRegionId,
@@ -73,6 +74,8 @@ function pointForArtworkPosition(
 test("stable fill IDs follow a region across position, rotation, and mirrors", () => {
   const positions = [
     { x: 2, y: 3, width: 5, height: 8, rotationDegrees: 0, flipX: false, flipY: false },
+    { x: 3, y: 6, width: 5, height: 8, rotationDegrees: 15, flipX: false, flipY: false },
+    { x: 6, y: 1, width: 5, height: 8, rotationDegrees: 345, flipX: false, flipY: true },
     { x: 7, y: 4, width: 5, height: 8, rotationDegrees: 90, flipX: false, flipY: false },
     { x: 1, y: 9, width: 5, height: 8, rotationDegrees: 180, flipX: true, flipY: false },
     { x: 4, y: 2, width: 5, height: 8, rotationDegrees: 270, flipX: true, flipY: true },
@@ -83,6 +86,16 @@ test("stable fill IDs follow a region across position, rotation, and mirrors", (
   });
 
   assert.deepEqual(new Set(ids).size, 1);
+});
+
+test("the corrected identity can read a pre-15-degree scoped fill key", () => {
+  const placement = { x: 3, y: 6, width: 5, height: 8, rotationDegrees: 15, flipX: false, flipY: false };
+  const point = pointForArtworkPosition(placement, 0.27, 0.72);
+  const stable = createStableFillRegionId({ layerId, kind: "enclosed", placement, ...point });
+  const legacy = createLegacyCardinalFillRegionId({ layerId, kind: "enclosed", placement, ...point });
+
+  assert.notEqual(stable, legacy);
+  assert.equal(isStoredFillRegionId(legacy), true);
 });
 
 test("legacy numeric fill overrides promote to the matching layer-scoped region", () => {

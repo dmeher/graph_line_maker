@@ -60,13 +60,23 @@ import {
   migrateLegacyFillRegionOverrides,
   removeFillRegionOverridesForScopes,
 } from "@/lib/canvas/fill-region-identity";
+import { reconcileFillRegionOverrides } from "@/lib/canvas/fill-region-reconciliation";
 import { MAX_WORKING_SOURCE_PIXELS, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
 import { detectPreviewPolicy, workingImagePixelCap } from "@/lib/canvas/preview-policy";
 import { disposeCanvasProcessingWorker, pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
 import { clearCanvasProcessingCaches, findContentBounds, flattenGraphForOutput, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
 import { GraphGridOverlay } from "@/components/editor/graph-grid-overlay";
 import { removeBackgroundImageData } from "@/lib/canvas/background-removal";
-import { graphPixelToSourcePixel, type ContentBounds, type PlacementTransform } from "@/lib/editor/erase-geometry";
+import {
+  clipGraphPolygonToPlacedContent,
+  graphBrushIntersectsPlacedContent,
+  graphPixelToSourcePixel,
+  graphPolygonIntersectsPlacedContent,
+  isGraphPixelWithinPlacedContent,
+  sourcePixelRadiusForGraphBrush,
+  type ContentBounds,
+  type PlacementTransform,
+} from "@/lib/editor/erase-geometry";
 import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_SOURCE_IMAGES, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
 import {
   CARD_THUMBNAIL_MAX_EDGE,
@@ -118,6 +128,7 @@ import {
 import {
   DEFAULT_BACKGROUND_TOLERANCE,
   MAX_BACKGROUND_TOLERANCE,
+  MAX_POLYGON_UV_OVERSHOOT,
   MIN_BACKGROUND_TOLERANCE,
   backgroundRemovalSignature,
   clampBackgroundTolerance,
@@ -344,6 +355,15 @@ const CANVAS_SELECTION_BOX_CLASS =
   "command-canvas-selection-frame pointer-events-none absolute z-20 rounded-[2px] border-2 border-cyan-300 bg-cyan-300/10 shadow-[0_0_0_1px_rgba(2,6,23,0.92),0_0_0_3px_rgba(255,255,255,0.82),0_0_14px_rgba(34,211,238,0.48)]";
 const SELECT_POINTER_CURSOR =
   "url(\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='24'%20height='24'%20viewBox='0%200%2024%2024'%3E%3Cpath%20d='M5.5%204.8%2018.4%2010.3c.78.34.75%201.46-.04%201.77l-5.32%202.08a1.45%201.45%200%200%200-.81.81l-2.04%205.13c-.32.81-1.47.81-1.78-.01L5.5%204.8Z'%20fill='%23ffffff'%20stroke='%23000000'%20stroke-width='1.4'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E\") 6 5, default";
+type ImageEraseTarget = {
+  sourceId: string;
+  bounds: ContentBounds;
+  placement: PlacementTransform;
+  canvasWidth: number;
+  canvasHeight: number;
+  lastPoint?: { x: number; y: number };
+  startsNewStroke: boolean;
+};
 type DragState = {
   kind: "viewport" | "pan" | "source" | "shape" | "clipart" | "resize-source" | "resize-shape" | "resize-selection" | "cell-paint" | "shape-draw" | "image-erase";
   pointerId: number;
@@ -382,13 +402,7 @@ type DragState = {
   startClipartY?: number;
   layerStarts?: Map<SelectableLayerKey, LayerSnapBox>;
   selectionBounds?: LayerSnapBox;
-  eraseTargetSourceId?: string;
-  eraseBounds?: ContentBounds;
-  erasePlacement?: PlacementTransform;
-  eraseLastPoint?: { x: number; y: number };
-  eraseCanvasWidth?: number;
-  eraseCanvasHeight?: number;
-  eraseStartsNewStroke?: boolean;
+  eraseTargets?: Map<string, ImageEraseTarget>;
 };
 type UploadedSourceImage = {
   id: string;
@@ -1373,7 +1387,10 @@ export function EditorClient({ project }: { project: Project }) {
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [previewCanvasSize, setPreviewCanvasSize] = useState({ width: 1, height: 1 });
   const [drawingTool, setDrawingTool] = useState<DrawingTool>("image");
-  /** Image-eraser brush radius in source pixels. */
+  /**
+   * Image-eraser radius in graph output pixels. Each touched source converts
+   * this to its own working-canvas pixels before a stroke is persisted.
+   */
   const [imageEraserRadius, setImageEraserRadius] = useState(16);
   const [imageEraserShape, setImageEraserShape] = useState<GraphEraseBrushShape>("circle");
   // Lasso: committed vertices plus the pointer position, so the preview can
@@ -1381,7 +1398,15 @@ export function EditorClient({ project }: { project: Project }) {
   const [lassoVertices, setLassoVertices] = useState<LassoVertex[]>([]);
   const [lassoCursor, setLassoCursor] = useState<LassoVertex | null>(null);
   const [lassoFill, setLassoFill] = useState<GraphEraseRegionFill | "erase">("erase");
-  const [imageEraserCursor, setImageEraserCursor] = useState<ImageEraserCursor>(null);
+  // Pointer handlers are plain functions rebuilt each render, so they close over
+  // the vertices of the render that created them. Two clicks landing inside one
+  // render window then compared a stale list against the close threshold and
+  // dropped a vertex on the region instead of closing it. The ref is the
+  // authority for hit-testing and committing; the state drives the overlay.
+  const lassoVerticesRef = useRef<LassoVertex[]>([]);
+  lassoVerticesRef.current = lassoVertices;
+  const imageEraserCursorRef = useRef<ImageEraserCursor>(null);
+  const imageEraserCursorNodeRef = useRef<HTMLDivElement | null>(null);
   const imageEraserRadiusRef = useRef(imageEraserRadius);
   imageEraserRadiusRef.current = imageEraserRadius;
   const imageEraserShapeRef = useRef(imageEraserShape);
@@ -1485,6 +1510,16 @@ export function EditorClient({ project }: { project: Project }) {
   const noticeDismissTimerRef = useRef<number | NodeJS.Timeout | null>(null);
   const fillRegionMapRef = useRef<Uint16Array | null>(null);
   const fillRegionIdByMapIdRef = useRef<Map<number, string>>(new Map());
+  // Draft renders update the visible/hit-test map while a gesture is in
+  // progress. Reconciliation must instead compare against the last completed
+  // frame, otherwise a long shape drag would overwrite the very topology we
+  // need to preserve before its pointer-up render settles.
+  const settledFillRegionFrameRef = useRef<{
+    fillRegions: FillRegion[];
+    fillRegionMap: Uint16Array;
+    width: number;
+    height: number;
+  } | null>(null);
   const settingsHistoryRef = useRef<SettingsHistory>({ undo: [], redo: [] });
   const pendingSettingsHistoryRef = useRef<GraphSettings | null>(null);
   const lastProcessedSignatureRef = useRef<string | null>(null);
@@ -1835,7 +1870,10 @@ export function EditorClient({ project }: { project: Project }) {
   }
 
   function currentFillRegionColor(region: FillRegion) {
-    return settings.fillRegions[region.id] ?? (region.legacyId ? settings.fillRegions[region.legacyId] : undefined) ?? defaultFillRegionColor(region);
+    return settings.fillRegions[region.id]
+      ?? (region.legacyId ? settings.fillRegions[region.legacyId] : undefined)
+      ?? region.fallbackIds?.map((id) => settings.fillRegions[id]).find(Boolean)
+      ?? defaultFillRegionColor(region);
   }
 
   const selectedFillRegionColor = selectedFillRegion ? currentFillRegionColor(selectedFillRegion) : settings.fillColor;
@@ -2916,6 +2954,7 @@ export function EditorClient({ project }: { project: Project }) {
       if (color.toLowerCase() === defaultColor.toLowerCase()) delete fillRegions[regionId];
       else fillRegions[regionId] = color;
       if (region?.legacyId) delete fillRegions[region.legacyId];
+      for (const fallbackId of region?.fallbackIds ?? []) delete fillRegions[fallbackId];
       return { ...current, fillRegions };
     });
   }
@@ -2924,8 +2963,10 @@ export function EditorClient({ project }: { project: Project }) {
     setSettingsWithHistory((current) => {
       const fillRegions = { ...current.fillRegions };
       delete fillRegions[regionId];
-      const legacyId = fillRegionsById.get(regionId)?.legacyId;
+      const region = fillRegionsById.get(regionId);
+      const legacyId = region?.legacyId;
       if (legacyId) delete fillRegions[legacyId];
+      for (const fallbackId of region?.fallbackIds ?? []) delete fillRegions[fallbackId];
       return { ...current, fillRegions };
     });
   }
@@ -2960,6 +3001,64 @@ export function EditorClient({ project }: { project: Project }) {
         type: "source",
         id: layout.source.id,
         name: layout.source.name,
+        detail: "Source image",
+        layout,
+      });
+    }
+    return hits;
+  }
+
+  /**
+   * Precise source hit testing for destructive tools. Selection intentionally
+   * keeps its forgiving layout-box hit areas, while erase/lasso operate only
+   * on the rendered, transformed source-content frames. The eraser can expand
+   * the hit by its graph-space brush radius so an image is affected whenever
+   * its visible content sits inside the brush, not just beneath its centre.
+   */
+  function erasableSourceHitsAtPoint(
+    graphX: number,
+    graphY: number,
+    options: { brushRadius?: number; brushShape?: GraphEraseBrushShape } = {},
+  ): LayerHit[] {
+    const current = settingsRef.current;
+    const hits: LayerHit[] = [];
+    const layouts = sourceLayouts(current.sourceImages);
+    const graphPixelX = graphX * GRAPH_MAJOR_CELL_PIXELS;
+    const graphPixelY = graphY * GRAPH_MAJOR_CELL_PIXELS;
+
+    for (let index = layouts.length - 1; index >= 0; index -= 1) {
+      const layout = layouts[index];
+      const source = layout?.source;
+      if (!source || source.visible === false || source.locked) continue;
+      const pristine = sourceCanvasesRef.current.get(source.id);
+      if (!pristine) continue;
+      const bounds = findContentBounds(pristine);
+      const placement: PlacementTransform = {
+        drawX: layout.x * GRAPH_MAJOR_CELL_PIXELS + current.imageOffsetX,
+        drawY: layout.y * GRAPH_MAJOR_CELL_PIXELS + current.imageOffsetY,
+        drawWidth: layout.width * GRAPH_MAJOR_CELL_PIXELS,
+        drawHeight: layout.height * GRAPH_MAJOR_CELL_PIXELS,
+        rotationDegrees: source.rotationDegrees,
+        flipX: source.flipX,
+        flipY: source.flipY,
+      };
+      const brushRadius = options.brushRadius;
+      const intersects = brushRadius && brushRadius > 0
+        ? graphBrushIntersectsPlacedContent(
+            graphPixelX,
+            graphPixelY,
+            brushRadius,
+            options.brushShape ?? "circle",
+            placement,
+            bounds,
+          )
+        : isGraphPixelWithinPlacedContent(graphPixelX, graphPixelY, placement, bounds, 1);
+      if (!intersects) continue;
+      hits.push({
+        key: `source:${source.id}`,
+        type: "source",
+        id: source.id,
+        name: source.name,
         detail: "Source image",
         layout,
       });
@@ -3317,17 +3416,6 @@ export function EditorClient({ project }: { project: Project }) {
     });
   }
 
-  /** Picks the source image under the brush, falling back to the selected source and then the first visible source. */
-  function resolveEraseTargetSource(point: { x: number; y: number } | null): GraphSourceImage | null {
-    const current = settingsRef.current;
-    const sourceHit = point ? sourceLayerHitsAtPoint(point.x, point.y)[0] : null;
-    if (sourceHit?.type === "source" && !sourceHit.layout.source.locked) return sourceHit.layout.source;
-    const selected = selectedSourceId ? current.sourceImages.find((source) => source.id === selectedSourceId && source.visible !== false && !source.locked) : null;
-    if (selected) return selected;
-    const ordered = sourceRenderOrder(current.sourceImages).filter((layout) => layout.source.visible !== false && !layout.source.locked);
-    return ordered[0]?.source ?? null;
-  }
-
   function placementForSource(source: GraphSourceImage): { placement: PlacementTransform; bounds: ContentBounds } | null {
     const layout = sourceLayouts(settingsRef.current.sourceImages).find((entry) => entry.source.id === source.id);
     const pristine = sourceCanvasesRef.current.get(source.id);
@@ -3354,59 +3442,119 @@ export function EditorClient({ project }: { project: Project }) {
     setLassoCursor(point ? { x: point.x, y: point.y } : null);
   }
 
+  function clearImageEraserCursor() {
+    imageEraserCursorRef.current = null;
+    const cursor = imageEraserCursorNodeRef.current;
+    if (cursor) cursor.style.display = "none";
+  }
+
+  function paintImageEraserCursor(next: Exclude<ImageEraserCursor, null>) {
+    imageEraserCursorRef.current = next;
+    const cursor = imageEraserCursorNodeRef.current;
+    if (!cursor) return;
+    cursor.style.display = "block";
+    cursor.style.left = `${next.x - next.radius}px`;
+    cursor.style.top = `${next.y - next.radius}px`;
+    cursor.style.width = `${next.radius * 2}px`;
+    cursor.style.height = `${next.radius * 2}px`;
+  }
+
   function updateImageEraserCursor(event: ReactPointerEvent<HTMLCanvasElement>) {
     if (drawingTool !== "image-eraser" || showOriginal) {
-      setImageEraserCursor(null);
+      clearImageEraserCursor();
       return;
     }
     const point = graphPointAtPointer(event);
     if (!point) {
-      setImageEraserCursor(null);
+      clearImageEraserCursor();
       return;
     }
 
-    // The brush stays visible anywhere inside the graph, not only over the
-    // image. Hiding it whenever the pointer left the layer made the brush
-    // vanish exactly when the user was lining up a stroke at an image edge.
-    // Scale from the layer that would actually be erased, so the ring is a
-    // truthful preview; with no target, fall back to unscaled zoom.
-    const sourceHit = sourceLayerHitsAtPoint(point.x, point.y)[0];
-    const scaleSource = sourceHit?.type === "source" ? sourceHit.layout.source : resolveEraseTargetSource(point);
-    const details = scaleSource ? placementForSource(scaleSource) : null;
-    const scale = details?.bounds.width && details.bounds.height
-      ? Math.min(details.placement.drawWidth / details.bounds.width, details.placement.drawHeight / details.bounds.height)
-      : 1;
-    const radius = Math.max(4, imageEraserRadiusRef.current * scale * zoom);
+    // The brush stays visible anywhere inside the graph, not only over an
+    // image. It intentionally has no selected-layer affinity: every unlocked
+    // source whose content intersects the footprint is eligible for the same
+    // erase gesture. Its on-canvas ring deliberately comes straight from the
+    // graph-space size, never from a hovered source image's intrinsic scale.
+    const radius = Math.max(4, imageEraserRadiusRef.current * zoom);
     const next = {
       x: outsideNumberMargin + point.x * GRAPH_MAJOR_CELL_PIXELS * zoom,
       y: outsideNumberMargin + point.y * GRAPH_MAJOR_CELL_PIXELS * zoom,
       radius,
     };
-    setImageEraserCursor((current) =>
-      current && Math.abs(current.x - next.x) < 0.5 && Math.abs(current.y - next.y) < 0.5 && Math.abs(current.radius - next.radius) < 0.5
-        ? current
-        : next,
-    );
+    if (!Number.isFinite(next.x) || !Number.isFinite(next.y) || !Number.isFinite(next.radius)) {
+      clearImageEraserCursor();
+      return;
+    }
+    const current = imageEraserCursorRef.current;
+    if (
+      current
+      && Math.abs(current.x - next.x) < 0.5
+      && Math.abs(current.y - next.y) < 0.5
+      && Math.abs(current.radius - next.radius) < 0.5
+    ) return;
+    paintImageEraserCursor(next);
+  }
+
+  /**
+   * Resolves every rendered source currently touched by the brush. A target
+   * keeps only its own source-local path state, so one drag stays a single
+   * undo step without joining strokes across unrelated images when the brush
+   * leaves and re-enters an overlap.
+   */
+  function collectEraseTargetsAtPoint(
+    dragState: DragState,
+    point: { x: number; y: number },
+  ): ImageEraseTarget[] {
+    const targets = dragState.eraseTargets ?? new Map<string, ImageEraseTarget>();
+    dragState.eraseTargets = targets;
+    const activeIds = new Set<string>();
+    const activeTargets: ImageEraseTarget[] = [];
+
+    for (const hit of erasableSourceHitsAtPoint(point.x, point.y, {
+      brushRadius: imageEraserRadiusRef.current,
+      brushShape: imageEraserShapeRef.current,
+    })) {
+      if (hit.type !== "source") continue;
+      const source = hit.layout.source;
+      const details = placementForSource(source);
+      const pristine = sourceCanvasesRef.current.get(source.id);
+      if (!details || !pristine?.width || !pristine.height) continue;
+
+      let target = targets.get(source.id);
+      if (!target) {
+        target = {
+          sourceId: source.id,
+          bounds: details.bounds,
+          placement: details.placement,
+          canvasWidth: pristine.width,
+          canvasHeight: pristine.height,
+          startsNewStroke: true,
+        };
+        targets.set(source.id, target);
+      } else {
+        target.bounds = details.bounds;
+        target.placement = details.placement;
+        target.canvasWidth = pristine.width;
+        target.canvasHeight = pristine.height;
+      }
+      activeIds.add(source.id);
+      activeTargets.push(target);
+    }
+
+    // A later re-entry must start a new stroke for that source, otherwise a
+    // gap between images would be bridged by a line of erased pixels.
+    for (const [sourceId, target] of targets) {
+      if (!activeIds.has(sourceId)) target.startsNewStroke = true;
+    }
+    return activeTargets;
   }
 
   function startImageEraseAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
     const point = graphPointAtPointer(event);
-    const target = resolveEraseTargetSource(point);
-    if (!target) {
-      setNotice({ tone: "info", text: "Add or select an image layer to erase." });
+    if (!point || !collectEraseTargetsAtPoint(dragState, point).length) {
+      setNotice({ tone: "info", text: "Start the brush on an unlocked image to erase." });
       return;
     }
-    const placement = placementForSource(target);
-    if (!placement) return;
-    const pristine = sourceCanvasesRef.current.get(target.id);
-    if (!pristine || !pristine.width || !pristine.height) return;
-    dragState.eraseTargetSourceId = target.id;
-    dragState.eraseBounds = placement.bounds;
-    dragState.erasePlacement = placement.placement;
-    dragState.eraseLastPoint = undefined;
-    dragState.eraseCanvasWidth = pristine.width;
-    dragState.eraseCanvasHeight = pristine.height;
-    if (selectedSourceId !== target.id) selectSourceLayer(target.id);
     eraseImageAtPointer(event, dragState);
   }
 
@@ -3419,66 +3567,99 @@ export function EditorClient({ project }: { project: Project }) {
   const lassoCloseDistanceCells = Math.max(0.5, LASSO_CLOSE_DISTANCE_CM / Math.max(0.01, settings.cellSizeCm || 1));
 
   function cancelLasso() {
+    lassoVerticesRef.current = [];
     setLassoVertices([]);
     setLassoCursor(null);
   }
 
   /**
-   * Commits the traced region to the target source's erase strokes.
-   *
-   * Vertices are mapped through the same placement inverse the brush uses, then
-   * stored as normalized UV so the region stays aligned when the working canvas
-   * is downscaled. A vertex that falls outside the image aborts the whole
-   * region rather than being clamped, which would silently distort its shape.
+   * Resolves every unlocked source touched or enclosed by a lasso. The lasso
+   * has no selected/topmost affinity: intersecting artwork is the only target
+   * rule, which makes overlapping source edits deterministic.
+   */
+  function resolveLassoTargetSources(vertices: LassoVertex[]): GraphSourceImage[] {
+    const graphPoints = vertices.map((vertex) => ({
+      x: vertex.x * GRAPH_MAJOR_CELL_PIXELS,
+      y: vertex.y * GRAPH_MAJOR_CELL_PIXELS,
+    }));
+    return sourceRenderOrder(settingsRef.current.sourceImages).flatMap((layout) => {
+      const source = layout.source;
+      if (source.visible === false || source.locked) return [];
+      const details = placementForSource(source);
+      return details && graphPolygonIntersectsPlacedContent(graphPoints, details.placement, details.bounds, 1)
+        ? [source]
+        : [];
+    });
+  }
+
+  /**
+   * Commits one traced region to every intersected source. The polygon is
+   * clipped in each source's own coordinate system before it is converted to
+   * normalized UV, so a large lasso can safely cover a smaller overlapping
+   * image without producing invalid coordinates or selecting a single layer.
    */
   function commitLassoRegion(vertices: LassoVertex[]) {
     if (vertices.length < 3) {
       setNotice({ tone: "info", text: "Place at least three points before closing." });
       return;
     }
-    const target = resolveEraseTargetSource(vertices[0]);
-    if (!target) {
-      setNotice({ tone: "info", text: "Add or select an image layer to erase." });
+    const targets = resolveLassoTargetSources(vertices);
+    if (!targets.length) {
+      setNotice({ tone: "info", text: "Trace a region that intersects an unlocked image." });
       return;
     }
-    const details = placementForSource(target);
-    const pristine = sourceCanvasesRef.current.get(target.id);
-    // Previously a silent return, which was indistinguishable from the click
-    // simply not registering.
-    if (!details || !pristine?.width || !pristine.height) {
-      setNotice({ tone: "error", text: "That image is still loading. Try again in a moment." });
+    const graphPoints = vertices.map((vertex) => ({
+      x: vertex.x * GRAPH_MAJOR_CELL_PIXELS,
+      y: vertex.y * GRAPH_MAJOR_CELL_PIXELS,
+    }));
+    const targetPolygons = new Map<string, LassoVertex[]>();
+    let hasLoadingTarget = false;
+    for (const target of targets) {
+      const details = placementForSource(target);
+      const pristine = sourceCanvasesRef.current.get(target.id);
+      if (!details || !pristine?.width || !pristine.height) {
+        hasLoadingTarget = true;
+        continue;
+      }
+      const sourcePolygon = clipGraphPolygonToPlacedContent(graphPoints, details.placement, details.bounds);
+      if (sourcePolygon.length < 3) continue;
+      const points = sourcePolygon.map((point) => ({ x: point.x / pristine.width, y: point.y / pristine.height }));
+      const outOfRange = points.some((point) => (
+        point.x < -MAX_POLYGON_UV_OVERSHOOT
+        || point.x > 1 + MAX_POLYGON_UV_OVERSHOOT
+        || point.y < -MAX_POLYGON_UV_OVERSHOOT
+        || point.y > 1 + MAX_POLYGON_UV_OVERSHOOT
+      ));
+      if (!outOfRange) targetPolygons.set(target.id, points);
+    }
+    if (!targetPolygons.size) {
+      setNotice({
+        tone: hasLoadingTarget ? "error" : "info",
+        text: hasLoadingTarget
+          ? "The intersected images are still loading. Try again in a moment."
+          : "Trace a region that overlaps image content.",
+      });
       return;
     }
 
-    const points: LassoVertex[] = [];
-    for (const vertex of vertices) {
-      const sourcePoint = graphPixelToSourcePixel(
-        vertex.x * GRAPH_MAJOR_CELL_PIXELS,
-        vertex.y * GRAPH_MAJOR_CELL_PIXELS,
-        details.placement,
-        details.bounds,
-      );
-      // Vertices may sit anywhere on the graph, including outside the image.
-      // They are kept unclamped so the traced shape is preserved exactly;
-      // canvas fill() clips the region to the layer when it is applied.
-      points.push({ x: sourcePoint.x / pristine.width, y: sourcePoint.y / pristine.height });
-    }
-
+    // Source-local clipping keeps every polygon within the normalized-UV
+    // contract before it reaches `normalizeEraseStrokes`.
     const fill = lassoFill === "erase" ? undefined : lassoFill;
     setSettingsWithHistory((current) => {
-      const index = current.sourceImages.findIndex((source) => source.id === target.id);
-      if (index < 0) return current;
-      const source = current.sourceImages[index];
-      const strokes = [
-        ...(source.eraseStrokes ?? []),
-        // Radius is unused by a polygon but the stroke shape requires one.
-        fill
+      let changed = false;
+      const sourceImages = current.sourceImages.map((source) => {
+        const points = targetPolygons.get(source.id);
+        if (!points) return source;
+        changed = true;
+        const nextStroke = fill
           ? { points, radius: 0.01, shape: "polygon" as const, fill }
-          : { points, radius: 0.01, shape: "polygon" as const },
-      ];
-      const sourceImages = current.sourceImages.slice();
-      sourceImages[index] = { ...source, eraseStrokes: normalizeEraseStrokes(strokes) };
-      return deriveGraphSettings({ ...current, sourceImages });
+          : { points, radius: 0.01, shape: "polygon" as const };
+        return {
+          ...source,
+          eraseStrokes: normalizeEraseStrokes([...(source.eraseStrokes ?? []), nextStroke]),
+        };
+      });
+      return changed ? deriveGraphSettings({ ...current, sourceImages }) : current;
     });
     cancelLasso();
   }
@@ -3486,69 +3667,178 @@ export function EditorClient({ project }: { project: Project }) {
   function handleLassoPointerDown(event: ReactPointerEvent<HTMLElement>) {
     const point = graphPointAtPointer(event);
     if (!point) return;
-    const first = lassoVertices[0];
+    const placed = lassoVerticesRef.current;
+    const first = placed[0];
     // Clicking back on the first vertex encloses the region.
-    if (first && lassoVertices.length >= 3 && Math.hypot(point.x - first.x, point.y - first.y) <= lassoCloseDistanceCells) {
-      commitLassoRegion(lassoVertices);
+    if (first && placed.length >= 3 && Math.hypot(point.x - first.x, point.y - first.y) <= lassoCloseDistanceCells) {
+      commitLassoRegion(placed);
       return;
     }
-    setLassoVertices((current) => [...current, { x: point.x, y: point.y }]);
+    const next = [...placed, { x: point.x, y: point.y }];
+    lassoVerticesRef.current = next;
+    setLassoVertices(next);
+  }
+
+  /**
+   * Paints the same source-local brush footprint into the visible preview while
+   * the expensive vector pass is deferred. The clip is essential: it keeps a
+   * target's temporary cut inside that image's transformed pristine content
+   * frame instead of blanking neighbouring graph content outside the image.
+   */
+  function paintEraseFootprintPreview(
+    target: ImageEraseTarget,
+    sourcePoint: { x: number; y: number },
+    previousSourcePoint: { x: number; y: number } | undefined,
+  ) {
+    const preview = previewCanvasRef.current;
+    const { placement, bounds } = target;
+    if (!preview || !bounds.width || !bounds.height) return;
+    const context = preview.getContext("2d");
+    if (!context) return;
+
+    const rotation = ((placement.rotationDegrees % 360) + 360) % 360;
+    const rotatedSideways = rotation === 90 || rotation === 270;
+    const fittedWidth = rotatedSideways ? placement.drawHeight : placement.drawWidth;
+    const fittedHeight = rotatedSideways ? placement.drawWidth : placement.drawHeight;
+    const centerX = placement.drawX + placement.drawWidth / 2;
+    const centerY = placement.drawY + placement.drawHeight / 2;
+    const sourceCenterX = bounds.x + bounds.width / 2;
+    const sourceCenterY = bounds.y + bounds.height / 2;
+    const radius = sourcePixelRadiusForGraphBrush(
+      imageEraserRadiusRef.current,
+      placement,
+      bounds,
+    );
+
+    context.save();
+    context.globalCompositeOperation = "destination-out";
+    context.fillStyle = "rgba(0,0,0,1)";
+    context.strokeStyle = "rgba(0,0,0,1)";
+    context.translate(centerX, centerY);
+    context.rotate((rotation * Math.PI) / 180);
+    context.scale(placement.flipX ? -1 : 1, placement.flipY ? -1 : 1);
+    context.scale(fittedWidth / bounds.width, fittedHeight / bounds.height);
+    context.translate(-sourceCenterX, -sourceCenterY);
+    context.beginPath();
+    context.rect(bounds.x, bounds.y, bounds.width, bounds.height);
+    context.clip();
+
+    if (imageEraserShapeRef.current === "square") {
+      const size = radius * 2;
+      const stamp = (x: number, y: number) => context.fillRect(x - radius, y - radius, size, size);
+      if (previousSourcePoint) {
+        const distance = Math.hypot(sourcePoint.x - previousSourcePoint.x, sourcePoint.y - previousSourcePoint.y);
+        const steps = Math.max(1, Math.ceil(distance / Math.max(1, radius / 2)));
+        for (let step = 1; step <= steps; step += 1) {
+          stamp(
+            previousSourcePoint.x + ((sourcePoint.x - previousSourcePoint.x) * step) / steps,
+            previousSourcePoint.y + ((sourcePoint.y - previousSourcePoint.y) * step) / steps,
+          );
+        }
+      }
+      stamp(sourcePoint.x, sourcePoint.y);
+    } else {
+      if (previousSourcePoint) {
+        context.lineCap = "round";
+        context.lineJoin = "round";
+        context.lineWidth = radius * 2;
+        context.beginPath();
+        context.moveTo(previousSourcePoint.x, previousSourcePoint.y);
+        context.lineTo(sourcePoint.x, sourcePoint.y);
+        context.stroke();
+      }
+      context.beginPath();
+      context.arc(sourcePoint.x, sourcePoint.y, radius, 0, Math.PI * 2);
+      context.fill();
+    }
+    context.restore();
   }
 
   function eraseImageAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
-    if (!dragState.eraseTargetSourceId || !dragState.eraseBounds || !dragState.erasePlacement) return;
-    const canvasWidth = dragState.eraseCanvasWidth ?? 0;
-    const canvasHeight = dragState.eraseCanvasHeight ?? 0;
-    if (!canvasWidth || !canvasHeight) return;
     const point = graphPointAtPointer(event);
     if (!point) return;
-    const sourcePoint = graphPixelToSourcePixel(
-      point.x * GRAPH_MAJOR_CELL_PIXELS,
-      point.y * GRAPH_MAJOR_CELL_PIXELS,
-      dragState.erasePlacement,
-      dragState.eraseBounds,
-    );
-    const radiusPx = imageEraserRadiusRef.current;
-    const minStep = Math.max(1, radiusPx * 0.6);
-    const last = dragState.eraseLastPoint;
-    if (last && Math.hypot(sourcePoint.x - last.x, sourcePoint.y - last.y) < minStep) return;
-    dragState.eraseLastPoint = sourcePoint;
-    // Persist strokes in resolution-independent UV space so downscaled reloads stay aligned.
-    const u = sourcePoint.x / canvasWidth;
-    const v = sourcePoint.y / canvasHeight;
-    if (u < 0 || u > 1 || v < 0 || v > 1) {
-      // Pointer left the image: end the active stroke so re-entry does not cut a line across it.
-      dragState.eraseStartsNewStroke = true;
-      return;
-    }
-    const startNewStroke = dragState.eraseStartsNewStroke === true;
-    dragState.eraseStartsNewStroke = false;
-    const radius = Math.max(0.001, Math.min(0.5, radiusPx / canvasWidth));
-    const rounded = { x: u, y: v };
-    const targetId = dragState.eraseTargetSourceId;
+    const mutations = new Map<string, {
+      point: { x: number; y: number };
+      radius: number;
+      startNewStroke: boolean;
+      target: ImageEraseTarget;
+      sourcePoint: { x: number; y: number };
+      previousSourcePoint?: { x: number; y: number };
+    }>();
 
-    setSettings((current) => {
-      const index = current.sourceImages.findIndex((source) => source.id === targetId);
-      if (index < 0) return current;
-      const source = current.sourceImages[index];
-      const strokes = source.eraseStrokes ? source.eraseStrokes.map((stroke) => ({ ...stroke, points: stroke.points })) : [];
-      if (!dragState.historyRecorded) {
-        pushUndoSettings(current);
-        dragState.historyRecorded = true;
-        strokes.push({ points: [rounded], radius, shape: imageEraserShapeRef.current });
-      } else if (strokes.length && !startNewStroke) {
+    for (const target of collectEraseTargetsAtPoint(dragState, point)) {
+      if (!target.canvasWidth || !target.canvasHeight) continue;
+      const sourceRadiusPx = sourcePixelRadiusForGraphBrush(
+        imageEraserRadiusRef.current,
+        target.placement,
+        target.bounds,
+      );
+      const minStep = Math.max(1, sourceRadiusPx * 0.6);
+      const mappedPoint = graphPixelToSourcePixel(
+        point.x * GRAPH_MAJOR_CELL_PIXELS,
+        point.y * GRAPH_MAJOR_CELL_PIXELS,
+        target.placement,
+        target.bounds,
+      );
+      // A brush can meet an image at its content edge while its centre is just
+      // outside the source canvas. Store the nearest valid UV centre; canvas
+      // clipping preserves only the portion that actually overlaps the image.
+      const sourcePoint = {
+        x: Math.min(target.canvasWidth, Math.max(0, mappedPoint.x)),
+        y: Math.min(target.canvasHeight, Math.max(0, mappedPoint.y)),
+      };
+      const last = target.lastPoint;
+      if (last && Math.hypot(sourcePoint.x - last.x, sourcePoint.y - last.y) < minStep) continue;
+      target.lastPoint = sourcePoint;
+      const startNewStroke = target.startsNewStroke;
+      target.startsNewStroke = false;
+      mutations.set(target.sourceId, {
+        point: { x: sourcePoint.x / target.canvasWidth, y: sourcePoint.y / target.canvasHeight },
+        radius: Math.max(0.001, Math.min(0.5, sourceRadiusPx / target.canvasWidth)),
+        startNewStroke,
+        target,
+        sourcePoint,
+        previousSourcePoint: startNewStroke ? undefined : last,
+      });
+    }
+    if (!mutations.size) return;
+
+    // Fast feedback is a preview only; every target still receives its own
+    // persisted UV stroke below and the settled render remains authoritative.
+    for (const mutation of mutations.values()) {
+      paintEraseFootprintPreview(
+        mutation.target,
+        mutation.sourcePoint,
+        mutation.previousSourcePoint,
+      );
+    }
+
+    const current = settingsRef.current;
+    if (!dragState.historyRecorded) {
+      pushUndoSettings(current);
+      dragState.historyRecorded = true;
+    }
+    const sourceImages = current.sourceImages.map((source) => {
+      const mutation = mutations.get(source.id);
+      if (!mutation) return source;
+      const strokes = source.eraseStrokes
+        ? source.eraseStrokes.map((stroke) => ({ ...stroke, points: [...stroke.points] }))
+        : [];
+      if (strokes.length && !mutation.startNewStroke) {
         const activeStroke = strokes[strokes.length - 1];
-        strokes[strokes.length - 1] = { ...activeStroke, points: [...activeStroke.points, rounded] };
+        strokes[strokes.length - 1] = { ...activeStroke, points: [...activeStroke.points, mutation.point] };
       } else {
-        strokes.push({ points: [rounded], radius, shape: imageEraserShapeRef.current });
+        strokes.push({
+          points: [mutation.point],
+          radius: mutation.radius,
+          shape: imageEraserShapeRef.current,
+        });
       }
-      const nextStrokes = normalizeEraseStrokes(strokes);
-      const sourceImages = current.sourceImages.slice();
-      sourceImages[index] = { ...source, eraseStrokes: nextStrokes };
-      const next = deriveGraphSettings({ ...current, sourceImages });
-      settingsRef.current = next;
-      return next;
+      return { ...source, eraseStrokes: normalizeEraseStrokes(strokes) };
     });
+    const next = deriveGraphSettings({ ...current, sourceImages });
+    settingsRef.current = next;
+    setSettings(next);
   }
 
   function startLineAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
@@ -4557,6 +4847,7 @@ export function EditorClient({ project }: { project: Project }) {
     setCopiedFillColor(null);
     fillRegionMapRef.current = null;
     fillRegionIdByMapIdRef.current = new Map();
+    settledFillRegionFrameRef.current = null;
     sourceCanvasRef.current = null;
     sourceCanvasesRef.current = new Map();
     sourceWorkingCanvasesRef.current = new Map();
@@ -4850,11 +5141,18 @@ export function EditorClient({ project }: { project: Project }) {
     let cancelled = false;
     const controller = new AbortController();
     const dragActive = isDraggingGraph && dragStateRef.current !== null;
-    const sourcePositionDragActive = dragActive && dragStateRef.current?.kind === "source";
+    const dragKind = dragStateRef.current?.kind;
+    // Source moves have a DOM overlay, while erasing paints a clipped
+    // source-local footprint into the preview canvas; both defer the real
+    // pipeline to pointer-up. An erase belongs here because every stroke point
+    // changes `eraseStrokesSignature`, which is part of the vectorizer cache
+    // key, and re-running it mid-drag re-vectorizes sources through /api/vectorize
+    // per coalesced batch.
+    const previewOnlyDragActive = dragActive && (dragKind === "source" || dragKind === "image-erase");
 
     // A selected source gets a lightweight DOM preview while it is moved. The
     // authoritative masks are rebuilt once on pointer-up instead of on every move.
-    if (sourcePositionDragActive) {
+    if (previewOnlyDragActive) {
       setProcessing(false);
       return () => {
         cancelled = true;
@@ -4902,14 +5200,19 @@ export function EditorClient({ project }: { project: Project }) {
       const sourceLayers = layouts
         .filter((layout) => layout.source.visible !== false && sourceCanvasesRef.current.has(layout.source.id))
         .map((layout) => {
+          const pristineSourceCanvas = sourceCanvasesRef.current.get(layout.source.id);
           const sourceCanvas = ensureWorkingSourceCanvas(layout.source);
-          if (!sourceCanvas) throw new Error(`${layout.source.name} is not available.`);
+          if (!sourceCanvas || !pristineSourceCanvas) throw new Error(`${layout.source.name} is not available.`);
           return {
             id: fillRegionLayerScope("source", layout.source.id),
             canvas: sourceCanvas,
             settings: sourceSettings(settings, layout.source),
             vectorizerSource: {
               canvas: sourceCanvas,
+              // Erasing/background removal changes pixels, not the physical
+              // source frame. Keep this pristine frame for placement so a cut
+              // at an artwork edge cannot re-crop and re-scale the layer.
+              contentBounds: findContentBounds(pristineSourceCanvas),
               placement: {
                 x: layout.x,
                 y: layout.y,
@@ -4974,7 +5277,78 @@ export function EditorClient({ project }: { project: Project }) {
         mode: dragActive ? "draft" : "full",
       })
         .then((result) => {
-          if (cancelled) return;
+          // Async vectorization can outlive an abort. Never let that older
+          // graph frame replace the current document after a newer request
+          // has started.
+          if (
+            cancelled
+            || documentRevision !== renderRequestRevisionRef.current
+            || buildProcessingSignature(settingsRef.current) !== processingSignature
+          ) {
+            return;
+          }
+
+          // Region IDs normally follow the artwork, but re-vectorization and
+          // generated line/shape topology can relabel a connected component.
+          // Reconcile the rendered pixels before committing this frame so a
+          // pre-existing colour follows the actual enclosed area rather than
+          // falling back to its default on duplicate/undo/redo.
+          const currentSettings = settingsRef.current;
+          const previousFillFrame = settledFillRegionFrameRef.current;
+          const reconciledFillOverrides = !dragActive
+            ? reconcileFillRegionOverrides({
+                overrides: currentSettings.fillRegions,
+                previous: previousFillFrame
+                  ? previousFillFrame
+                  : {
+                      fillRegions: result.fillRegions,
+                      fillRegionMap: result.fillRegionMap,
+                      width: result.canvas.width,
+                      height: result.canvas.height,
+                    },
+                next: {
+                  fillRegions: result.fillRegions,
+                  fillRegionMap: result.fillRegionMap,
+                  width: result.canvas.width,
+                  height: result.canvas.height,
+                },
+              })
+            : null;
+
+          if (reconciledFillOverrides && reconciledFillOverrides.fillRegions !== currentSettings.fillRegions) {
+            const nextSettings = deriveGraphSettings({
+              ...currentSettings,
+              fillRegions: reconciledFillOverrides.fillRegions,
+            });
+            const reconciledIds = new Map<string, string>();
+            for (const match of reconciledFillOverrides.matches) {
+              if (match.fromId !== match.toId && !reconciledIds.has(match.fromId)) {
+                reconciledIds.set(match.fromId, match.toId);
+              }
+            }
+            settingsRef.current = nextSettings;
+            forceNextProcessingRef.current = true;
+            setSettings(nextSettings);
+            if (reconciledIds.size) {
+              setSelectedFillRegionId((current) => (current ? reconciledIds.get(current) ?? current : null));
+              setFloatingPalette((current) => (
+                current && reconciledIds.has(current.regionId)
+                  ? { ...current, regionId: reconciledIds.get(current.regionId)! }
+                  : current
+              ));
+            }
+            setFailedProcessingSignature(null);
+            finishComposition({
+              retainedBytes: estimateCanvasBytes([
+                ...sourceCanvasesRef.current.values(),
+                ...clipartCanvasesRef.current.values(),
+                result.canvas,
+              ]),
+            });
+            logProcessingTiming("preview-processing", startAt);
+            return;
+          }
+
           artworkCanvasRef.current = result.canvas;
           // Rebuild the flattened image (backdrop + grid + artwork) so export/save
           // and the processed-PNG upload keep the exact output they had before the
@@ -4988,6 +5362,14 @@ export function EditorClient({ project }: { project: Project }) {
           }
           fillRegionMapRef.current = result.fillRegionMap;
           fillRegionIdByMapIdRef.current = new Map(result.fillRegions.map((region) => [region.mapId, region.id] as const));
+          if (!dragActive) {
+            settledFillRegionFrameRef.current = {
+              fillRegions: result.fillRegions,
+              fillRegionMap: result.fillRegionMap,
+              width: result.canvas.width,
+              height: result.canvas.height,
+            };
+          }
           drawPreview(result.canvas);
           setFillRegions(result.fillRegions);
           setSelectedFillRegionId((current) => (current && result.fillRegions.some((region) => region.id === current) ? current : null));
@@ -5664,12 +6046,14 @@ export function EditorClient({ project }: { project: Project }) {
       }
       if (event.key === "Backspace") {
         event.preventDefault();
-        setLassoVertices((current) => current.slice(0, -1));
+        const next = lassoVerticesRef.current.slice(0, -1);
+        lassoVerticesRef.current = next;
+        setLassoVertices(next);
         return;
       }
       if (event.key === "Enter") {
         event.preventDefault();
-        commitLassoRegion(lassoVertices);
+        commitLassoRegion(lassoVerticesRef.current);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -6741,7 +7125,7 @@ export function EditorClient({ project }: { project: Project }) {
           <NumberField label={shapeUsesSingleSize(shape.kind) ? "Size" : "Width"} unit="cm" emphasis="primary" value={shapePhysicalWidthCm(shape)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={shape.locked} onChange={(value) => updateGraphShapePhysicalWidthCm(shape.id, value)} />
           {shapeUsesSingleSize(shape.kind) ? null : <NumberField label="Height" unit="cm" emphasis="primary" value={shapePhysicalHeightCm(shape)} min={0.01} max={1000} step={0.1} allowDecimalInput disabled={shape.locked} onChange={(value) => updateGraphShapePhysicalHeightCm(shape.id, value)} />}
         </InspectorFieldGrid>
-        <InspectorFieldGrid>
+        <InspectorFieldGrid columns={openPath ? 2 : 1}>
           <NumberField label="Stroke width" value={shape.strokeWidth} min={1} max={24} disabled={shape.locked} onChange={(value) => updateGraphShape(shape.id, { strokeWidth: value })} />
           {openPath ? (
             <label className="editor-inspector-field">
@@ -7246,32 +7630,16 @@ export function EditorClient({ project }: { project: Project }) {
           : selectedLayerHidden
             ? "hidden"
             : "ready",
-    clipboardCount,
+    preview: selectedSource
+      ? renderSourceThumbnail(selectedSource, "h-full w-full")
+      : selectedShapeLayer
+        ? renderShapeThumbnail(selectedShapeLayer, "h-full w-full")
+        : selectedClipartLayer
+          ? renderClipartThumbnail(selectedClipartLayer, "h-full w-full")
+          : selectedCellLayer
+            ? renderCellThumbnail(selectedCellLayer, "h-full w-full")
+            : null,
     actions: {
-      copy: {
-        disabled: !hasSelectedLayer,
-        onAction: copySelectedLayers,
-      },
-      paste: {
-        disabled: !clipboardCount,
-        onAction: pasteLayers,
-      },
-      rotateLeft: {
-        disabled: !hasSelectedLayer || selectedLayerContainsLocked,
-        onAction: () => rotateSelectedLayers(-1),
-      },
-      rotateRight: {
-        disabled: !hasSelectedLayer || selectedLayerContainsLocked,
-        onAction: () => rotateSelectedLayers(1),
-      },
-      flipHorizontal: {
-        disabled: !hasSelectedLayer || selectedLayerContainsLocked,
-        onAction: () => flipSelectedLayers("x"),
-      },
-      flipVertical: {
-        disabled: !hasSelectedLayer || selectedLayerContainsLocked,
-        onAction: () => flipSelectedLayers("y"),
-      },
       nudgeLeft: {
         disabled: !hasSelectedLayer || selectedLayerLocked,
         onAction: () => nudgeSelectedSource(-1, 0),
@@ -7467,6 +7835,15 @@ export function EditorClient({ project }: { project: Project }) {
         }
       : null;
   const selectionTransformBox = selectedGroupBox ?? selectedSourceBox ?? selectedShapeBox ?? selectedClipartBox;
+  // Keep the current selection for inspector/context actions, but render
+  // canvas selection chrome only while the Select tool is active. Destructive
+  // tools must never look like they are targeting one particular image.
+  const showCanvasSelectionOverlay = Boolean(
+    !showOriginal
+    && hasSelectedLayer
+    && canvasTool === "pointer"
+    && drawingTool === "image",
+  );
   const selectionTransformStyle = selectionTransformBox
     ? {
         left: selectionTransformBox.left + selectionTransformBox.width / 2,
@@ -7560,8 +7937,11 @@ export function EditorClient({ project }: { project: Project }) {
     } else if (nextDrawingTool === "lasso") {
       setDrawTab("shape");
     }
-    if (nextDrawingTool !== "image-eraser") setImageEraserCursor(null);
+    if (nextDrawingTool !== "image-eraser") {
+      clearImageEraserCursor();
+    }
     if (nextDrawingTool !== "lasso") {
+      lassoVerticesRef.current = [];
       setLassoVertices([]);
       setLassoCursor(null);
     }
@@ -8201,70 +8581,6 @@ export function EditorClient({ project }: { project: Project }) {
           }}
           className="editor-canvas-panel__stage ui-canvas-bg relative min-h-0 overflow-auto p-8"
         >
-          {drawingTool === "lasso" && !showOriginal ? (
-            <div className="editor-context-toolbar-wrap pointer-events-none sticky top-0 z-30 -mx-8 -mt-8 mb-4 flex justify-center px-8 pt-2">
-              <div className="editor-context-toolbar pointer-events-auto">
-                <span className="editor-context-toolbar__title"><Scissors size={14} aria-hidden="true" />Lasso region</span>
-                <label className="editor-context-toolbar__field">
-                  Apply
-                  <select value={lassoFill} onChange={(event) => setLassoFill(event.target.value as GraphEraseRegionFill | "erase")}>
-                    <option value="erase">Erase</option>
-                    <option value="#ffffff">Fill white</option>
-                    <option value="#000000">Fill black</option>
-                  </select>
-                </label>
-                <span className="editor-context-toolbar__field">
-                  {lassoVertices.length
-                    ? `${lassoVertices.length} point${lassoVertices.length === 1 ? "" : "s"} — click the first to close`
-                    : "Click to place points"}
-                </span>
-                {/* Explicit close, so applying the region never depends on
-                    landing a click precisely on the first vertex. */}
-                <button
-                  type="button"
-                  className="editor-context-toolbar__btn"
-                  onClick={() => commitLassoRegion(lassoVertices)}
-                  disabled={lassoVertices.length < 3}
-                >
-                  <Check size={13} aria-hidden="true" />Close region
-                </button>
-                <button
-                  type="button"
-                  className="editor-context-toolbar__btn"
-                  onClick={cancelLasso}
-                  disabled={!lassoVertices.length}
-                >
-                  <RotateCcw size={13} aria-hidden="true" />Cancel
-                </button>
-                <button type="button" className="editor-context-toolbar__btn editor-context-toolbar__btn--primary" onClick={() => selectEditorTool("select")}>
-                  <Check size={13} aria-hidden="true" />Done
-                </button>
-              </div>
-            </div>
-          ) : null}
-          {(drawingTool === "line" || drawingTool === "shape") && !showOriginal ? (
-            <div className="editor-context-toolbar-wrap pointer-events-none sticky top-0 z-30 -mx-8 -mt-8 mb-4 flex justify-center px-8 pt-2">
-              <div className="editor-context-toolbar pointer-events-auto">
-                <span className="editor-context-toolbar__title">
-                  <SquarePen size={14} aria-hidden="true" />
-                  {drawingTool === "line" ? "Draw Line" : "Draw Shape"}
-                </span>
-                <span className="editor-context-toolbar__field">
-                  {drawingTool === "line"
-                    ? GRAPH_SHAPE_KIND_LABELS[draftShapeKind]
-                    : armedShapeKind
-                      ? GRAPH_SHAPE_KIND_LABELS[armedShapeKind]
-                      : "Choose a shape in Focus Console"}
-                </span>
-                {drawingTool === "line" ? (
-                  <span className="editor-context-toolbar__field">±5° alignment · Alt frees angle</span>
-                ) : null}
-                <button type="button" className="editor-context-toolbar__btn editor-context-toolbar__btn--primary" onClick={() => selectEditorTool("select")}>
-                  <Check size={13} aria-hidden="true" />Done
-                </button>
-              </div>
-            </div>
-          ) : null}
           {(drawingTool === "image-eraser" || drawingTool === "background-remover") && !showOriginal ? (
             <div className="editor-context-toolbar-wrap pointer-events-none sticky top-0 z-30 -mx-8 -mt-8 mb-4 flex justify-center px-8 pt-2">
               <div className="editor-context-toolbar pointer-events-auto">
@@ -8426,7 +8742,7 @@ export function EditorClient({ project }: { project: Project }) {
                 ref={previewCanvasRef}
                 onPointerDown={beginCanvasPointer}
                 onPointerMove={moveCanvasPointer}
-                onPointerLeave={() => setImageEraserCursor(null)}
+                onPointerLeave={clearImageEraserCursor}
                 onPointerUp={endCanvasPointer}
                 onPointerCancel={endCanvasPointer}
                 onDoubleClick={openFillPaletteFromDoubleClick}
@@ -8519,18 +8835,14 @@ export function EditorClient({ project }: { project: Project }) {
                   );
                 })()
               ) : null}
-              {drawingTool === "image-eraser" && imageEraserCursor ? (
+              {drawingTool === "image-eraser" ? (
                 <div
+                  ref={imageEraserCursorNodeRef}
                   className={`pointer-events-none absolute z-30 border-2 border-cyan-300 bg-cyan-300/15 shadow-[0_0_0_1px_rgba(2,6,23,0.92),0_0_12px_rgba(34,211,238,0.65)] ${
                     imageEraserShape === "square" ? "rounded-[2px]" : "rounded-full"
                   }`}
                   aria-hidden="true"
-                  style={{
-                    left: imageEraserCursor.x - imageEraserCursor.radius,
-                    top: imageEraserCursor.y - imageEraserCursor.radius,
-                    width: imageEraserCursor.radius * 2,
-                    height: imageEraserCursor.radius * 2,
-                  }}
+                  style={{ display: "none" }}
                 />
               ) : null}
               {settings.showNumbers && settings.gridNumberPlacement === "outside" ? (
@@ -8671,7 +8983,7 @@ export function EditorClient({ project }: { project: Project }) {
                   },
                 ]}
               />
-              {selectedGroupBox ? (
+              {showCanvasSelectionOverlay && selectedGroupBox ? (
                 <div className={CANVAS_SELECTION_BOX_CLASS} style={selectedGroupBox} data-selection-hidden={selectedLayerHidden}>
                   {SOURCE_RESIZE_HANDLES.map((handle) => {
                     const handleVisible = sourceResizeHandleVisible(handle, showSelectionResizeHandles);
@@ -8694,7 +9006,7 @@ export function EditorClient({ project }: { project: Project }) {
                   })}
                 </div>
               ) : null}
-              {!selectedGroupBox && selectedShapeBox && selectedShapeLayer ? (
+              {showCanvasSelectionOverlay && !selectedGroupBox && selectedShapeBox && selectedShapeLayer ? (
                 <div
                   className={CANVAS_SELECTION_BOX_CLASS}
                   style={selectedShapeBox}
@@ -8721,14 +9033,14 @@ export function EditorClient({ project }: { project: Project }) {
                   })}
                 </div>
               ) : null}
-              {!selectedGroupBox && selectedClipartBox ? (
+              {showCanvasSelectionOverlay && !selectedGroupBox && selectedClipartBox ? (
                 <div
                   className={CANVAS_SELECTION_BOX_CLASS}
                   style={selectedClipartBox}
                   data-selection-hidden={selectedLayerHidden}
                 />
               ) : null}
-              {!selectedGroupBox && selectedSourceBox && selectedSourceLayout ? (
+              {showCanvasSelectionOverlay && !selectedGroupBox && selectedSourceBox && selectedSourceLayout ? (
                 <div
                   className={CANVAS_SELECTION_BOX_CLASS}
                   style={selectedSourceBox}
@@ -9105,6 +9417,11 @@ export function EditorClient({ project }: { project: Project }) {
             setDraftShapeStrokeStyle={setDraftShapeStrokeStyle}
             setDraftShapeFillColor={(value) => setDraftShapeFillColor(normalizeCanvasFillColor(value))}
             setPlacingClipartAssetId={setPlacingClipartAssetId}
+            lassoFill={lassoFill}
+            setLassoFill={setLassoFill}
+            lassoVertexCount={lassoVertices.length}
+            commitLasso={() => commitLassoRegion(lassoVerticesRef.current)}
+            cancelLasso={cancelLasso}
             draftClipartWidthCm={draftClipartWidthCm}
             draftClipartHeightCm={draftClipartHeightCm}
             draftClipartStrokeColor={draftClipartStrokeColor}

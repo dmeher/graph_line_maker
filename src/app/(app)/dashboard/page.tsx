@@ -36,10 +36,10 @@ function ProjectThumbnail({ project }: { project: ProjectSummary }) {
   const previewUrl = project.processedThumbUrl || project.processedImageUrl || project.originalImageUrl;
   if (previewUrl) {
     return (
-      <img
-        src={previewUrl}
-        alt=""
-        loading="lazy"
+        <img
+          src={previewUrl}
+          alt=""
+          loading="lazy"
         decoding="async"
         className="project-card__image studio-project-card__image"
       />

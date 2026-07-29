@@ -1,4 +1,5 @@
 import { GRAPH_MAJOR_CELL_PIXELS } from "../graph-paper.ts";
+import { normalizeRotationDegrees } from "../editor/source-layout.ts";
 
 export type FillRegionIdentityPlacement = {
   x: number;
@@ -35,6 +36,20 @@ export function isStoredFillRegionId(value: string) {
 }
 
 function normalizedRotation(value: number) {
+  // Layer transforms are intentionally quantized to the editor's 15-degree
+  // rotation step. Fill identities must apply that exact same transform when
+  // converting a rendered region back to local artwork coordinates; rounding
+  // to 90 degrees made every intermediate rotation resolve to a different
+  // persisted fill key after a re-render.
+  return normalizeRotationDegrees(value);
+}
+
+/**
+ * The first scoped-ID implementation rounded every rotation to a cardinal
+ * quarter turn. Keep that exact calculation available only as a read-time
+ * alias so existing saved colours can be promoted to the corrected identity.
+ */
+function legacyCardinalRotation(value: number) {
   return ((Math.round(value / 90) * 90) % 360 + 360) % 360;
 }
 
@@ -51,18 +66,20 @@ export function fillRegionLayerScope(type: "source" | "clipart" | "generated", i
  * Resolves an output point back into the unrotated, unflipped layer rectangle.
  * The resulting key follows the artwork when its layer is moved, rotated, or flipped.
  */
-export function createStableFillRegionId({
+function createFillRegionId({
   layerId,
   kind,
   centerX,
   centerY,
   placement,
+  rotationForIdentity,
 }: {
   layerId: string;
   kind: string;
   centerX: number;
   centerY: number;
   placement?: FillRegionIdentityPlacement;
+  rotationForIdentity: (value: number) => number;
 }) {
   if (!placement) return `${layerId}:${kind}:screen:${Math.round(centerX)}:${Math.round(centerY)}`;
 
@@ -72,7 +89,7 @@ export function createStableFillRegionId({
     return `${layerId}:${kind}:screen:${Math.round(centerX)}:${Math.round(centerY)}`;
   }
 
-  const rotation = normalizedRotation(placement.rotationDegrees);
+  const rotation = rotationForIdentity(placement.rotationDegrees);
   const sideways = rotation === 90 || rotation === 270;
   const fittedWidth = sideways ? drawHeight : drawWidth;
   const fittedHeight = sideways ? drawWidth : drawHeight;
@@ -91,6 +108,56 @@ export function createStableFillRegionId({
   const v = (localY + fittedHeight / 2) / fittedHeight;
 
   return `${layerId}:${kind}:${quantize(u)}:${quantize(v)}`;
+}
+
+export function createStableFillRegionId({
+  layerId,
+  kind,
+  centerX,
+  centerY,
+  placement,
+}: {
+  layerId: string;
+  kind: string;
+  centerX: number;
+  centerY: number;
+  placement?: FillRegionIdentityPlacement;
+}) {
+  return createFillRegionId({
+    layerId,
+    kind,
+    centerX,
+    centerY,
+    placement,
+    rotationForIdentity: normalizedRotation,
+  });
+}
+
+/**
+ * Reads a scoped fill key produced before arbitrary 15-degree rotations were
+ * supported by the identity transform. New edits always write the stable key.
+ */
+export function createLegacyCardinalFillRegionId({
+  layerId,
+  kind,
+  centerX,
+  centerY,
+  placement,
+}: {
+  layerId: string;
+  kind: string;
+  centerX: number;
+  centerY: number;
+  placement?: FillRegionIdentityPlacement;
+}) {
+  return createFillRegionId({
+    layerId,
+    kind,
+    centerX,
+    centerY,
+    placement,
+    rotationForIdentity: legacyCardinalRotation,
+  });
 }
 
 /** Promotes pre-stable numeric fill IDs to the matching current layer-scoped IDs. */

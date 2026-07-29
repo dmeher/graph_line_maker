@@ -139,19 +139,25 @@ export function normalizeLayerGroups(value: unknown): GraphLayerGroup[] {
   return groups;
 }
 
-/** Compact, stable signature of erase state used to invalidate processing / vector caches. */
+/**
+ * Stable full-geometry signature of erase state used to invalidate processing
+ * and vector caches. Every normalized point is included: a stroke can change
+ * materially while keeping the same count, endpoint, and radius.
+ */
 export function eraseStrokesSignature(strokes: GraphEraseStroke[] | undefined): string {
   if (!strokes?.length) return "0";
-  let points = 0;
-  let last = "";
-  for (const stroke of strokes) {
-    points += stroke.points.length;
-    const tail = stroke.points[stroke.points.length - 1];
-    // Shape is part of the signature: switching brush shape changes the erased
-    // pixels, so a cached processed layer must not be reused across it.
-    if (tail) last = `${tail.x.toFixed(4)},${tail.y.toFixed(4)}:${stroke.radius.toFixed(4)}:${stroke.shape ?? "circle"}:${stroke.fill ?? "erase"}`;
-  }
-  return `${strokes.length}/${points}/${last}`;
+  return strokes
+    .map((stroke) => {
+      // Coordinates and radii are normalized to this same precision before
+      // persistence. Keep the canonical representation here so equivalent
+      // settings have the same cache key while every meaningful geometry
+      // change invalidates a previously derived working canvas.
+      const points = stroke.points
+        .map((point) => `${point.x.toFixed(ERASE_COORD_DECIMALS)},${point.y.toFixed(ERASE_COORD_DECIMALS)}`)
+        .join(";");
+      return `${stroke.shape ?? "circle"}:${stroke.fill ?? "erase"}:${stroke.radius.toFixed(ERASE_COORD_DECIMALS)}:${points}`;
+    })
+    .join("|");
 }
 
 export function backgroundRemovalSignature(config: GraphBackgroundRemoval | undefined): string {

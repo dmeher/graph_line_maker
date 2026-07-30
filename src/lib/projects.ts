@@ -73,7 +73,16 @@ import {
   normalizeGroupId,
   normalizeLayerGroups,
 } from "@/lib/editor/layer-extras";
-import type { GraphClipartAsset, GraphClipartImage, GraphSettings, GraphSourceImage, PaletteColor, Project, ProjectSummary } from "@/lib/types";
+import type {
+  GraphClipartAsset,
+  GraphClipartImage,
+  GraphSettings,
+  GraphSourceImage,
+  PaletteColor,
+  Project,
+  ProjectScope,
+  ProjectSummary,
+} from "@/lib/types";
 
 const MAX_CLIPART_ASSETS = 120;
 const MAX_CLIPART_IMAGES = 500;
@@ -917,6 +926,8 @@ type ProjectSummaryPageOptions = {
   query?: string;
   cursor?: string;
   pageSize?: number;
+  /** `all` is honoured for admins only; every other role is forced to `mine`. */
+  scope?: ProjectScope;
 };
 
 type ProjectSummaryCursor = {
@@ -942,8 +953,20 @@ function encodeProjectCursor(cursor: ProjectSummaryCursor) {
 
 export async function getProjectSummaries(options: ProjectSummaryPageOptions = {}) {
   const session = await requireSession();
+  // Only admins may widen the scope; a member asking for `all` still gets their
+  // own projects rather than an error, because the scope is a URL parameter.
+  const canViewAllProjects = session.role === "admin";
+  const scope: ProjectScope = canViewAllProjects && options.scope === "all" ? "all" : "mine";
   const supabase = tryGetSupabaseAdmin();
-  if (!supabase) return { projects: [] as ProjectSummary[], nextCursor: null };
+  if (!supabase) {
+    return {
+      projects: [] as ProjectSummary[],
+      nextCursor: null,
+      scope,
+      canViewAllProjects,
+      viewerUserId: session.userId,
+    };
+  }
   const pageSize = Math.max(1, Math.min(100, options.pageSize ?? 25));
 
   const normalizedQuery = options.query?.trim();
@@ -954,10 +977,13 @@ export async function getProjectSummaries(options: ProjectSummaryPageOptions = {
     p_cursor_updated_at: cursor?.updatedAt ?? null,
     p_cursor_id: cursor?.id ?? null,
     p_limit: pageSize + 1,
+    p_include_all_owners: scope === "all",
   });
   if (error) throw new Error(error.message);
 
-  const allRows = (data ?? []) as Array<Omit<DbProject, "settings"> & { palette_preview: unknown }>;
+  const allRows = (data ?? []) as Array<
+    Omit<DbProject, "settings"> & { palette_preview: unknown; owner_email: string | null; owner_display_name: string | null }
+  >;
   const hasMore = allRows.length > pageSize;
   const rows = allRows.slice(0, pageSize);
 
@@ -993,12 +1019,17 @@ export async function getProjectSummaries(options: ProjectSummaryPageOptions = {
       processedThumbPath: row.processed_thumb_path ?? null,
       processedThumbUrl: row.processed_thumb_path ? processedSignedUrls.get(row.processed_thumb_path) ?? null : null,
       palettePreview: palettes.slice(0, 6),
+      ownerEmail: row.owner_email ?? "",
+      ownerDisplayName: row.owner_display_name ?? null,
     };
   });
   const lastRow = rows.at(-1);
   return {
     projects,
     nextCursor: hasMore && lastRow ? encodeProjectCursor({ updatedAt: lastRow.updated_at, id: lastRow.id }) : null,
+    scope,
+    canViewAllProjects,
+    viewerUserId: session.userId,
   };
 }
 
@@ -1006,15 +1037,18 @@ export async function getProjectForCurrentUser(projectId: string) {
   const session = await requireSession();
   const supabase = getSupabaseAdmin();
 
+  // Admins support every member's work, so they open any project; everyone else
+  // stays scoped to their own rows.
+  const projectQuery = supabase
+    .from("projects")
+    .select(
+      "id, user_id, title, description, original_image_path, processed_image_path, settings, width, height, pixel_size, grid_cell_size, color_count, created_at, updated_at",
+    )
+    .eq("id", projectId);
+  if (session.role !== "admin") projectQuery.eq("user_id", session.userId);
+
   const [projectResult, paletteResult] = await Promise.all([
-    supabase
-      .from("projects")
-      .select(
-        "id, user_id, title, description, original_image_path, processed_image_path, settings, width, height, pixel_size, grid_cell_size, color_count, created_at, updated_at",
-      )
-      .eq("id", projectId)
-      .eq("user_id", session.userId)
-      .maybeSingle(),
+    projectQuery.maybeSingle(),
     supabase
       .from("project_palettes")
       .select("id, color_name, hex_code, locked, cell_count, sort_order")
@@ -1031,15 +1065,22 @@ export async function getProjectForCurrentUser(projectId: string) {
   return mapProject(project as DbProject, (palettes ?? []) as DbPalette[], "original");
 }
 
-export async function assertProjectOwner(projectId: string) {
+/**
+ * Resolves the project row the signed-in user may act on: their own always, any
+ * project when they are an admin. Callers must key storage paths and follow-up
+ * writes off the returned `user_id` — the project owner — and never off the
+ * acting session, or an admin edit would scatter a member's assets under the
+ * admin's own prefix.
+ */
+export async function assertProjectAccess(projectId: string) {
   const session = await requireSession();
   const supabase = getSupabaseAdmin();
-  const { data, error } = await supabase
+  const query = supabase
     .from("projects")
     .select("id, user_id, title, description, original_image_path, processed_image_path, settings, width, height, pixel_size, grid_cell_size, color_count")
-    .eq("id", projectId)
-    .eq("user_id", session.userId)
-    .maybeSingle();
+    .eq("id", projectId);
+  if (session.role !== "admin") query.eq("user_id", session.userId);
+  const { data, error } = await query.maybeSingle();
 
   if (error) throw new Error(error.message);
   if (!data) throw new Error("Project not found.");
@@ -1057,6 +1098,41 @@ export async function assertProjectOwner(projectId: string) {
     grid_cell_size: number;
     color_count: number;
   };
+}
+
+/**
+ * Same authorization as `assertProjectAccess` without reading the `settings`
+ * blob, which is the largest column on the table. Used by the save path, which
+ * only needs the owner id to scope the write.
+ */
+export async function assertProjectOwnerId(projectId: string) {
+  const session = await requireSession();
+  const supabase = getSupabaseAdmin();
+  const query = supabase.from("projects").select("user_id").eq("id", projectId);
+  if (session.role !== "admin") query.eq("user_id", session.userId);
+  const { data, error } = await query.maybeSingle();
+
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error("Project not found.");
+  return (data as { user_id: string }).user_id;
+}
+
+/**
+ * Display label for a project owner, shown when an admin opens someone else's
+ * project so the editing surface never hides whose work it is.
+ */
+export async function getProjectOwnerLabel(userId: string) {
+  const supabase = tryGetSupabaseAdmin();
+  if (!supabase) return null;
+  const { data, error } = await supabase
+    .from("app_users")
+    .select("email, display_name")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  const owner = data as { email: string; display_name: string | null };
+  return owner.display_name?.trim() || owner.email;
 }
 
 export function imagePath(userId: string, projectId: string, kind: "original" | "processed", extension: string) {
@@ -1082,7 +1158,7 @@ export { MAX_THUMBNAIL_BYTES, THUMBNAIL_CONTENT_TYPE, thumbnailPathFor } from "@
 
 export async function replaceProjectPalettes(projectId: string, palettes: PaletteColor[]) {
   const supabase = getSupabaseAdmin();
-  const owner = await assertProjectOwner(projectId);
+  const owner = await assertProjectAccess(projectId);
 
   const { error: deleteError } = await supabase.from("project_palettes").delete().eq("project_id", owner.id);
   if (deleteError) throw new Error(deleteError.message);

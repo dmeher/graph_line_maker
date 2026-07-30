@@ -14,7 +14,7 @@ import { requireSession } from "@/lib/auth/session";
 import {
   MAX_THUMBNAIL_BYTES,
   THUMBNAIL_CONTENT_TYPE,
-  assertProjectOwner,
+  assertProjectAccess,
   defaultGraphSettings,
   imagePath,
   normalizeGraphSettings,
@@ -215,15 +215,16 @@ export async function POST(request: NextRequest) {
 
 export async function PATCH(request: NextRequest) {
   try {
-    const session = await requireSession();
+    // `assertProjectAccess` below requires the session and resolves the owner.
+    await requireSession();
     const body = await request.json().catch(() => ({}));
     const projectId = String(body.projectId || "");
     const uploads = Array.isArray(body.uploads) ? body.uploads : [];
     if (!/^[0-9a-f-]{36}$/i.test(projectId) || !uploads.length || uploads.length > MAX_PROJECT_UPLOAD_FILES) {
       return NextResponse.json({ message: "Invalid upload finalization request." }, { status: 400 });
     }
-    await assertProjectOwner(projectId);
-    const prefix = `${session.userId}/${projectId}/`;
+    const { user_id: ownerUserId } = await assertProjectAccess(projectId);
+    const prefix = `${ownerUserId}/${projectId}/`;
     const uploadedImages: Array<{ id: string; name: string; path: string; thumbPath: string | null }> = uploads.flatMap((item: unknown) => {
       if (!item || typeof item !== "object") return [];
       const upload = item as Record<string, unknown>;
@@ -269,7 +270,7 @@ export async function PATCH(request: NextRequest) {
       .from("projects")
       .update({ original_image_path: verifiedImages[0].path, settings: finalizedSettings })
       .eq("id", projectId)
-      .eq("user_id", session.userId);
+      .eq("user_id", ownerUserId);
     if (error) throw new Error(error.message);
     return NextResponse.json({ ok: true, projectId, redirectTo: `/projects/${projectId}` });
   } catch (error) {
@@ -279,12 +280,13 @@ export async function PATCH(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const session = await requireSession();
+    // `assertProjectAccess` below requires the session and resolves the owner.
+    await requireSession();
     const body = await request.json().catch(() => ({}));
     const projectId = String(body.projectId || "");
     if (!/^[0-9a-f-]{36}$/i.test(projectId)) return NextResponse.json({ message: "Invalid project." }, { status: 400 });
-    await assertProjectOwner(projectId);
-    const prefix = `${session.userId}/${projectId}/`;
+    const { user_id: ownerUserId } = await assertProjectAccess(projectId);
+    const prefix = `${ownerUserId}/${projectId}/`;
     const paths: string[] = (Array.isArray(body.paths) ? body.paths : []).map(String).filter((path: string) => path.startsWith(prefix));
     const supabase = getSupabaseAdmin();
     if (paths.length) {
@@ -296,7 +298,7 @@ export async function DELETE(request: NextRequest) {
         ]),
       );
     }
-    const { error } = await supabase.from("projects").delete().eq("id", projectId).eq("user_id", session.userId);
+    const { error } = await supabase.from("projects").delete().eq("id", projectId).eq("user_id", ownerUserId);
     if (error) throw new Error(error.message);
     return NextResponse.json({ ok: true });
   } catch (error) {

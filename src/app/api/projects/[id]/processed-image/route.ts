@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { PROCESSED_IMAGES_BUCKET } from "@/lib/constants";
-import { requireSession } from "@/lib/auth/session";
 import {
   MAX_THUMBNAIL_BYTES,
   THUMBNAIL_CONTENT_TYPE,
-  assertProjectOwner,
+  assertProjectAccess,
   imagePath,
   thumbnailPathFor,
 } from "@/lib/projects";
@@ -18,15 +17,16 @@ import { getSupabaseAdmin } from "@/lib/supabase/server";
  */
 export async function PUT(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
-    const session = await requireSession();
     const { id } = await context.params;
-    const owner = await assertProjectOwner(id);
+    const owner = await assertProjectAccess(id);
     const isThumbnail = request.nextUrl.searchParams.get("variant") === "thumbnail";
     const blob = await request.blob();
 
     const supabase = getSupabaseAdmin();
     const store = getObjectStore();
-    const path = imagePath(session.userId, id, "processed", "png");
+    // Keyed to the project owner so an admin save writes beside the project's
+    // other assets rather than under the admin's own prefix.
+    const path = imagePath(owner.user_id, id, "processed", "png");
 
     if (isThumbnail) {
       if (blob.type !== THUMBNAIL_CONTENT_TYPE) {
@@ -48,7 +48,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
         .from("projects")
         .update({ processed_thumb_path: thumbPath })
         .eq("id", id)
-        .eq("user_id", session.userId);
+        .eq("user_id", owner.user_id);
       if (thumbError) throw new Error(thumbError.message);
       return NextResponse.json({ ok: true, path: thumbPath });
     }
@@ -78,7 +78,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
       .from("projects")
       .update({ processed_image_path: path })
       .eq("id", id)
-      .eq("user_id", session.userId);
+      .eq("user_id", owner.user_id);
 
     if (error) throw new Error(error.message);
     return NextResponse.json({ ok: true, path });

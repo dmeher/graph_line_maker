@@ -8,8 +8,7 @@ import {
   getImageExtension,
   isAllowedImageFile,
 } from "@/lib/constants";
-import { requireSession } from "@/lib/auth/session";
-import { assertProjectOwner, imagePath, thumbnailPathFor } from "@/lib/projects";
+import { assertProjectAccess, imagePath, thumbnailPathFor } from "@/lib/projects";
 import { getObjectStore, mediaKey } from "@/lib/storage/media";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 
@@ -25,9 +24,8 @@ function getExtension(file: File) {
 
 export async function PUT(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
-    const session = await requireSession();
     const { id } = await context.params;
-    const owner = await assertProjectOwner(id);
+    const owner = await assertProjectAccess(id);
     const formData = await request.formData();
     const file = formData.get("file");
 
@@ -39,7 +37,9 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
 
     const supabase = getSupabaseAdmin();
     const store = getObjectStore();
-    const path = imagePath(session.userId, id, "original", getExtension(file));
+    // Keyed to the project owner so an admin replacement lands beside the
+    // project's other assets rather than under the admin's own prefix.
+    const path = imagePath(owner.user_id, id, "original", getExtension(file));
     await store.putObject({
       key: mediaKey(ORIGINAL_IMAGES_BUCKET, path),
       body: Buffer.from(await file.arrayBuffer()),
@@ -51,7 +51,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
       .from("projects")
       .update({ original_image_path: path })
       .eq("id", id)
-      .eq("user_id", session.userId);
+      .eq("user_id", owner.user_id);
 
     if (error) throw new Error(error.message);
     if (owner.original_image_path && owner.original_image_path !== path) {

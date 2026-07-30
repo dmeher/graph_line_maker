@@ -745,6 +745,36 @@
   gap: 1px;
 }
 
+/*
+ * Shown only when an admin opens a project they do not own, so the editing
+ * surface never hides whose work is being changed.
+ */
+.command-canvas .editor-command-bar__owner {
+  display: inline-flex;
+  max-width: 220px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--cc-accent, #4f7cff) 40%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--cc-accent, #4f7cff) 14%, transparent);
+  padding: 3px 9px;
+  color: var(--cc-text);
+  font-size: 9px;
+  font-weight: 620;
+  white-space: nowrap;
+}
+
+.command-canvas .editor-command-bar__owner > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 900px) {
+  .command-canvas .editor-command-bar__owner {
+    max-width: 130px;
+  }
+}
+
 .command-canvas .editor-command-bar__document > span {
   color: var(--cc-muted);
   font-family: var(--font-geist-mono), monospace;

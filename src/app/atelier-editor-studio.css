@@ -660,20 +660,32 @@
 
 /* Command capsule ---------------------------------------------------------- */
 
+/*
+ * The bar spans the command lane between symmetric gutters. It previously used
+ * `left: calc(50% + 44px)` with `translateX(-50%)` and reserved `100vw - 176px`,
+ * which centred it on an older layout's rail offset: at every width it read as
+ * off-centre and stopped short of the right edge. The reserved width also made
+ * the four column minimums (identity + palette trigger + history + actions)
+ * exceed the track, so the title input was clipped. Insets match the <768px
+ * rule, which already positioned the bar this way.
+ */
 .command-canvas .editor-command-bar {
   position: absolute;
   z-index: var(--z-cc-command);
   top: 18px;
-  left: calc(50% + 44px);
+  left: 18px;
+  right: 18px;
   display: grid;
-  grid-template-columns: minmax(260px, 340px) minmax(210px, 1fr) auto auto;
+  /* The palette trigger is the flexible column: it must be allowed to collapse
+     so identity and actions keep their intrinsic width instead of overflowing. */
+  grid-template-columns: minmax(240px, 340px) minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 12px;
-  width: min(1264px, calc(100vw - 176px));
+  width: auto;
   height: var(--cc-command-h) !important;
   min-height: 0;
   padding: 6px 8px 6px 10px;
-  transform: translateX(-50%);
+  transform: none;
   overflow: visible;
   border: 1px solid var(--cc-border);
   border-radius: var(--cc-radius-command);
@@ -685,7 +697,8 @@
 
 .command-canvas .editor-command-bar__identity {
   display: grid;
-  grid-template-columns: 38px auto 1px minmax(0, 1fr);
+  /* Trailing `auto` is the optional owner badge; it collapses when absent. */
+  grid-template-columns: 38px auto 1px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -3248,10 +3261,15 @@
     grid-row: 1;
   }
 
+  /*
+   * Spans the row like the dimension pair above it. Pinned to `grid-column: 2`
+   * the button sat under Height with column 1 left empty, so it read as a
+   * stray right-aligned control rather than a full-width row action.
+   */
   .command-canvas
     .focus-console__shelf-panel[data-focus-console-shelf="graph"]
     .focus-console__reset {
-    grid-column: 2;
+    grid-column: 1 / -1;
     grid-row: 3;
     width: 100%;
     min-height: 30px;
@@ -3824,8 +3842,14 @@
   scrollbar-width: thin;
 }
 
+/*
+ * `flush` drops the card chrome (border, background, radius), not the gutter.
+ * With `padding: 0` the Document tab's "Physical sizing" rows sat hard against
+ * the pod edge while every sibling card group was inset 10px, so nothing in the
+ * tab lined up. Keep the horizontal gutter and flush only the vertical edges.
+ */
 .command-canvas .editor-inspector-group[data-layout="flush"] .editor-inspector-group__body {
-  padding: 0;
+  padding: 0 10px;
 }
 
 .command-canvas .editor-inspector__flat-section-heading {
@@ -5689,10 +5713,12 @@
 
   .command-canvas .editor-command-bar {
     top: 12px;
-    left: calc(50% + 32px);
-    grid-template-columns: minmax(220px, 300px) minmax(170px, 1fr) auto auto;
-    width: calc(100vw - 96px);
+    left: 12px;
+    right: 12px;
+    grid-template-columns: minmax(200px, 300px) minmax(0, 1fr) auto auto;
+    width: auto;
     height: 52px !important;
+    transform: none;
   }
 
   .command-canvas .editor-command-bar__product {
@@ -5700,7 +5726,7 @@
   }
 
   .command-canvas .editor-command-bar__identity {
-    grid-template-columns: 36px 1px minmax(0, 1fr);
+    grid-template-columns: 36px 1px minmax(0, 1fr) auto;
   }
 
   .command-canvas .command-canvas-pod--tools {
@@ -5825,10 +5851,12 @@
 
   .command-canvas .editor-command-bar {
     top: 12px;
-    left: calc(50% + 32px);
-    grid-template-columns: minmax(190px, 270px) minmax(150px, 1fr) auto;
-    width: calc(100vw - 96px);
+    left: 12px;
+    right: 12px;
+    grid-template-columns: minmax(180px, 270px) minmax(0, 1fr) auto;
+    width: auto;
     height: 52px;
+    transform: none;
   }
 
   .command-canvas .editor-command-bar__history,
@@ -5837,7 +5865,7 @@
   }
 
   .command-canvas .editor-command-bar__identity {
-    grid-template-columns: 36px 1px minmax(0, 1fr);
+    grid-template-columns: 36px 1px minmax(0, 1fr) auto;
   }
 
   .command-canvas .editor-command-bar__menu-button span,
@@ -5978,11 +6006,13 @@
   .command-canvas .editor-command-bar {
     z-index: calc(var(--z-cc-drawer) + 1);
     top: 8px;
-    left: calc(50% + 30px);
-    grid-template-columns: minmax(160px, 0.85fr) minmax(150px, 0.65fr) auto;
-    width: calc(100vw - 76px);
+    left: 10px;
+    right: 10px;
+    grid-template-columns: minmax(160px, 0.85fr) minmax(0, 0.65fr) auto;
+    width: auto;
     height: 48px;
     padding: 4px 6px;
+    transform: none;
   }
 
   .command-canvas .editor-command-bar__history,
@@ -5996,7 +6026,7 @@
   }
 
   .command-canvas .editor-command-bar__identity {
-    grid-template-columns: 34px 1px minmax(0, 1fr);
+    grid-template-columns: 34px 1px minmax(0, 1fr) auto;
   }
 
   .command-canvas .editor-command-bar__home,

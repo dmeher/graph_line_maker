@@ -5305,9 +5305,19 @@ export function EditorClient({
           // falling back to its default on duplicate/undo/redo.
           const currentSettings = settingsRef.current;
           const previousFillFrame = settledFillRegionFrameRef.current;
+          // Legacy projects key fill overrides by a region's position in the
+          // frame's labeling order, so they move the moment a resize, shape, or
+          // line renumbers the frame. Promote them to stable scoped IDs against
+          // the frame that just rendered, before anything can reorder it — this
+          // previously only ran from `setSettingsWithHistory`, which canvas
+          // resizes bypass. A project with no numeric keys gets the same object
+          // back, so this is inert for anything saved since scoped IDs existed.
+          const migratedFillOverrides = dragActive
+            ? currentSettings.fillRegions
+            : migrateLegacyFillRegionOverrides(currentSettings.fillRegions, result.fillRegions);
           const reconciledFillOverrides = !dragActive
             ? reconcileFillRegionOverrides({
-                overrides: currentSettings.fillRegions,
+                overrides: migratedFillOverrides,
                 previous: previousFillFrame
                   ? previousFillFrame
                   : {
@@ -5325,13 +5335,37 @@ export function EditorClient({
               })
             : null;
 
-          if (reconciledFillOverrides && reconciledFillOverrides.fillRegions !== currentSettings.fillRegions) {
+          // Development-only: report any fill override that no rendered region
+          // answers to, so a lost colour can be traced to the exact keys rather
+          // than guessed at. Silent when every override still has a home.
+          if (process.env.NODE_ENV !== "production" && !dragActive) {
+            const promoted = reconciledFillOverrides ? reconciledFillOverrides.fillRegions : migratedFillOverrides;
+            const renderedIds = new Set(result.fillRegions.map((region) => region.id));
+            const orphans = Object.keys(promoted).filter((key) => !renderedIds.has(key));
+            if (orphans.length) {
+              console.warn("[graph-pixel] fill overrides with no rendered region", {
+                orphans,
+                renderedRegions: result.fillRegions.map((region) => `${region.id}#${region.cellCount}`),
+                previousRegions: previousFillFrame?.fillRegions.map((region) => region.id) ?? null,
+                matches: (reconciledFillOverrides?.matches ?? []).map((match) => `${match.fromId} -> ${match.toId}`),
+              });
+            }
+          }
+
+          // Either pass can re-home a colour: the legacy promotion binds a bare
+          // region number to this frame's stable ID, and reconciliation carries
+          // a stable ID across frames.
+          const settledFillOverrides = reconciledFillOverrides
+            ? reconciledFillOverrides.fillRegions
+            : migratedFillOverrides;
+
+          if (settledFillOverrides !== currentSettings.fillRegions) {
             const nextSettings = deriveGraphSettings({
               ...currentSettings,
-              fillRegions: reconciledFillOverrides.fillRegions,
+              fillRegions: settledFillOverrides,
             });
             const reconciledIds = new Map<string, string>();
-            for (const match of reconciledFillOverrides.matches) {
+            for (const match of reconciledFillOverrides?.matches ?? []) {
               if (match.fromId !== match.toId && !reconciledIds.has(match.fromId)) {
                 reconciledIds.set(match.fromId, match.toId);
               }

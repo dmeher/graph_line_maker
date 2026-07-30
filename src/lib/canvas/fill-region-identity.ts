@@ -18,7 +18,12 @@ export type FillRegionIdentityRegion = {
   legacyId?: string;
 };
 
-const ID_PRECISION = 2048;
+/**
+ * Quantization steps for the normalized `u`/`v` tail of a scoped region ID.
+ * Reconciliation compares those tails, so it must use the same scale.
+ */
+export const FILL_REGION_ID_PRECISION = 2048;
+const ID_PRECISION = FILL_REGION_ID_PRECISION;
 const LEGACY_FILL_REGION_ID = /^\d+$/;
 const SCOPED_FILL_REGION_ID =
   /^(?:source|clipart|generated):[A-Za-z0-9-]{1,96}:(?:source|enclosed):(?!0\d)\d{1,4}:(?!0\d)\d{1,4}$/;

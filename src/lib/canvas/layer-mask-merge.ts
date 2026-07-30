@@ -64,6 +64,18 @@ export function fillRegionNumberForRender(
   return 0;
 }
 
+/**
+ * Layers are merged one at a time into a shared region map, so two overlapping
+ * artworks can both enclose the same pixel. Later layers used to overwrite
+ * earlier ones unconditionally, which meant a click resolved to whichever
+ * enclosure happened to be merged last rather than the one the user aimed at.
+ *
+ * When `regionAreas` is supplied the tighter enclosure wins instead: the region
+ * with fewer pixels keeps the contested pixel, so filling a small pocket that
+ * sits inside another layer's large enclosure fills the pocket. The result no
+ * longer depends on layer order. Without the map the previous last-wins
+ * behaviour is retained.
+ */
 export function mergeLayerPixelMasks(
   fillRegionMap: Uint16Array,
   outlineMask: Uint8Array,
@@ -75,6 +87,8 @@ export function mergeLayerPixelMasks(
   outlineCoverageMap?: Uint8Array,
   layerOutlineCoverageMap?: Uint8Array,
   placement?: LayerMaskPlacement,
+  /** Global region number to its pixel area, for resolving overlaps. */
+  regionAreas?: ReadonlyMap<number, number>,
 ) {
   const localWidth = placement ? Math.max(1, Math.min(placement.width, localFillRegionMap.length)) : 0;
   for (let pixel = 0; pixel < localFillRegionMap.length; pixel += 1) {
@@ -88,6 +102,14 @@ export function mergeLayerPixelMasks(
     if (localRegionNumber) {
       const globalRegionNumber = regionNumberMap.get(localRegionNumber);
       if (globalRegionNumber) {
+        // Outline pixels carry region 0, so this only ever compares one
+        // enclosure against another and never lets a fill erase an outline.
+        const occupyingRegionNumber = fillRegionMap[targetPixel];
+        if (regionAreas && occupyingRegionNumber && occupyingRegionNumber !== globalRegionNumber) {
+          const occupyingArea = regionAreas.get(occupyingRegionNumber) ?? Number.POSITIVE_INFINITY;
+          const incomingArea = regionAreas.get(globalRegionNumber) ?? Number.POSITIVE_INFINITY;
+          if (occupyingArea <= incomingArea) continue;
+        }
         fillRegionMap[targetPixel] = globalRegionNumber;
         outlineMask[targetPixel] = layerOutlineValue;
         if (outlineColorMap) outlineColorMap[targetPixel] = layerOutlineValue ? outlineColorNumber : 0;

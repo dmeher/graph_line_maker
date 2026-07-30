@@ -149,6 +149,20 @@ Targeted validation on 2026-07-29: erase geometry (including graph-space brush c
 
 Targeted validation on 2026-07-29: fill-identity, fill-reconciliation (including split/undo-merge, resize, legacy alias, scope isolation, and explicit-colour precedence), history, and source-layout tests passed **38/38**. Rendered browser validation, Playwright, full lint/type checks, and a production build were intentionally not run.
 
+## Architecture update - 2026-07-30 (Coaching Student Portal prototype)
+
+`/portal` adds a standalone presentation-only route family for reviewing two
+mobile-first coaching designs, Pulse Campus and Focus Atlas. The server route
+layout and catch-all resolver import only static fixtures from
+`src/lib/portal/demo-data.ts` and one client presentation controller; they do
+not call Graph Pixel Maker auth, Supabase, storage, canvas, or video-provider
+code, and add no service-worker caching behavior. The portal stylesheet is
+scoped under `.portal-app`, so it cannot affect the existing global/editor
+design system. This introduces no new API contract, persistence model,
+processing path, or cache entry. Static source inspection and `git diff --check`
+are the appropriate validation boundary; no rendered-browser automation or
+production build is implied by this prototype.
+
 ## Build update - 2026-07-17 (Webpack production compiler)
 
 `next build` with the default Turbopack compiler can remain indefinitely at `Creating an optimized production build` with a flat CPU counter and no compiler diagnostics in this workspace. `next build --webpack` completes compilation and reaches TypeScript checking, so the `build` script explicitly selects Webpack until the Turbopack stall can be reproduced and resolved upstream. Do not remove the flag without a successful Turbopack production build. The Webpack build also catches strict TypeScript errors that the stalled path never reports.

@@ -122,3 +122,32 @@ test("duplicating a layer copies only its scoped fill overrides", () => {
     "source:flower:enclosed:10:20": "#b0b0b0",
   });
 });
+
+test("a legacy numeric override on generated artwork promotes like any other region", () => {
+  // Generated shapes and lines used to be pushed without a `legacyId`, so a
+  // legacy project's colours on them could never be read or promoted and were
+  // dropped on the next re-render. Their number continues the source layers'.
+  const migrated = migrateLegacyFillRegionOverrides(
+    { "2": "#000000", "7": "#b0b0b0" },
+    [
+      { id: "source:lion:enclosed:10:20", legacyId: "2" },
+      { id: "generated:artwork:enclosed:1024:900", legacyId: "7" },
+    ],
+  );
+
+  assert.deepEqual(migrated, {
+    "source:lion:enclosed:10:20": "#000000",
+    "generated:artwork:enclosed:1024:900": "#b0b0b0",
+  });
+});
+
+test("migration leaves a project with no numeric overrides untouched", () => {
+  const overrides = { "generated:artwork:enclosed:1024:900": "#000000" };
+
+  const migrated = migrateLegacyFillRegionOverrides(overrides, [
+    { id: "generated:artwork:enclosed:1024:900", legacyId: "7" },
+  ]);
+
+  // Same object: new projects must take no new code path here.
+  assert.equal(migrated, overrides);
+});

@@ -10,6 +10,8 @@
  * render, and commit the returned override map if it changed.
  */
 
+import { FILL_REGION_ID_PRECISION } from "./fill-region-identity.ts";
+
 export type FillRegionReconciliationRegion = {
   /** Persistent, layer-scoped region ID. */
   id: string;
@@ -87,11 +89,20 @@ type OverlapCandidate = {
   previousOverlapRatio: number;
   nextOverlapRatio: number;
   confidence: number;
+  /** Matched by normalized position rather than by pixel overlap. */
+  transform?: true;
 };
 
 const DEFAULT_MINIMUM_OVERLAP_RATIO = 0.72;
 const DEFAULT_MINIMUM_OVERLAP_PIXELS = 4;
 const SCOPED_ARTWORK_TYPES = new Set(["source", "clipart", "generated"]);
+/**
+ * How far a region's normalized centroid may drift and still be recognised as
+ * the same region, as a fraction of the layer rectangle. Re-rasterizing artwork
+ * at a new scale moves centroids by well under a percent; distinct enclosures in
+ * real artwork sit much further apart than this.
+ */
+const TRANSFORM_MATCH_TOLERANCE = 0.04;
 
 function clampRatio(value: number | undefined) {
   if (!Number.isFinite(value)) return DEFAULT_MINIMUM_OVERLAP_RATIO;
@@ -124,6 +135,104 @@ export function getFillRegionReconciliationIdentity(
   if (!scope || !kind || (region.kind && encodedKind !== region.kind)) return null;
 
   return { scope, kind };
+}
+
+/**
+ * Reads the scope, kind and normalized `u`/`v` tail out of a scoped region key.
+ * Those coordinates are a fraction of the layer rectangle, so they survive a
+ * layer resize; the `:screen:x:y` fallback tail is raw output pixels and is
+ * deliberately rejected. Legacy numeric keys carry no position and are skipped.
+ */
+function parseScopedKeyPosition(key: string) {
+  const parts = key.split(":");
+  if (parts.length < 5 || !SCOPED_ARTWORK_TYPES.has(parts[0]) || parts[parts.length - 3] === "screen") return null;
+  const u = Number(parts[parts.length - 2]);
+  const v = Number(parts[parts.length - 1]);
+  if (!Number.isFinite(u) || !Number.isFinite(v)) return null;
+  const kind = parts[parts.length - 3];
+  const scope = parts.slice(0, parts.length - 3).join(":");
+  if (!scope || !kind) return null;
+  return {
+    key,
+    scope,
+    kind,
+    u: u / FILL_REGION_ID_PRECISION,
+    v: v / FILL_REGION_ID_PRECISION,
+  };
+}
+
+/**
+ * Re-homes a colour whose region was re-keyed but did not actually move inside
+ * its layer, which is what a layer resize produces: the artwork scales, so every
+ * region keeps its normalized position while its pixel footprint changes area.
+ * Pixel-overlap matching cannot see that — enlarging a layer drops the old
+ * region's share of the new one below the overlap threshold and the colour would
+ * be discarded.
+ *
+ * Matching is done against the override keys themselves rather than against the
+ * previous frame's regions. A key encodes the same normalized position the
+ * region will be re-derived at, so this also recovers a colour whose region
+ * disappeared for a while — shrinking a layer far enough closes a thin pocket,
+ * and enlarging it again reopens the pocket at the same normalized spot with a
+ * region the previous frame never contained.
+ *
+ * Two guards keep genuine topology changes out of this path:
+ *
+ *  - a next region with two or more coloured keys inside the tolerance is a
+ *    merge, and is left to the overlap voting below, which already refuses to
+ *    pick between competing colours;
+ *  - a key is only spent on the nearest eligible region, so a split cannot paint
+ *    both children from here. The far child still inherits the colour through
+ *    overlap voting.
+ *
+ * The next side is resolved by nearest neighbour rather than by uniqueness
+ * because real line art has many enclosed pockets and `u`/`v` are normalized per
+ * axis, so on a tall layer a great many unrelated regions fall inside the
+ * tolerance radius.
+ */
+function pairOverrideKeysByNormalizedPosition(
+  overrides: Record<string, string>,
+  nextDescriptors: readonly RegionDescriptor[],
+  ownedKeys: ReadonlySet<string>,
+) {
+  const positions = Object.keys(overrides)
+    .filter((key) => !ownedKeys.has(key))
+    .map(parseScopedKeyPosition)
+    .filter((position): position is NonNullable<typeof position> => Boolean(position));
+  if (!positions.length || !nextDescriptors.length) return [];
+
+  const keysWithinTolerance = new Map<RegionDescriptor, NonNullable<ReturnType<typeof parseScopedKeyPosition>>[]>();
+  const nearestRegionByKey = new Map<string, { next: RegionDescriptor; distance: number }>();
+  for (const next of nextDescriptors) {
+    const nextPosition = parseScopedKeyPosition(next.region.id);
+    if (!nextPosition) continue;
+    for (const position of positions) {
+      if (position.scope !== next.identity.scope || position.kind !== next.identity.kind) continue;
+      const du = nextPosition.u - position.u;
+      const dv = nextPosition.v - position.v;
+      const distance = Math.sqrt(du * du + dv * dv);
+      if (distance > TRANSFORM_MATCH_TOLERANCE) continue;
+      keysWithinTolerance.set(next, [...(keysWithinTolerance.get(next) ?? []), position]);
+      const nearest = nearestRegionByKey.get(position.key);
+      // Ties resolve by ID so a frame always reconciles the same way.
+      if (
+        !nearest
+        || distance < nearest.distance
+        || (distance === nearest.distance && next.region.id < nearest.next.region.id)
+      ) {
+        nearestRegionByKey.set(position.key, { next, distance });
+      }
+    }
+  }
+
+  const pairs: { key: string; scope: string; kind: string; next: RegionDescriptor }[] = [];
+  for (const [next, candidateKeys] of keysWithinTolerance) {
+    if (candidateKeys.length !== 1) continue;
+    const position = candidateKeys[0]!;
+    if (nearestRegionByKey.get(position.key)?.next !== next) continue;
+    pairs.push({ key: position.key, scope: position.scope, kind: position.kind, next });
+  }
+  return pairs;
 }
 
 function createFrameIndex(frame: FillRegionReconciliationFrame) {
@@ -218,6 +327,27 @@ export function reconcileFillRegionOverrides({
     });
   }
 
+  // A layer resize re-keys every region in that layer without changing where any
+  // of them sits inside it, so recover those pairs geometrically before falling
+  // back to pixel overlap.
+  // Keys a next region already answers to are excluded so an in-use colour is
+  // never re-homed onto a neighbour.
+  const ownedKeys = new Set<string>();
+  for (const descriptor of nextIndex.byId.values()) {
+    const owned = overrideForRegion(overrides, descriptor.region);
+    if (owned) ownedKeys.add(owned.key);
+  }
+  const transformPairs = pairOverrideKeysByNormalizedPosition(
+    overrides,
+    [...nextIndex.byId.values()].filter((descriptor) => !overrideForRegion(overrides, descriptor.region)),
+    ownedKeys,
+  );
+  const transformPairKey = (colorKey: string, nextId: string) => `${colorKey} ${nextId}`;
+  const transformPairKeys = new Set(
+    transformPairs.map(({ key, next }) => transformPairKey(key, next.region.id)),
+  );
+  const matchedTransformPairKeys = new Set<string>();
+
   // Match frame pixels only when their coordinates are comparable. For a
   // graph resize, compare the shared top-left graph area rather than treating
   // two row-major maps with different widths as one linear coordinate system.
@@ -297,6 +427,11 @@ export function reconcileFillRegionOverrides({
 
       const previousOverlapRatio = overlapPixels / previousPixels;
       const nextOverlapRatio = overlapPixels / nextPixels;
+      // A geometrically paired region keeps its measured statistics but is
+      // exempt from the overlap threshold, which a rescale cannot satisfy.
+      const pairKey = transformPairKey(override.key, nextDescriptor.region.id);
+      const transform = transformPairKeys.has(pairKey);
+      if (transform) matchedTransformPairKeys.add(pairKey);
       candidates.push({
         previous: previousDescriptor,
         next: nextDescriptor,
@@ -308,8 +443,32 @@ export function reconcileFillRegionOverrides({
         previousOverlapRatio,
         nextOverlapRatio,
         confidence: nextOverlapRatio,
+        ...(transform ? { transform: true as const } : {}),
       });
     }
+  }
+
+  // Pairs the pixel pass never saw: incomparable map dimensions, or artwork that
+  // moved clear of its previous footprint as well as being rescaled.
+  for (const { key, scope, kind, next: nextDescriptor } of transformPairs) {
+    if (matchedTransformPairKeys.has(transformPairKey(key, nextDescriptor.region.id))) continue;
+    const color = overrides[key];
+    if (!color) continue;
+    candidates.push({
+      // The colour's own key stands in for a previous region: it may belong to a
+      // region the previous frame no longer contained.
+      previous: { region: { id: key, mapId: 0 }, identity: { scope, kind } },
+      next: nextDescriptor,
+      color,
+      colorKey: key,
+      overlapPixels: 0,
+      previousCoverage: 0,
+      nextCoverage: 0,
+      previousOverlapRatio: 1,
+      nextOverlapRatio: 1,
+      confidence: 1,
+      transform: true,
+    });
   }
 
   // Resolve each next region once. A direct stable-ID match always wins. For
@@ -330,9 +489,14 @@ export function reconcileFillRegionOverrides({
   const matches: FillRegionReconciliationMatch[] = [];
   for (const [toId, targetCandidates] of candidatesByTarget) {
     const directMatch = targetCandidates.find((candidate) => candidate.previous.region.id === toId);
+    // An unambiguous normalized-position pair is as trustworthy as a stable-ID
+    // match, and its pixel overlap is meaningless after a rescale.
+    const transformMatch = directMatch ? undefined : targetCandidates.find((candidate) => candidate.transform);
     let winningCandidates: OverlapCandidate[];
     if (directMatch) {
       winningCandidates = [directMatch];
+    } else if (transformMatch) {
+      winningCandidates = [transformMatch];
     } else {
       const candidatesByColor = new Map<string, { color: string; candidates: OverlapCandidate[]; overlapPixels: number; nextCoverage: number }>();
       for (const candidate of targetCandidates) {

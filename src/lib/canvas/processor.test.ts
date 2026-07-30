@@ -158,3 +158,82 @@ test("image preprocessing applies color quantization without mutating input", ()
     230, 230, 230, 255,
   ]);
 });
+
+test("an overlapping layer keeps the smaller enclosure at a contested pixel", () => {
+  // Region 9 is a wide enclosure already merged from a lower layer; region 4 is
+  // a small pocket in the incoming layer that overlaps its first two pixels.
+  const fillRegionMap = new Uint16Array([9, 9, 9, 9]);
+  const outlineMask = new Uint8Array([0, 0, 0, 0]);
+  const localFillRegionMap = new Uint16Array([2, 2, 0, 0]);
+  const layerOutlineMask = new Uint8Array([0, 0, 0, 0]);
+
+  mergeLayerPixelMasks(
+    fillRegionMap,
+    outlineMask,
+    localFillRegionMap,
+    layerOutlineMask,
+    new Map([[2, 4]]),
+    undefined,
+    0,
+    undefined,
+    undefined,
+    undefined,
+    new Map([
+      [9, 4],
+      [4, 2],
+    ]),
+  );
+
+  assert.deepEqual(Array.from(fillRegionMap), [4, 4, 9, 9]);
+});
+
+test("an overlapping layer cannot replace an even smaller enclosure", () => {
+  const fillRegionMap = new Uint16Array([5, 5]);
+  const outlineMask = new Uint8Array([0, 0]);
+  const localFillRegionMap = new Uint16Array([2, 2]);
+  const layerOutlineMask = new Uint8Array([0, 0]);
+
+  mergeLayerPixelMasks(
+    fillRegionMap,
+    outlineMask,
+    localFillRegionMap,
+    layerOutlineMask,
+    new Map([[2, 8]]),
+    undefined,
+    0,
+    undefined,
+    undefined,
+    undefined,
+    new Map([
+      [5, 2],
+      [8, 40],
+    ]),
+  );
+
+  assert.deepEqual(Array.from(fillRegionMap), [5, 5]);
+});
+
+test("overlap resolution never lets a fill overwrite a lower outline pixel", () => {
+  // Outline pixels carry region 0, so the area comparison must not apply.
+  const fillRegionMap = new Uint16Array([0]);
+  const outlineMask = new Uint8Array([1]);
+  const localFillRegionMap = new Uint16Array([2]);
+  const layerOutlineMask = new Uint8Array([0]);
+
+  mergeLayerPixelMasks(
+    fillRegionMap,
+    outlineMask,
+    localFillRegionMap,
+    layerOutlineMask,
+    new Map([[2, 9]]),
+    undefined,
+    0,
+    undefined,
+    undefined,
+    undefined,
+    new Map([[9, 4000]]),
+  );
+
+  assert.deepEqual(Array.from(fillRegionMap), [9]);
+  assert.deepEqual(Array.from(outlineMask), [0]);
+});

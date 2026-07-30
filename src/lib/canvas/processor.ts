@@ -1504,6 +1504,14 @@ function integrateGeneratedGraphShapeRegions(
       ...region,
       id: stableId,
       mapId: nextRegionId,
+      // Projects saved before scoped IDs existed key their fill overrides by the
+      // region's position in the frame's labeling order. Generated artwork was
+      // the only region kind that never carried that number, so a legacy
+      // project's colours on shapes and lines could not be read, promoted to a
+      // stable ID, or reconciled — they were dropped on the next re-render. The
+      // counter continues the one the source layers used, matching how those
+      // projects were numbered. Projects without numeric keys never look it up.
+      legacyId: String(nextRegionId),
       color:
         generatedShapeFillColorAtPoint(
           settings.graphShapes ?? [],
@@ -1669,6 +1677,8 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
   const outlineColorNumbers = new Map<string, number>();
   const outlineColorsByNumber = new Map<number, string>();
   const regions: FillRegion[] = [];
+  // Lets overlapping layers resolve a contested pixel to the tighter enclosure.
+  const regionAreas = new Map<number, number>();
   let nextRegionId = 0;
   let maxLineThickness = 0;
 
@@ -1716,6 +1726,7 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
       nextRegionId += 1;
       const legacyId = String(nextRegionId);
       regionNumberMap.set(Number(region.id), nextRegionId);
+      regionAreas.set(nextRegionId, region.cellCount);
       const centerX = region.centerX;
       const centerY = region.centerY;
       const stableId = createStableFillRegionId({
@@ -1747,7 +1758,19 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
       });
     }
 
-    mergeLayerPixelMasks(fillRegionMap, outlineMask, local.fillRegionMap, layerOutlineMask, regionNumberMap, outlineColorMap, layerOutlineColorNumber);
+    mergeLayerPixelMasks(
+      fillRegionMap,
+      outlineMask,
+      local.fillRegionMap,
+      layerOutlineMask,
+      regionNumberMap,
+      outlineColorMap,
+      layerOutlineColorNumber,
+      undefined,
+      undefined,
+      undefined,
+      regionAreas,
+    );
     maxLineThickness = Math.max(maxLineThickness, lineThicknessForSettings(layer.settings));
   }
 
@@ -1867,6 +1890,8 @@ export async function pixelateLayeredCanvasesAsync(
   const outlineColorNumbers = new Map<string, number>();
   const outlineColorsByNumber = new Map<number, string>();
   const regions: FillRegion[] = [];
+  // Lets overlapping layers resolve a contested pixel to the tighter enclosure.
+  const regionAreas = new Map<number, number>();
   let nextRegionId = 0;
   let maxLineThickness = 0;
 
@@ -1925,6 +1950,7 @@ export async function pixelateLayeredCanvasesAsync(
       nextRegionId += 1;
       const legacyId = String(nextRegionId);
       regionNumberMap.set(Number(region.id), nextRegionId);
+      regionAreas.set(nextRegionId, region.cellCount);
       const centerX = region.centerX + layerMasks.offsetX;
       const centerY = region.centerY + layerMasks.offsetY;
       const stableId = createStableFillRegionId({
@@ -1972,6 +1998,7 @@ export async function pixelateLayeredCanvasesAsync(
         width: layerMasks.width,
         destinationWidth: width,
       },
+      regionAreas,
     );
     maxLineThickness = Math.max(maxLineThickness, lineThicknessForSettings(layer.settings));
   }

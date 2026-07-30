@@ -7,11 +7,10 @@ import {
   isAllowedImageFile,
   isPdfFile,
 } from "@/lib/constants";
-import { requireSession } from "@/lib/auth/session";
 import {
   MAX_THUMBNAIL_BYTES,
   THUMBNAIL_CONTENT_TYPE,
-  assertProjectOwner,
+  assertProjectAccess,
   clipartImagePath,
   thumbnailPathFor,
 } from "@/lib/projects";
@@ -51,9 +50,9 @@ function parseFiles(value: unknown): ClipartMetadata[] {
 
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
-    const session = await requireSession();
     const { id: projectId } = await context.params;
-    await assertProjectOwner(projectId);
+    // Keys stay under the project owner even when an admin uploads on their behalf.
+    const { user_id: ownerUserId } = await assertProjectAccess(projectId);
     if (!request.headers.get("content-type")?.includes("application/json")) {
       return NextResponse.json({ message: "Cliparts must use signed direct uploads." }, { status: 415 });
     }
@@ -72,7 +71,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
 
     const store = getObjectStore();
     const uploads = await mapWithConcurrency(files, 4, async (file) => {
-      const path = clipartImagePath(session.userId, projectId, file.id, getExtension({ name: file.fileName, type: file.type }));
+      const path = clipartImagePath(ownerUserId, projectId, file.id, getExtension({ name: file.fileName, type: file.type }));
       const thumbPath = thumbnailPathFor(path);
       // Both the content type and the byte length are folded into the SigV4
       // signature; the browser must send exactly these values. That is the only
@@ -99,11 +98,10 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
 
 export async function PATCH(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
-    const session = await requireSession();
     const { id: projectId } = await context.params;
-    await assertProjectOwner(projectId);
+    const { user_id: ownerUserId } = await assertProjectAccess(projectId);
     const body = await request.json().catch(() => ({}));
-    const prefix = `${session.userId}/${projectId}/cliparts/`;
+    const prefix = `${ownerUserId}/${projectId}/cliparts/`;
     const uploads: Array<{ id: string; name: string; path: string; mimeType: string; thumbPath: string | null }> = (Array.isArray(body.uploads) ? body.uploads : []).flatMap((item: unknown) => {
       if (!item || typeof item !== "object") return [];
       const upload = item as Record<string, unknown>;
@@ -163,11 +161,10 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
 
 export async function DELETE(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   try {
-    const session = await requireSession();
     const { id: projectId } = await context.params;
-    await assertProjectOwner(projectId);
+    const { user_id: ownerUserId } = await assertProjectAccess(projectId);
     const body = await request.json().catch(() => ({}));
-    const prefix = `${session.userId}/${projectId}/cliparts/`;
+    const prefix = `${ownerUserId}/${projectId}/cliparts/`;
     const paths: string[] = (Array.isArray(body.paths) ? body.paths : []).map(String).filter((path: string) => path.startsWith(prefix));
     if (paths.length) {
       // Remove each asset's derivative alongside it so cleanup cannot orphan thumbnails.

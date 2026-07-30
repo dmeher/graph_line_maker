@@ -24,7 +24,8 @@ Graph Pixel Maker lets signed-in users upload images (PNG, JPG, WEBP, SVG, PDF),
 Key product traits:
 
 - Custom **Brevo email OTP** sign-in; no Supabase Auth OTP.
-- **Allowlist-based access**: only active `app_users` rows can log in; admins can invite/revoke users from `/settings`.
+- **Allowlist-based access**: only active `app_users` rows can log in; admins can invite/revoke users and promote any member to admin from `/settings`.
+- **Admin project oversight**: admins see every owner's projects on `/dashboard` (scope toggle, `?scope=mine` narrows it) and can open, edit, duplicate, and delete any project. Members remain scoped to their own.
 - **Service-role-only** Supabase access from the Next.js server; RLS is enabled but anon/authenticated roles are revoked.
 - **PWA/offline support**: a service worker (`public/sw.js`) caches the app shell and editable project pages so users can keep working offline.
 - Heavy client-side **canvas image processing** for graph-pixel conversion, palette generation, and PDF tiling.
@@ -145,11 +146,11 @@ This project uses **Next.js 16.2.10** with React 19. APIs, conventions, and file
 |-----|------|---------|
 | `/` | `src/app/page.tsx` | Landing page |
 | `/login` | `(auth)/login/page.tsx` | Email OTP sign-in |
-| `/dashboard` | `(app)/dashboard/page.tsx` | Project list, search, duplicate/delete |
+| `/dashboard` | `(app)/dashboard/page.tsx` | Project list, search, duplicate/delete; admins default to the all-owners scope |
 | `/projects/new` | `(app)/projects/new/page.tsx` | Multi-file crop review + create project |
 | `/projects/[id]` | `(app)/projects/[id]/page.tsx` | Editor for saved projects |
 | `/projects/mock-editor` | same as above | In-memory demo project (`getMockEditorProject`) |
-| `/settings` | `(app)/settings/page.tsx` | Account + admin user allowlist |
+| `/settings` | `(app)/settings/page.tsx` | Account + admin user allowlist (role and status per user) |
 | `/offline` | `src/app/offline/page.tsx` | Offline fallback page |
 | `/dev/editor-test` | `src/app/dev/editor-test/page.tsx` | **Development only** synthetic fixture |
 | `/dev/crop-test` | `src/app/dev/crop-test/page.tsx` | **Development only** advanced-crop fixture |
@@ -184,6 +185,8 @@ Session verification (`getCurrentSession`) reads the cookie, verifies the HMAC s
 
 Production session resolution is request-memoized with React `cache()`; never replace it with cross-request caching. OTP creation/cooldown and verification are atomic through the service-role-only `image_to_graph.create_login_otp_attempt` and `image_to_graph.verify_login_otp` RPCs.
 
+**Authorization model.** `requireSession` gates every mutation; `requireAdmin` gates the user allowlist. Project authorization runs through `assertProjectAccess` (full row) or `assertProjectOwnerId` (owner id only, used by the save path) in `src/lib/projects.ts`: a member may act on their own projects, an **admin on any project**. Both return the project's real `user_id`, and every caller must key storage paths and follow-up `user_id` filters off that value rather than the acting session — otherwise an admin edit would scatter a member's assets under the admin's own prefix. `getProjectForCurrentUser` applies the same rule for reads. `duplicateProject` is the deliberate exception: the copy is always owned by whoever duplicated it.
+
 Local development has an explicit opt-in bypass: set `GRAPH_PIXEL_DEV_AUTH_BYPASS=true` while `NODE_ENV=development`, with optional `GRAPH_PIXEL_DEV_USER_EMAIL` (defaults to the bootstrap admin). The bypass is ignored outside development and therefore cannot disable production auth. When Supabase is configured, the email must resolve to an active `app_users` row; that real user ID/role is used so project ownership and admin checks still apply. With no Supabase configuration, a synthetic local identity supports non-persistent fixtures, but database/storage APIs still require Supabase.
 
 **Critical rule:** `src/lib/auth/session.ts` is `server-only` and uses `next/headers`. Never import it into client components. Compute server-only values (session, offline ticket) in server components or API routes and pass them as props.
@@ -201,7 +204,7 @@ All tables live in the `image_to_graph` schema (migrations in `supabase/migratio
 - `projects` — owner, title, description, original/processed image paths, JSON `settings`, width/height/pixel_size/grid_cell_size/color_count.
 - `project_palettes` — per-project colors with name, hex, locked, cell_count, sort_order.
 
-Migration `20260710091750_optimize_project_persistence.sql` adds cursor/search indexes plus transactional `save_project_state` and `verify_login_otp` RPCs. Migration `20260714060318_bounded_project_summaries_and_otp_rate_limit.sql` adds bounded six-swatch project summaries and atomic OTP creation/cooldown. Apply both before deploying code that calls those RPCs.
+Migration `20260710091750_optimize_project_persistence.sql` adds cursor/search indexes plus transactional `save_project_state` and `verify_login_otp` RPCs. Migration `20260714060318_bounded_project_summaries_and_otp_rate_limit.sql` adds bounded six-swatch project summaries and atomic OTP creation/cooldown. Migration `20260730120000_admin_all_project_access.sql` re-declares `get_project_summaries` with `p_include_all_owners`, returns `owner_email`/`owner_display_name`, and adds the all-owners ordering index `projects_updated_id_idx`. Apply all of them before deploying code that calls those RPCs; the summaries signature changed, so the dashboard fails until the latest migration is applied.
 
 `updated_at` columns are maintained by triggers. The migration seeds the bootstrap admin `dmeher1996@gmail.com`.
 
@@ -360,6 +363,7 @@ The former read-only “Feature Suggestions” roadmap is now implemented as pra
   - The three-panel layout starts at 1200px. On desktop, the canvas host is viewport-height and sticky below the command bar, so its header, view controls, and tool rail remain available while the artwork scrolls inside the canvas panel. Tablet and mobile keep the canvas mounted while Assets/Layers and Inspector open as overlay drawers; mobile adds a safe-area-aware bottom dock.
   - The `EditorCommandBar`, `EditorToolRail`, `EditorViewControls`, and `EditorStatusBar` chrome components are `React.memo`-wrapped; `selectEditorTool` is a stable `useCallback` so the tool rail skips reconciliation during canvas interaction.
   - The top-bar **Workspace** menu owns project description, templates, and shortcut help. Keep roadmap/status content out of the editing UI.
+  - `.editor-command-bar__owner` renders beside the title only when an admin opened a project owned by someone else (`ownerLabel` prop on `EditorClient` → `EditorCommandBar`). It must stay visible whenever that condition holds so an admin edit never looks like their own project.
   - Left-panel tabs are `layers` and `library`; source images are image layers and reusable/unplaced content belongs in Library. The layer action strip appears for one or more selected layers; its checkboxes and Select all control make batch grouping explicit, while grouping controls stay disabled until their selection requirements are met.
   - The bottom canvas status bar must show real editor state (processing/ready, graph size, selected layer/fill status, zoom, connection, snap), not placeholder cursor/color values.
   - Source and clipart vectorizer controls stay in the selected layer inspector; do not reintroduce the global image-generation engine selector.
@@ -477,7 +481,7 @@ Run with `npm run test:unit`. They use Node's built-in `node:test` and `node:ass
 - Session cookies are **httpOnly, signed with HMAC-SHA256**, and secure in production (`sameSite: "lax"`).
 - OTPs are hashed (SHA-256 with a secret pepper) before storage; raw OTPs are not persisted.
 - Rate limiting is in-memory per IP/email in `src/lib/auth/rate-limit.ts`.
-- All DB/storage access is performed with the **service-role** Supabase client; ownership checks (`assertProjectOwner`, `requireSession`) run before mutations.
+- All DB/storage access is performed with the **service-role** Supabase client; authorization checks (`assertProjectAccess`/`assertProjectOwnerId`, `requireSession`, `requireAdmin`) run before mutations. Admins are authorized for any project by design; the dashboard scope parameter is never trusted on its own — `getProjectSummaries` forces `mine` for non-admins.
 - The bootstrap admin cannot be demoted or deactivated.
 - File uploads are validated against an allowlist of MIME types and extensions and capped at 50 MB (`MAX_UPLOAD_BYTES`).
 - `next.config.ts` sets `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and a strict CSP for `/sw.js`.

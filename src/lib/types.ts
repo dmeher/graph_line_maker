@@ -329,7 +329,13 @@ export type Project = {
 
 export type ProjectSummary = Omit<Project, "settings" | "palettes"> & {
   palettePreview: PaletteColor[];
+  /** Owner identity, used by the admin all-projects dashboard scope. */
+  ownerEmail: string;
+  ownerDisplayName: string | null;
 };
+
+/** Dashboard project scope. `all` is admin-only and includes every owner. */
+export type ProjectScope = "mine" | "all";
 
 export type ActionResult<T = undefined> = T extends undefined
   ? { ok: true; message?: string } | { ok: false; message: string }

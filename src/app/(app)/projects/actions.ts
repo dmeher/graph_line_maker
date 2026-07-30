@@ -41,7 +41,15 @@ import {
 } from "@/lib/graph-paper";
 import { MAX_CANVAS_DIMENSION, MAX_GRAPH_HEIGHT_CELLS, MAX_GRAPH_WIDTH_CELLS, inspectCanvasBudget } from "@/lib/canvas/performance-limits";
 import { isStoredFillRegionId } from "@/lib/canvas/fill-region-identity";
-import { assertProjectOwner, clipartImagePath, imagePath, normalizeGraphSettings, sourceImagePath, thumbnailPathFor } from "@/lib/projects";
+import {
+  assertProjectAccess,
+  assertProjectOwnerId,
+  clipartImagePath,
+  imagePath,
+  normalizeGraphSettings,
+  sourceImagePath,
+  thumbnailPathFor,
+} from "@/lib/projects";
 import { getObjectStore, mediaKey } from "@/lib/storage/media";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
@@ -322,8 +330,10 @@ type SaveProjectStateInput = {
 };
 
 export async function saveProjectState(input: SaveProjectStateInput) {
-  const session = await requireSession();
   const payload = saveProjectSchema.parse(input);
+  // Authorization happens here; the RPC then scopes its update to the project's
+  // real owner so an admin save cannot reassign a member's project.
+  const ownerUserId = await assertProjectOwnerId(payload.projectId);
   const normalizedSettings = normalizeGraphSettings({
     ...payload.settings,
     lineColor: payload.settings.outlineColor,
@@ -337,7 +347,7 @@ export async function saveProjectState(input: SaveProjectStateInput) {
   const supabase = getSupabaseAdmin();
   const { data: saved, error } = await supabase.rpc("save_project_state", {
     p_project_id: payload.projectId,
-    p_user_id: session.userId,
+    p_user_id: ownerUserId,
     p_title: payload.title,
     p_description: payload.description?.trim() || "",
     p_settings: normalizedSettings,
@@ -363,11 +373,10 @@ export async function saveProjectState(input: SaveProjectStateInput) {
 }
 
 export async function deleteProject(formData: FormData) {
-  const session = await requireSession();
   const projectId = String(formData.get("projectId") || "");
   if (!projectId) throw new Error("Project id is required.");
 
-  const owner = await assertProjectOwner(projectId);
+  const owner = await assertProjectAccess(projectId);
   const supabase = getSupabaseAdmin();
   const settings = normalizeGraphSettings(owner.settings);
 
@@ -397,17 +406,22 @@ export async function deleteProject(formData: FormData) {
   // One batched DeleteObjects call replaces the previous per-bucket round trips.
   if (keys.length) await getObjectStore().deleteObjects(keys);
 
-  const { error } = await supabase.from("projects").delete().eq("id", projectId).eq("user_id", session.userId);
+  const { error } = await supabase.from("projects").delete().eq("id", projectId).eq("user_id", owner.user_id);
   if (error) throw new Error(error.message);
   revalidatePath("/dashboard");
 }
 
+/**
+ * The copy always belongs to whoever duplicated it, so an admin duplicating a
+ * member's project gets their own working copy rather than adding a row to that
+ * member's dashboard.
+ */
 export async function duplicateProject(formData: FormData) {
   const session = await requireSession();
   const projectId = String(formData.get("projectId") || "");
   if (!projectId) throw new Error("Project id is required.");
 
-  const project = await assertProjectOwner(projectId);
+  const project = await assertProjectAccess(projectId);
   const supabase = getSupabaseAdmin();
 
   const { data: duplicate, error } = await supabase

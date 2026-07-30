@@ -4,7 +4,16 @@ import { useEffect, useRef, useState } from "react";
 import { CopyPlus, Trash2, X } from "lucide-react";
 import { duplicateProject, deleteProject } from "@/app/(app)/projects/actions";
 
-export function ProjectCardActions({ projectId, projectTitle }: { projectId: string; projectTitle: string }) {
+export function ProjectCardActions({
+  projectId,
+  projectTitle,
+  ownerLabel = null,
+}: {
+  projectId: string;
+  projectTitle: string;
+  /** Set when an admin is acting on someone else's project. */
+  ownerLabel?: string | null;
+}) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -51,7 +60,10 @@ export function ProjectCardActions({ projectId, projectTitle }: { projectId: str
             </button>
             <span className="ui-confirm-dialog__icon" aria-hidden="true"><Trash2 size={20} /></span>
             <h2 id="delete-project-title">Delete project?</h2>
-            <p id="delete-project-description">“{projectTitle}” and its stored source files will be permanently removed.</p>
+            <p id="delete-project-description">
+              “{projectTitle}”{ownerLabel ? <> — owned by <strong>{ownerLabel}</strong></> : null} and its stored source
+              files will be permanently removed.
+            </p>
             <div className="ui-confirm-dialog__actions">
               <button ref={cancelButtonRef} type="button" className="ui-btn" onClick={() => setConfirmDelete(false)}>Cancel</button>
               <form action={deleteProject}>

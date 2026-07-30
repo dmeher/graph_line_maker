@@ -1046,6 +1046,27 @@
   gap: 1px;
 }
 
+/* Admin-editing-someone-else's-project badge; see the command-canvas override. */
+.editor-command-bar__owner {
+  display: inline-flex;
+  max-width: 200px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--editor-line);
+  border-radius: 999px;
+  background: var(--editor-panel-2);
+  padding: 3px 9px;
+  color: var(--editor-text);
+  font-size: 9px;
+  font-weight: 620;
+  white-space: nowrap;
+}
+
+.editor-command-bar__owner > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .editor-command-bar__document > span,
 .editor-command-bar__group-label {
   color: var(--editor-muted);

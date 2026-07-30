@@ -275,7 +275,7 @@ Validation on 2026-07-17: `npm run build` completed compilation, TypeScript chec
 ### `PERF-DATA-002` - a save repeats session/owner checks and performs non-transactional palette fan-out
 
 - **Priority / status:** P1 / Resolved
-- **Evidence:** `saveProjectState` in `src/app/(app)/projects/actions.ts`; `requireSession`, `assertProjectOwner`, and `replaceProjectPalettes` in `src/lib/projects.ts`. A normal save re-enters session/owner checks, updates the project, then deletes and reinserts palettes.
+- **Evidence:** `saveProjectState` in `src/app/(app)/projects/actions.ts`; `requireSession`, `assertProjectAccess`/`assertProjectOwnerId`, and `replaceProjectPalettes` in `src/lib/projects.ts`. A normal save re-enters session/authorization checks, updates the project, then deletes and reinserts palettes. The save path resolves authorization through `assertProjectOwnerId`, which selects only `user_id` and therefore never reads the `settings` blob.
 - **Impact:** One save is about eight database calls before the separate processed-image request, and a failure between palette delete/insert can leave partial state.
 - **Solution:** Resolve a request-scoped authenticated/owned-project context once and pass it through the DAL. Use one service-role-only, `SECURITY INVOKER` transactional RPC to update the project and synchronize palettes; enforce a unique `(project_id, sort_order)` constraint if order is the identity.
 - **Risks / validation:** Never cache sessions across requests. Test rollback on invalid palettes, cross-user ownership, admin/member behavior, and a call-budget assertion for a save.
@@ -314,10 +314,10 @@ Validation on 2026-07-17: `npm run build` completed compilation, TypeScript chec
 ### `PERF-DATA-004` - dashboard and settings queries are unbounded while the UI implies pagination
 
 - **Priority / status:** P1 / Resolved
-- **Evidence:** `getProjectSummaries` calls `get_project_summaries` with a 25-row cursor, requests one lookahead row, returns only six palette swatches, and batch-signs thumbnail paths for the current page. `getAppUsers` is cursor-bounded, and the migrations provide matching composite/trigram indexes.
+- **Evidence:** `getProjectSummaries` calls `get_project_summaries` with a 25-row cursor, requests one lookahead row, returns only six palette swatches, and batch-signs thumbnail paths for the current page. `getAppUsers` is cursor-bounded, and the migrations provide matching composite/trigram indexes. The admin `all` scope (`p_include_all_owners`) drops the `user_id` predicate, so it uses the `projects_updated_id_idx` ordering index added by `20260730120000_admin_all_project_access.sql`; every other bound (page size, lookahead, six swatches, per-page signing) is unchanged, and the owner join is a primary-key lookup per row.
 - **Impact:** The previous row, palette, and DOM growth is bounded to one page. Query-plan quality still depends on applying the new migration in the deployed database.
 - **Solution:** Apply the migration, then verify cursor stability and run `EXPLAIN (ANALYZE, BUFFERS)` for empty and substring searches with representative data.
-- **Risks / validation:** Cursor ordering must be stable under updates, and search semantics are a product decision. Use `EXPLAIN (ANALYZE, BUFFERS)` with representative data and test no duplicates/gaps between pages.
+- **Risks / validation:** Cursor ordering must be stable under updates, and search semantics are a product decision. Use `EXPLAIN (ANALYZE, BUFFERS)` with representative data and test no duplicates/gaps between pages. Re-check the plan for the all-owners scope separately: it scans across owners, and its title/owner-email search is two `ilike` predicates rather than one.
 
 ### `PERF-DATA-005` - project asset lifecycle leaks objects and duplication can retain source references
 
@@ -330,7 +330,7 @@ Validation on 2026-07-17: `npm run build` completed compilation, TypeScript chec
 ### `PERF-AUTH-001` - session validation is repeated within one request/render
 
 - **Priority / status:** P1 / Resolved
-- **Evidence:** `getCurrentSession` checks `app_users` in production; nested `requireSession`/`assertProjectOwner` calls in project routes/actions and `getAppUsers` repeat it. Layout/page combinations can also call session helpers more than once. `src/lib/auth/dev-bypass.ts`, `src/lib/auth/session.ts`, and `src/proxy.ts` now provide an opt-in development-only bypass.
+- **Evidence:** `getCurrentSession` checks `app_users` in production; nested `requireSession`/`assertProjectAccess` calls in project routes/actions and `getAppUsers` repeat it. The editor page adds one `app_users` lookup (`getProjectOwnerLabel`) only when an admin opens a project they do not own. Layout/page combinations can also call session helpers more than once. `src/lib/auth/dev-bypass.ts`, `src/lib/auth/session.ts`, and `src/proxy.ts` now provide an opt-in development-only bypass.
 - **Impact:** Route handlers and actions incur redundant database calls. Identical React Server Component fetches may be deduplicated by framework behavior, so wire-level impact there must be measured rather than assumed.
 - **Solution:** Introduce a request-scoped auth context (React `cache()` for RSC DAL calls, explicit context passing in routes/actions) and a single owner/admin authorization step. Do not use cross-request `use cache`/`unstable_cache` for session data.
 - **Current local contract:** `GRAPH_PIXEL_DEV_AUTH_BYPASS=true` is honored only for `NODE_ENV=development`; `GRAPH_PIXEL_DEV_USER_EMAIL` optionally selects the identity. Production cannot bypass. With Supabase configured, the email resolves to an active `app_users` record so ownership/admin checks use a real user ID and role. This improves local iteration but does not resolve production request fan-out.

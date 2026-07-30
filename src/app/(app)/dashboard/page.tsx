@@ -12,13 +12,17 @@ import {
   Plus,
   Ruler,
   Search,
+  ShieldCheck,
   Sparkles,
+  UserRound,
+  Users,
 } from "lucide-react";
 import { ProjectCardActions } from "@/components/projects/project-card-actions";
+import { ProjectScopeToggle } from "@/components/projects/project-scope-toggle";
 import { ProjectViewToggle } from "@/components/projects/project-view-toggle";
 import { getProjectSummaries } from "@/lib/projects";
 import { formatDateTime } from "@/lib/utils/format";
-import type { ProjectSummary } from "@/lib/types";
+import type { ProjectScope, ProjectSummary } from "@/lib/types";
 
 export const metadata = {
   title: "Projects",
@@ -77,12 +81,33 @@ function ProjectPalette({ colors }: { colors: string[] }) {
   );
 }
 
-export default async function DashboardPage({ searchParams }: { searchParams: Promise<{ q?: string; cursor?: string }> }) {
+function ownerLabelFor(project: ProjectSummary) {
+  return project.ownerDisplayName?.trim() || project.ownerEmail || "Unknown owner";
+}
+
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; cursor?: string; scope?: string }>;
+}) {
   const params = await searchParams;
   const query = params.q?.trim() ?? "";
-  const { projects, nextCursor } = await getProjectSummaries({ query, cursor: params.cursor });
-  const nextParams = new URLSearchParams();
-  if (query) nextParams.set("q", query);
+  // Admins land on every project by default; `?scope=mine` narrows it back.
+  const requestedScope: ProjectScope = params.scope === "mine" ? "mine" : "all";
+  const { projects, nextCursor, scope, canViewAllProjects, viewerUserId } = await getProjectSummaries({
+    query,
+    cursor: params.cursor,
+    scope: requestedScope,
+  });
+  const viewingAllOwners = scope === "all";
+  const otherOwnerCount = viewingAllOwners
+    ? new Set(projects.filter((project) => project.userId !== viewerUserId).map((project) => project.userId)).size
+    : 0;
+  const scopeParams = new URLSearchParams();
+  if (query) scopeParams.set("q", query);
+  if (scope === "mine" && canViewAllProjects) scopeParams.set("scope", "mine");
+  const firstPageHref = scopeParams.toString() ? "/dashboard?" + scopeParams.toString() : "/dashboard";
+  const nextParams = new URLSearchParams(scopeParams);
   if (nextCursor) nextParams.set("cursor", nextCursor);
 
   return (
@@ -93,9 +118,11 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             <Sparkles size={13} aria-hidden="true" />
             Atelier / Projects
           </p>
-          <h1>Your working studio.</h1>
+          <h1>{viewingAllOwners ? "The whole studio." : "Your working studio."}</h1>
           <p className="studio-dashboard__lead">
-            Pick up a chart exactly where you left it, or turn fresh artwork into a production-ready graph.
+            {viewingAllOwners
+              ? "Admin view: every workspace project, whoever owns it. Open any chart to review or continue the work."
+              : "Pick up a chart exactly where you left it, or turn fresh artwork into a production-ready graph."}
           </p>
           <div className="studio-dashboard__actions">
             <Link
@@ -151,20 +178,34 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             <dd>1 cm</dd>
             <span>per graph cell</span>
           </div>
-          <div>
-            <dt><Palette size={15} aria-hidden="true" /> Output</dt>
-            <dd>4</dd>
-            <span>export formats</span>
-          </div>
+          {viewingAllOwners ? (
+            <div>
+              <dt><Users size={15} aria-hidden="true" /> Owners</dt>
+              <dd>{otherOwnerCount + (projects.some((project) => project.userId === viewerUserId) ? 1 : 0)}</dd>
+              <span>on this page</span>
+            </div>
+          ) : (
+            <div>
+              <dt><Palette size={15} aria-hidden="true" /> Output</dt>
+              <dd>4</dd>
+              <span>export formats</span>
+            </div>
+          )}
         </dl>
       </header>
 
       <section id="project-library" className="projects-library studio-library" aria-labelledby="projects-library-title">
         <header className="projects-library__header studio-library__header">
           <div>
-            <p className="page-eyebrow">{query ? "Search results" : "Project library"}</p>
-            <h2 id="projects-library-title">{query ? `Matching “${query}”` : "Recent work"}</h2>
-            <p>{query ? `${projects.length} ${projects.length === 1 ? "project" : "projects"} found on this page.` : "Recently updated projects appear first."}</p>
+            <p className="page-eyebrow">{query ? "Search results" : viewingAllOwners ? "Workspace library" : "Project library"}</p>
+            <h2 id="projects-library-title">{query ? `Matching “${query}”` : viewingAllOwners ? "All workspace projects" : "Recent work"}</h2>
+            <p>
+              {query
+                ? `${projects.length} ${projects.length === 1 ? "project" : "projects"} found on this page.`
+                : viewingAllOwners
+                  ? "Every owner's projects, most recently updated first."
+                  : "Recently updated projects appear first."}
+            </p>
           </div>
           <span className="studio-library__count">
             <strong>{projects.length}</strong>
@@ -178,16 +219,19 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             <input
               name="q"
               defaultValue={query}
-              placeholder="Search by project title…"
+              placeholder={viewingAllOwners ? "Search by project title or owner email…" : "Search by project title…"}
               aria-label="Search projects"
             />
-            {query ? <Link href="/dashboard" className="studio-search__clear">Clear</Link> : null}
+            {/* Keeps the active scope when a search is submitted or cleared. */}
+            {scope === "mine" && canViewAllProjects ? <input type="hidden" name="scope" value="mine" /> : null}
+            {query ? <Link href={firstPageHref} className="studio-search__clear">Clear</Link> : null}
             <button type="submit" className="projects-search__submit studio-search__submit">
               Search
               <ArrowRight size={14} aria-hidden="true" />
             </button>
           </form>
           <div className="studio-library__controls">
+            {canViewAllProjects ? <ProjectScopeToggle scope={scope} query={query} /> : null}
             <div className="studio-library__view-slot" data-project-view-slot>
               <ProjectViewToggle />
             </div>
@@ -225,6 +269,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
             {projects.map((project, projectIndex) => {
               const colors = projectColors(project);
               const projectDescription = project.description || project.originalImagePath?.split("/").pop() || "Graph project";
+              // Only foreign projects are labelled; tagging every own card would
+              // be noise on the normal dashboard.
+              const foreignOwnerLabel = project.userId === viewerUserId ? null : ownerLabelFor(project);
 
               return (
                 <article className="project-card studio-project-card" key={project.id}>
@@ -239,10 +286,17 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
                       <span className="studio-project-card__paper-grid" aria-hidden="true" />
                     </span>
                     <span className="studio-project-card__topline">
-                      <span className="project-card__type studio-project-card__status">
-                        <i aria-hidden="true" />
-                        Ready
-                      </span>
+                      {foreignOwnerLabel ? (
+                        <span className="studio-project-card__status studio-project-card__owner-tag">
+                          <ShieldCheck size={11} aria-hidden="true" />
+                          {foreignOwnerLabel}
+                        </span>
+                      ) : (
+                        <span className="project-card__type studio-project-card__status">
+                          <i aria-hidden="true" />
+                          Ready
+                        </span>
+                      )}
                       <span className="studio-project-card__index" aria-hidden="true">
                         {String(projectIndex + 1).padStart(2, "0")}
                       </span>
@@ -259,8 +313,19 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
                         <Link href={"/projects/" + project.id} prefetch={false}>{project.title}</Link>
                         <p title={projectDescription}>{projectDescription}</p>
                       </div>
-                      <ProjectCardActions projectId={project.id} projectTitle={project.title} />
+                      <ProjectCardActions
+                        projectId={project.id}
+                        projectTitle={project.title}
+                        ownerLabel={foreignOwnerLabel}
+                      />
                     </div>
+
+                    {foreignOwnerLabel ? (
+                      <p className="studio-project-card__owner">
+                        <UserRound size={12} aria-hidden="true" />
+                        Owned by <strong>{foreignOwnerLabel}</strong>
+                      </p>
+                    ) : null}
 
                     <dl className="project-card__details studio-project-card__metrics">
                       <div className="project-card__detail studio-project-card__metric">
@@ -290,15 +355,23 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         ) : (
           <div className="projects-empty studio-library__empty">
             <span className="studio-library__empty-icon" aria-hidden="true"><FolderOpen size={28} /></span>
-            <p className="page-eyebrow">{query ? "No matches" : "Your studio is ready"}</p>
-            <h3>{query ? "Nothing matched that search" : "Create your first graph project"}</h3>
+            <p className="page-eyebrow">{query ? "No matches" : viewingAllOwners ? "Workspace is empty" : "Your studio is ready"}</p>
+            <h3>
+              {query
+                ? "Nothing matched that search"
+                : viewingAllOwners
+                  ? "No projects exist yet"
+                  : "Create your first graph project"}
+            </h3>
             <p>
               {query
-                ? "Try another title or return to the complete library."
+                ? viewingAllOwners
+                  ? "Try another project title or owner email, or return to the complete library."
+                  : "Try another title or return to the complete library."
                 : "Upload line art, refine the crop, and build a printable graph in one workflow."}
             </p>
             {query ? (
-              <Link href="/dashboard" className="ui-btn">View all projects</Link>
+              <Link href={firstPageHref} className="ui-btn">View all projects</Link>
             ) : (
               <Link href="/projects/new" prefetch={false} className="ui-btn ui-btn-primary">
                 <Plus size={16} aria-hidden="true" />
@@ -313,7 +386,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         <span><Grid2X2 size={13} aria-hidden="true" /> Up to 25 projects per page</span>
         <div>
           {params.cursor ? (
-            <Link href={query ? "/dashboard?q=" + encodeURIComponent(query) : "/dashboard"} className="ui-btn">
+            <Link href={firstPageHref} className="ui-btn">
               First page
             </Link>
           ) : null}

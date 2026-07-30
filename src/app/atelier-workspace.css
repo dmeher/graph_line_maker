@@ -1284,6 +1284,9 @@
 .studio-library__controls {
   display: flex;
   flex: 0 0 auto;
+  /* The admin scope toggle is a third control here; wrapping keeps the toolbar
+     from overflowing on narrow viewports. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -1328,6 +1331,55 @@
 
 .studio-library .project-view-toggle button:active {
   transform: scale(0.94);
+}
+
+/* Admin-only dashboard scope switch; visually matched to the view toggle. */
+.project-scope-toggle {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+  padding: 3px;
+}
+
+.project-scope-toggle a {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 6px;
+  border-radius: 7px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 620;
+  white-space: nowrap;
+  transition:
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    color 140ms ease;
+}
+
+.project-scope-toggle a:hover {
+  color: var(--foreground);
+}
+
+.project-scope-toggle a.is-active {
+  background: var(--panel);
+  color: var(--cobalt);
+  box-shadow: 0 1px 5px rgb(20 22 28 / 0.1);
+}
+
+/* Icon-only below the tablet breakpoint; the labels are the first thing to go. */
+@media (max-width: 560px) {
+  .project-scope-toggle a > span {
+    display: none;
+  }
+
+  .project-scope-toggle a {
+    padding: 0 9px;
+  }
 }
 
 .studio-library__sort {
@@ -1572,6 +1624,35 @@
   text-transform: uppercase;
   box-shadow: 0 4px 12px rgb(28 30 36 / 0.1);
   backdrop-filter: blur(12px);
+}
+
+/* Replaces the "Ready" pill when an admin sees another owner's project. */
+.studio-project-card__owner-tag {
+  max-width: calc(100% - 46px);
+  overflow: hidden;
+  color: #23324f;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.studio-project-card__owner {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  margin: 11px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.studio-project-card__owner strong {
+  overflow: hidden;
+  color: var(--foreground);
+  font-weight: 620;
+  text-overflow: ellipsis;
 }
 
 .studio-project-card__status > i {

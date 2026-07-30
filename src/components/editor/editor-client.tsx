@@ -1337,7 +1337,14 @@ function clipartSettings(settings: GraphSettings, clipart: GraphClipartImage) {
   });
 }
 
-export function EditorClient({ project }: { project: Project }) {
+export function EditorClient({
+  project,
+  ownerLabel = null,
+}: {
+  project: Project;
+  /** Set when an admin opened a project owned by someone else. */
+  ownerLabel?: string | null;
+}) {
   const [title, setTitle] = useState(project.title);
   const [description, setDescription] = useState(project.description ?? "");
   const [settings, setSettings] = useState<GraphSettings>(() => initialEditorSettings(project));
@@ -9099,6 +9106,7 @@ export function EditorClient({ project }: { project: Project }) {
       <EditorCommandBar
         title={title}
         onTitleChange={setTitle}
+        ownerLabel={ownerLabel}
         onUndo={() => restoreSettingsHistory("undo")}
         onRedo={() => restoreSettingsHistory("redo")}
         onSave={() => saveProject()}

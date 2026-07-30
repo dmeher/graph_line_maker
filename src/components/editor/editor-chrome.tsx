@@ -26,6 +26,7 @@ import {
   Search,
   Scissors,
   Shapes,
+  ShieldCheck,
   SlidersHorizontal,
   Undo2,
   Wifi,
@@ -41,6 +42,8 @@ export type EditorToolId = "select" | "pan" | "draw" | "shape" | "fill" | "lasso
 type EditorCommandBarProps = {
   title: string;
   onTitleChange: (title: string) => void;
+  /** Set when an admin opened a project they do not own. */
+  ownerLabel?: string | null;
   onUndo: () => void;
   onRedo: () => void;
   onSave: () => void;
@@ -63,6 +66,7 @@ type EditorCommandBarProps = {
 export const EditorCommandBar = memo(function EditorCommandBar({
   title,
   onTitleChange,
+  ownerLabel = null,
   onUndo,
   onRedo,
   onSave,
@@ -96,6 +100,14 @@ export const EditorCommandBar = memo(function EditorCommandBar({
           <span>Project</span>
           <input value={title} onChange={(event) => onTitleChange(event.target.value)} aria-label="Project name" placeholder="Untitled graph" />
         </label>
+        {ownerLabel ? (
+          <span className="editor-command-bar__owner" title={`Owned by ${ownerLabel}`}>
+            <ShieldCheck size={13} aria-hidden="true" />
+            <span>
+              Admin edit · <strong>{ownerLabel}</strong>
+            </span>
+          </span>
+        ) : null}
       </div>
 
       {onOpenCommandPalette ? (

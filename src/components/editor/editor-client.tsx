@@ -92,6 +92,7 @@ import {
   removeEditorSessionDraft,
   writeEditorSessionDraft,
 } from "@/lib/editor/session-draft";
+import { graphExportBlockReason } from "@/lib/editor/export-readiness";
 import {
   applySettingsHistoryCommand,
   boundSettingsHistory,
@@ -5335,23 +5336,6 @@ export function EditorClient({
               })
             : null;
 
-          // Development-only: report any fill override that no rendered region
-          // answers to, so a lost colour can be traced to the exact keys rather
-          // than guessed at. Silent when every override still has a home.
-          if (process.env.NODE_ENV !== "production" && !dragActive) {
-            const promoted = reconciledFillOverrides ? reconciledFillOverrides.fillRegions : migratedFillOverrides;
-            const renderedIds = new Set(result.fillRegions.map((region) => region.id));
-            const orphans = Object.keys(promoted).filter((key) => !renderedIds.has(key));
-            if (orphans.length) {
-              console.warn("[graph-pixel] fill overrides with no rendered region", {
-                orphans,
-                renderedRegions: result.fillRegions.map((region) => `${region.id}#${region.cellCount}`),
-                previousRegions: previousFillFrame?.fillRegions.map((region) => region.id) ?? null,
-                matches: (reconciledFillOverrides?.matches ?? []).map((match) => `${match.fromId} -> ${match.toId}`),
-              });
-            }
-          }
-
           // Either pass can re-home a colour: the legacy promotion binds a bare
           // region number to this frame's stable ID, and reconciliation carries
           // a stable ID across frames.
@@ -6261,6 +6245,30 @@ export function EditorClient({
     return result;
   }
 
+  function currentPdfOutputBlockReason() {
+    return graphExportBlockReason({
+      currentRenderFailed: failedProcessingSignature === currentProcessingSignature,
+      processing,
+      hasDragPreview: Boolean(dragPreviewSourceId),
+      renderedSignature: lastProcessedSignatureRef.current,
+      currentSignature: currentProcessingSignature,
+      canvas: artworkCanvasRef.current,
+      expectedCanvasWidth: settings.outputWidth,
+      expectedCanvasHeight: settings.outputHeight,
+    });
+  }
+
+  function ensurePdfOutputReady() {
+    const blockReason = currentPdfOutputBlockReason();
+    if (!blockReason) return true;
+    if (blockReason === "failed-render") {
+      setNotice({ tone: "error", text: "The current graph could not be rendered. Resolve the error before exporting the PDF." });
+      return false;
+    }
+    setNotice({ tone: "info", text: "Finishing the canvas update before exporting the PDF." });
+    return false;
+  }
+
   function saveProject() {
     if (processing || dragPreviewSourceId) {
       setNotice({ tone: "info", text: "Finishing the canvas update before saving." });
@@ -6373,10 +6381,7 @@ export function EditorClient({
   }
 
   function exportPDF() {
-    if (processing || dragPreviewSourceId) {
-      setNotice({ tone: "info", text: "Finishing the canvas update before exporting." });
-      return;
-    }
+    if (!ensurePdfOutputReady()) return;
     // PDF/print draw the grid as crisp vectors over the transparent artwork,
     // so they take the artwork-only canvas (not the flattened, grid-baked one).
     const canvas = artworkCanvasRef.current;
@@ -6541,6 +6546,8 @@ export function EditorClient({
       || !processedCanvasRef.current
     );
   const graphUpdatePending = graphFrameOutdated && !currentGraphRenderFailed;
+  const pdfOutputBlockReason = currentPdfOutputBlockReason();
+  const pdfOutputReady = pdfOutputBlockReason === null;
   const canvasUpdatePending =
     canvasBootstrapPending
     || projectAssetsPending
@@ -8506,7 +8513,7 @@ export function EditorClient({
     { id: "history-redo", label: "Redo", group: "History", shortcut: "Ctrl Shift Z", run: () => restoreSettingsHistory("redo") },
     { id: "project-save", label: "Save project", group: "Project", shortcut: "Ctrl S", disabled: isPending || processing || Boolean(dragPreviewSourceId) || !title.trim(), run: () => saveProject() },
     { id: "export-png", label: "Export PNG", group: "Export", keywords: ["image", "download"], disabled: processing, run: exportPNG },
-    { id: "export-pdf", label: "Export tiled PDF", group: "Export", keywords: ["print", "pages"], disabled: processing, run: exportPDF },
+    { id: "export-pdf", label: "Export tiled PDF", group: "Export", keywords: ["print", "pages"], disabled: !pdfOutputReady, run: exportPDF },
     { id: "export-json", label: "Export project JSON", group: "Export", keywords: ["settings", "backup"], run: exportJSON },
     { id: "export-print", label: "Print graph", group: "Export", keywords: ["browser", "paper"], disabled: processing, run: printGraph },
     { id: "workspace-settings", label: "Open Workspace settings", group: "Workspace", keywords: ["description", "templates"], run: () => setIsWorkspaceMenuOpen(true) },
@@ -9252,6 +9259,7 @@ export function EditorClient({
                 }}
                 className="editor-export-option"
                 role="menuitem"
+                disabled={!pdfOutputReady}
               >
                 <FileText size={16} aria-hidden="true" />
                 PDF
@@ -9537,7 +9545,7 @@ export function EditorClient({
         </header>
         <div>
           <button type="button" onClick={() => { setMobileTab("canvas"); exportPNG(); }} disabled={processing}><ImageDown size={18} aria-hidden="true" /><span><strong>PNG image</strong><small>Flattened graph artwork</small></span></button>
-          <button type="button" onClick={() => { setMobileTab("canvas"); exportPDF(); }} disabled={processing}><FileText size={18} aria-hidden="true" /><span><strong>Tiled PDF</strong><small>Print-ready pages</small></span></button>
+          <button type="button" onClick={() => { setMobileTab("canvas"); exportPDF(); }} disabled={!pdfOutputReady}><FileText size={18} aria-hidden="true" /><span><strong>Tiled PDF</strong><small>Print-ready pages</small></span></button>
           <button type="button" onClick={() => { setMobileTab("canvas"); exportJSON(); }}><FileJson size={18} aria-hidden="true" /><span><strong>Project JSON</strong><small>Portable settings backup</small></span></button>
           <button type="button" onClick={() => { setMobileTab("canvas"); printGraph(); }} disabled={processing}><Printer size={18} aria-hidden="true" /><span><strong>Print</strong><small>Open browser print view</small></span></button>
         </div>

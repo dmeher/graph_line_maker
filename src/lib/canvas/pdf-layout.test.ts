@@ -178,6 +178,26 @@ test("multi-page PDF export splits on whole graph-cell boundaries", () => {
   assert.equal(plan.tiles.at(-1)?.destinationHeightMm, 250);
 });
 
+test("every tiled PDF cell remains exactly one centimetre", () => {
+  const plan = createPdfExportPlan({
+    settings: {
+      graphWidth: 10,
+      graphHeight: 112,
+      cellSizeCm: 1,
+    },
+    paper: A4_PAPER,
+    canvasWidth: 400,
+    canvasHeight: 4480,
+  });
+
+  for (const tile of plan.tiles) {
+    const millimetresPerRenderedMajorCellX = (tile.destinationWidthMm / tile.sourceWidth) * 40;
+    const millimetresPerRenderedMajorCellY = (tile.destinationHeightMm / tile.sourceHeight) * 40;
+    assert.equal(millimetresPerRenderedMajorCellX, 10);
+    assert.equal(millimetresPerRenderedMajorCellY, 10);
+  }
+});
+
 test("PDF export reserves top and bottom safe margins on every printed page", () => {
   const plan = createPdfExportPlan({
     settings: {

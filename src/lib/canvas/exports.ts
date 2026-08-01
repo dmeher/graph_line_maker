@@ -1,5 +1,6 @@
 import { DEFAULT_PRINT_PAPER_SIZE, GRAPH_MAJOR_CELL_PIXELS, PRINT_PAPER_SIZES } from "@/lib/graph-paper";
 import { createPdfExportPlan, MAX_PAGES_PER_PDF_FILE } from "@/lib/canvas/pdf-layout";
+import { isGraphCanvasSizedForSettings } from "@/lib/canvas/pdf-export-guard";
 import {
   GRID_BUCKET_ORDER,
   GRID_BUCKET_OPACITY,
@@ -343,6 +344,8 @@ function drawGridLinesToPdfPage(
   const x0 = tile.destinationXMm;
   const y0 = tile.destinationYMm;
   for (const group of groups) {
+    // Keep the established PDF treatment: jsPDF applies this to fills, while
+    // its vector strokes remain fully opaque and therefore crisp on paper.
     pdf.setGState(pdf.GState({ opacity: group.opacity }));
     pdf.setLineWidth(group.widthMm);
     for (const vertical of group.vertical) pdf.line(x0 + vertical, y0, x0 + vertical, y0 + heightMm);
@@ -360,7 +363,9 @@ function createPrintGridSvg(tile: PdfExportTile, settings: GraphSettings, canvas
       let d = "";
       for (const vertical of group.vertical) d += `M${vertical} 0V${heightMm}`;
       for (const horizontal of group.horizontal) d += `M0 ${horizontal}H${widthMm}`;
-      return `<path d="${d}" stroke="${color}" stroke-width="${group.widthMm}" stroke-opacity="${group.opacity}" fill="none" />`;
+      // Match the established PDF grid: fully opaque vector strokes, with the
+      // hierarchy carried by the shared line widths rather than faded alpha.
+      return `<path d="${d}" stroke="${color}" stroke-width="${group.widthMm}" stroke-opacity="1" fill="none" />`;
     })
     .join("");
   return `<svg class="print-grid" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${widthMm}mm;height:${heightMm}mm;z-index:${zIndex}" viewBox="0 0 ${widthMm} ${heightMm}" preserveAspectRatio="none">${paths}</svg>`;
@@ -468,6 +473,13 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
   const margin = typeof settingsOrMargin === "number" ? Math.max(0, Math.round(settingsOrMargin)) : 0;
 
   if (settings) {
+    // The print path already receives the correct settled canvas. Keep PDF
+    // equally exact even when this function is called outside EditorClient:
+    // otherwise an old 800 px-wide frame can put 20 cells into a new 10 cm
+    // graph and silently turn each cell into 0.5 cm.
+    if (!isGraphCanvasSizedForSettings(canvas, settings)) {
+      throw new Error("The graph dimensions changed before the canvas finished rendering. Wait for the update, then export the PDF again.");
+    }
     const paper = PRINT_PAPER_SIZES[settings.printPaperSize] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
     const plan = createPdfExportPlan({ settings, paper, canvasWidth: canvas.width, canvasHeight: canvas.height });
     if (plan.tiles.length > MAX_TOTAL_PDF_PAGES) {
@@ -600,7 +612,12 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
   <title>${escapeHtml(title)}</title>
   <style>
     @page { size: ${plan.pageWidthMm}mm ${plan.pageHeightMm}mm; margin: 0; }
-    html, body { margin: 0; background: white; }
+    html, body {
+      margin: 0;
+      background: white;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
     .page {
       position: relative;
       width: ${plan.pageWidthMm}mm;
@@ -616,7 +633,12 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
     }
     img { display: block; position: absolute; }
     .print-bg { position: absolute; z-index: 0; }
-    .print-grid { position: absolute; overflow: visible; }
+    .print-grid {
+      position: absolute;
+      overflow: visible;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
     .print-art { z-index: 2; }
     .company-hallmark { position: absolute; z-index: 4; overflow: visible; }
     .company-hallmark img { transform: rotate(-90deg); transform-origin: center; object-fit: contain; }

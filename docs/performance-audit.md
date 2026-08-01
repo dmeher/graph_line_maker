@@ -163,6 +163,15 @@ processing path, or cache entry. Static source inspection and `git diff --check`
 are the appropriate validation boundary; no rendered-browser automation or
 production build is implied by this prototype.
 
+## Remediation update - 2026-08-01 (export frame and grid contrast)
+
+| Issue IDs | Implemented evidence |
+|---|---|
+| `PERF-CANVAS-003` | Tiled PDF export now rejects a queued debounce, active render, failed current render, stale processed signature, or canvas dimensions that do not match the current graph. `exportCanvasAsPDF` repeats the dimension check at the export boundary. An immediate PDF export after a resize therefore cannot map an old 40 px cell into the new physical graph dimensions. Browser Print keeps its established layout and availability behavior. |
+| `PERF-EXPORT-001` | PDF retains its established opaque vector-stroke grid treatment. Browser print now explicitly uses opaque SVG grid strokes and exact color adjustment on its root and SVG grid, matching the PDF's strong line contrast rather than browser-economy-faded output. Print layout and physical cell-size calculations are unchanged. |
+
+Targeted validation on 2026-08-01: the export-readiness regression suite covers queued, stale-dimension, settled, processing, drag, missing-canvas, and failed-render states. PDF layout regression coverage verifies that every tiled 40 px rendered cell maps to exactly 10 mm, and export-grid regression coverage verifies that Print uses opaque SVG strokes to match PDF. Static checks verify exact-color print CSS. Rendered browser/print validation and a production build remain intentionally unrun unless explicitly authorized.
+
 ## Build update - 2026-07-17 (Webpack production compiler)
 
 `next build` with the default Turbopack compiler can remain indefinitely at `Creating an optimized production build` with a flat CPU counter and no compiler diagnostics in this workspace. `next build --webpack` completes compilation and reaches TypeScript checking, so the `build` script explicitly selects Webpack until the Turbopack stall can be reproduced and resolved upstream. Do not remove the flag without a successful Turbopack production build. The Webpack build also catches strict TypeScript errors that the stalled path never reports.

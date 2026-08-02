@@ -79,9 +79,8 @@ import {
 } from "@/lib/editor/erase-geometry";
 import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_SOURCE_IMAGES, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
 import {
-  CARD_THUMBNAIL_MAX_EDGE,
   SOURCE_THUMBNAIL_MAX_EDGE,
-  createThumbnailBlob,
+  createCardThumbnailBlob,
   uploadWithThumbnail,
   type PresignedUpload,
 } from "@/lib/storage/upload-client";
@@ -6197,7 +6196,7 @@ export function EditorClient({
       // Dashboard cards render this derivative instead of the full canvas PNG.
       // Best effort: a failure just leaves the card falling back to full size.
       try {
-        const thumbnail = await createThumbnailBlob(blob, CARD_THUMBNAIL_MAX_EDGE);
+        const thumbnail = await createCardThumbnailBlob(blob);
         if (thumbnail) {
           await fetch(`/api/projects/${project.id}/processed-image?variant=thumbnail`, {
             method: "PUT",

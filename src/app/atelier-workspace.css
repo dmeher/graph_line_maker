@@ -1542,20 +1542,35 @@
   background: #e5e6e9 !important;
 }
 
+/*
+ * The row must be definite. The preview image sets `height: 100%`, and against
+ * an auto row that percentage never resolves: the image falls back to its
+ * intrinsic aspect ratio at the full card width, so a tall graph (a 50x512
+ * thumbnail stretched to 354px wide) overflowed to ~3400px and `overflow:
+ * hidden` cropped it to a blurry, 7x-upscaled middle band. With a definite row
+ * `object-fit: contain` finally applies and the thumbnail renders downscaled.
+ */
 .studio-project-card__media {
   position: absolute;
   inset: 0;
   display: grid;
+  grid-template-rows: 100%;
   place-items: center;
   overflow: hidden;
 }
 
+/*
+ * Graph projects are extremely tall (a 20x102-cell chart is 400x4080), so a
+ * contained preview collapses to an unreadable hairline. The card shows the top
+ * of the chart instead, filling the box. `object-position` must stay top-
+ * anchored: centred, `cover` would crop to an arbitrary middle band.
+ */
 .studio-project-card__image {
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
+  object-position: center top;
   background: #f8f7f2;
-  padding: 12px;
   transition:
     filter 220ms ease,
     transform 220ms var(--atelier-ease);

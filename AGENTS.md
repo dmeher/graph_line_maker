@@ -263,10 +263,18 @@ equivalent — and the finalize step re-checks size with `headObject`, deleting 
 Uploads deliberately bypass the gateway Worker.
 
 **Thumbnails.** Uploads also generate a bounded WebP derivative client-side at
-`…/thumbs/{name}.webp` (256px for sources/cliparts, 512px for dashboard cards), persisted as
-`thumbPath` in settings JSONB and `projects.processed_thumb_path`. Assets predating derivatives have
-none and fall back to the full-size URL, so nothing breaks. Derivatives are copied and deleted
-alongside their asset.
+`…/thumbs/{name}.webp`, persisted as `thumbPath` in settings JSONB and
+`projects.processed_thumb_path`. Assets predating derivatives have none and fall back to the
+full-size URL, so nothing breaks. Derivatives are copied and deleted alongside their asset.
+
+Two shapes, and the difference matters. Sources/cliparts use `createThumbnailBlob` — the whole image
+inside a 256px box. Dashboard cards use `createCardThumbnailBlob`, which **crops the top of the image
+to `CARD_THUMBNAIL_ASPECT` (4/3) before scaling** to at most `CARD_THUMBNAIL_MAX_WIDTH` (768px, never
+upscaling). Graph projects are extremely tall — a 20×102-cell chart is 400×4080 — so a max-edge box
+produced a 50×512 strip that the card then had to magnify roughly sevenfold. The crop mirrors the
+card's own `object-fit: cover; object-position: center top`, so the derivative renders about
+one-to-one. Cards are therefore capped by the processed PNG's own width (400px for a 20-cell chart),
+which is the resolution the graph was rendered at, not a thumbnail artifact.
 
 ### Required environment
 

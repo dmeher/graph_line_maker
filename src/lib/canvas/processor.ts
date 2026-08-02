@@ -3,9 +3,9 @@ import { createGridNumberLabels } from "@/lib/canvas/grid-numbering";
 import { maskFromImageData, maskFromVectorizedImageData, type ImageDataLike } from "@/lib/canvas/ink-mask";
 import { fillRegionNumberForRender, mergeLayerPixelMasks } from "@/lib/canvas/layer-mask-merge";
 import { isPdfSource, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
-import { createEnclosedRegionMask, createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
+import { createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
 import { createLegacyCardinalFillRegionId, createStableFillRegionId } from "@/lib/canvas/fill-region-identity";
-import { generatedShapeFillColorAtPoint } from "@/lib/canvas/generated-artwork";
+import { generatedShapeFillColorAtPoint, resolveGeneratedTopology } from "@/lib/canvas/generated-artwork";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import {
   DEFAULT_GRID_LINE_COLOR,
@@ -1347,12 +1347,15 @@ function drawManualGraphArtwork(
     context.lineWidth = strokeWidth;
     context.save();
     const strokeStyle = shape.strokeStyle ?? "solid";
+    // A dashed or dotted stroke is a boundary the user drew, so the topology
+    // pass rasterizes it solid. Leaving the gaps in would make an enclosure
+    // depend on where the dash pattern happened to land.
     context.setLineDash(
-      strokeStyle === "dashed"
-        ? [Math.max(4, strokeWidth * 3), Math.max(3, strokeWidth * 2)]
-        : strokeStyle === "dotted"
-          ? [Math.max(1, strokeWidth * 0.2), Math.max(3, strokeWidth * 2)]
-          : [],
+      graphShapeMode === "topology" || strokeStyle === "solid"
+        ? []
+        : strokeStyle === "dashed"
+          ? [Math.max(4, strokeWidth * 3), Math.max(3, strokeWidth * 2)]
+          : [Math.max(1, strokeWidth * 0.2), Math.max(3, strokeWidth * 2)],
     );
     context.lineCap = "round";
     context.translate(x + width / 2, y + height / 2);
@@ -1439,17 +1442,41 @@ type GeneratedGraphShapeTopology = {
 };
 
 /**
- * Rasterizes all generated shapes as one image-like stroke layer. Keeping the
- * topology document-scoped lets independently drawn lines form one enclosure,
- * while the normal artwork pass still owns each shape's visual color and dash.
+ * Rasterizes all generated shapes as one image-like stroke layer and rebuilds
+ * the enclosure topology from the strokes **and** the imported artwork's ink
+ * together. Keeping the topology document-scoped lets independently drawn lines
+ * form one enclosure, while the normal artwork pass still owns each shape's
+ * visual color and dash.
+ *
+ * The strokes cannot be treated as their own isolated barrier layer: an
+ * enclosure a user builds by drawing across a gap in an uploaded contour is
+ * bounded by the image's ink on most of its perimeter, and a line drawn across
+ * an existing enclosure only splits it if the halves are re-labeled. Both cases
+ * need the union.
+ *
+ * Regions the strokes do not touch keep the layer-scoped identity the imported
+ * pass gave them, so this pass never disturbs fills elsewhere on the graph.
  */
-function integrateGeneratedGraphShapeRegions(
-  destinationFillRegionMap: Uint16Array,
-  width: number,
-  height: number,
-  settings: GraphSettings,
-  nextRegionId: number,
-): GeneratedGraphShapeTopology | null {
+function integrateGeneratedGraphShapeRegions(options: {
+  destinationFillRegionMap: Uint16Array;
+  /** Regions already labeled from imported layers, used to keep unchanged ones. */
+  destinationRegions: readonly FillRegion[];
+  /** Merged imported-artwork ink; a barrier for generated enclosures too. */
+  artworkInkMask: Uint8Array | null;
+  width: number;
+  height: number;
+  settings: GraphSettings;
+  nextRegionId: number;
+}): GeneratedGraphShapeTopology | null {
+  const {
+    destinationFillRegionMap,
+    destinationRegions,
+    artworkInkMask,
+    width,
+    height,
+    settings,
+  } = options;
+  let nextRegionId = options.nextRegionId;
   if (!(settings.graphShapes ?? []).some((shape) => shape.visible !== false)) return null;
 
   const topologyCanvas = createProcessingCanvas(width, height);
@@ -1461,22 +1488,33 @@ function integrateGeneratedGraphShapeRegions(
   if (!topologyContext) throw new Error("Canvas is not available.");
 
   const pixels = topologyContext.getImageData(0, 0, width, height).data;
-  const barrierMask = new Uint8Array(width * height);
-  let hasBarrier = false;
-  for (let pixel = 0, channel = 3; pixel < barrierMask.length; pixel += 1, channel += 4) {
+  const strokeMask = new Uint8Array(width * height);
+  let hasStroke = false;
+  for (let pixel = 0, channel = 3; pixel < strokeMask.length; pixel += 1, channel += 4) {
     if (!pixels[channel]) continue;
-    barrierMask[pixel] = 1;
-    hasBarrier = true;
+    strokeMask[pixel] = 1;
+    hasStroke = true;
   }
-  if (!hasBarrier) return null;
+  if (!hasStroke) return null;
 
-  const enclosedFillMask = createEnclosedRegionMask(barrierMask, width, height);
-  const local = labelFillRegions(
-    [{ mask: enclosedFillMask, kind: "enclosed" }],
+  // Solid artwork areas are ink, not fillable emptiness, so they bound the
+  // recomputed enclosures exactly like the outline does.
+  const artworkRegionNumbers = new Set<number>();
+  for (const region of destinationRegions) {
+    if (region.kind === "source") artworkRegionNumbers.add(region.mapId);
+  }
+
+  const finishTopology = startGraphPerformanceStage("generated-topology", { width, height });
+  const local = resolveGeneratedTopology({
+    strokeMask,
+    artworkInkMask,
+    existingFillRegionMap: destinationFillRegionMap,
+    artworkRegionNumbers,
     width,
     height,
-    settings,
-  );
+  });
+  finishTopology({ regions: local.regions.length, mapBytes: local.fillRegionMap.byteLength });
+
   const generatedFillRegionMap = new Uint16Array(width * height);
   const regionNumberMap = new Map<number, number>();
   const generatedRegions: FillRegion[] = [];
@@ -1484,7 +1522,7 @@ function integrateGeneratedGraphShapeRegions(
   for (const region of local.regions) {
     if (nextRegionId >= 65535) break;
     nextRegionId += 1;
-    regionNumberMap.set(region.mapId, nextRegionId);
+    regionNumberMap.set(region.regionNumber, nextRegionId);
     const stableId = createStableFillRegionId({
       layerId: "generated:artwork",
       kind: "enclosed",
@@ -1501,9 +1539,12 @@ function integrateGeneratedGraphShapeRegions(
       },
     });
     generatedRegions.push({
-      ...region,
       id: stableId,
       mapId: nextRegionId,
+      kind: "enclosed",
+      cellCount: region.pixelCount,
+      centerX: region.centerX,
+      centerY: region.centerY,
       // Projects saved before scoped IDs existed key their fill overrides by the
       // region's position in the frame's labeling order. Generated artwork was
       // the only region kind that never carried that number, so a legacy
@@ -1523,7 +1564,9 @@ function integrateGeneratedGraphShapeRegions(
   }
 
   for (let pixel = 0; pixel < destinationFillRegionMap.length; pixel += 1) {
-    if (barrierMask[pixel]) {
+    // Only the painted stroke clears an imported fill; the gap-closing margin
+    // around it is handed back to the enclosures it separates.
+    if (strokeMask[pixel]) {
       destinationFillRegionMap[pixel] = 0;
       continue;
     }
@@ -1588,19 +1631,24 @@ function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, optio
   const outputContext = getProcessingContext(output, { willReadFrequently: true });
   if (!outputContext) throw new Error("Canvas is not available.");
 
+  // Runs before the imported fills are painted: a region the strokes take over
+  // no longer belongs to the layer that owned it, and painting it twice would
+  // leave the old colour showing wherever the new region is transparent.
+  const generatedTopology = integrateGeneratedGraphShapeRegions({
+    destinationFillRegionMap: fillRegionMap,
+    destinationRegions: regions,
+    artworkInkMask: outlineMask,
+    width: output.width,
+    height: output.height,
+    settings,
+    nextRegionId: regions.reduce((maximum, region) => Math.max(maximum, region.mapId), 0),
+  });
   const sourceVisibleCounts = countVisibleFillRegions(fillRegionMap);
   const sourceDisplayRegions = displayFillRegions(regions, sourceVisibleCounts, settings);
   // Transparent artwork only; the grid + paper backdrop are composited by the SVG
   // overlay (preview) or flattenGraphForOutput (export/save).
   drawFillRegions(outputContext, fillRegionMap, sourceDisplayRegions, output.width, output.height, settings);
 
-  const generatedTopology = integrateGeneratedGraphShapeRegions(
-    fillRegionMap,
-    output.width,
-    output.height,
-    settings,
-    regions.reduce((maximum, region) => Math.max(maximum, region.mapId), 0),
-  );
   if (generatedTopology) regions.push(...generatedTopology.regions);
   const visibleCounts = countVisibleFillRegions(fillRegionMap);
   const displayRegions = displayFillRegions(regions, visibleCounts, settings);
@@ -1774,19 +1822,24 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     maxLineThickness = Math.max(maxLineThickness, lineThicknessForSettings(layer.settings));
   }
 
+  // Runs before the imported fills are painted: a region the strokes take over
+  // no longer belongs to the layer that owned it, and painting it twice would
+  // leave the old colour showing wherever the new region is transparent.
+  const generatedTopology = integrateGeneratedGraphShapeRegions({
+    destinationFillRegionMap: fillRegionMap,
+    destinationRegions: regions,
+    artworkInkMask: outlineMask,
+    width: output.width,
+    height: output.height,
+    settings,
+    nextRegionId,
+  });
   // Transparent artwork only; grid + paper backdrop handled by the SVG overlay
   // (preview) or flattenGraphForOutput (export/save).
   const sourceVisibleCounts = countVisibleFillRegions(fillRegionMap);
   const sourceDisplayRegions = displayFillRegions(regions, sourceVisibleCounts, settings);
   drawFillRegions(outputContext, fillRegionMap, sourceDisplayRegions, output.width, output.height, settings);
 
-  const generatedTopology = integrateGeneratedGraphShapeRegions(
-    fillRegionMap,
-    output.width,
-    output.height,
-    settings,
-    nextRegionId,
-  );
   if (generatedTopology) {
     nextRegionId = generatedTopology.nextRegionId;
     regions.push(...generatedTopology.regions);
@@ -2003,6 +2056,18 @@ export async function pixelateLayeredCanvasesAsync(
     maxLineThickness = Math.max(maxLineThickness, lineThicknessForSettings(layer.settings));
   }
 
+  // Runs before the imported fills are painted: a region the strokes take over
+  // no longer belongs to the layer that owned it, and painting it twice would
+  // leave the old colour showing wherever the new region is transparent.
+  const generatedTopology = integrateGeneratedGraphShapeRegions({
+    destinationFillRegionMap: fillRegionMap,
+    destinationRegions: regions,
+    artworkInkMask: outlineMask,
+    width: output.width,
+    height: output.height,
+    settings,
+    nextRegionId,
+  });
   // Transparent artwork only; grid + paper backdrop handled by the SVG overlay
   // (preview) or flattenGraphForOutput (export/save).
   const sourceVisibleCounts = countVisibleFillRegions(fillRegionMap);
@@ -2018,13 +2083,6 @@ export async function pixelateLayeredCanvasesAsync(
     outlineCoverage,
   );
 
-  const generatedTopology = integrateGeneratedGraphShapeRegions(
-    fillRegionMap,
-    output.width,
-    output.height,
-    settings,
-    nextRegionId,
-  );
   if (generatedTopology) {
     nextRegionId = generatedTopology.nextRegionId;
     regions.push(...generatedTopology.regions);
@@ -2038,6 +2096,26 @@ export async function pixelateLayeredCanvasesAsync(
         settings,
       )
     : [];
+
+  // Generated regions need the same soft outline underlay the imported regions
+  // get, and it has to be painted *under* the contour: a vector contour keeps
+  // fractional alpha at its antialiased edge, so a fill that stops at the ink
+  // boundary leaves those pixels showing bare paper as a white hairline around
+  // every filled area. Painting it after the outline would instead replace the
+  // antialiased contour with solid fill, so this pass runs first and the later
+  // one only re-asserts region colour over a shape's own fill.
+  if (generatedTopology && generatedDisplayRegions.length) {
+    drawFillRegions(
+      outputContext,
+      generatedTopology.fillRegionMap,
+      generatedDisplayRegions,
+      output.width,
+      output.height,
+      settings,
+      outlineMask,
+      outlineCoverage,
+    );
+  }
 
   drawColoredMaskLayers(
     outputContext,

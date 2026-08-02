@@ -17,6 +17,7 @@ import {
   PanelTopClose,
   Pin,
   RotateCcw,
+  Ruler,
   RotateCw,
   Search,
   X,
@@ -44,6 +45,12 @@ import {
   type PodDock,
   type PodId,
 } from "@/lib/editor/command-canvas";
+import {
+  MAX_CANVAS_ZOOM_PERCENT,
+  MIN_CANVAS_ZOOM_PERCENT,
+  canvasZoomPercent,
+  parseCanvasZoomPercent,
+} from "@/lib/editor/canvas-zoom";
 
 export type { CommandCanvasCommand } from "@/lib/editor/command-canvas";
 
@@ -704,6 +711,9 @@ export type CommandCanvasNavigatorProps = {
   onToggleNumbers: () => void;
   onZoomOut: () => void;
   onZoomIn: () => void;
+  onZoomChange: (zoom: number) => void;
+  onResetZoom: () => void;
+  onActualSize: () => void;
   onFitView: () => void;
 };
 
@@ -715,8 +725,26 @@ export const CommandCanvasNavigator = memo(function CommandCanvasNavigator({
   onToggleNumbers,
   onZoomOut,
   onZoomIn,
+  onZoomChange,
+  onResetZoom,
+  onActualSize,
   onFitView,
 }: CommandCanvasNavigatorProps) {
+  // Held only while the field is being edited, so buttons and pinch zoom still
+  // drive the displayed value and a half-typed "5" never becomes a zoom change.
+  const [zoomDraft, setZoomDraft] = useState<string | null>(null);
+  const zoomPercent = canvasZoomPercent(zoom);
+
+  const commitZoomDraft = useCallback(() => {
+    setZoomDraft((draft) => {
+      if (draft !== null) {
+        const nextZoom = parseCanvasZoomPercent(draft);
+        if (nextZoom !== null) onZoomChange(nextZoom);
+      }
+      return null;
+    });
+  }, [onZoomChange]);
+
   return (
     <div className="command-canvas-navigator is-compact" data-editor-region="navigator">
       <div className="command-canvas-navigator__controls" role="group" aria-label="Navigator view controls">
@@ -744,9 +772,45 @@ export const CommandCanvasNavigator = memo(function CommandCanvasNavigator({
         </button>
         <span aria-hidden="true" />
         <button type="button" onClick={onZoomOut} aria-label="Zoom out" data-navigator-control="zoom-out"><ZoomOut size={15} aria-hidden="true" /></button>
-        <output aria-label="Canvas zoom">{Math.round(zoom * 100)}%</output>
+        <span className="command-canvas-navigator__zoom">
+          <input
+            type="text"
+            inputMode="numeric"
+            className="command-canvas-navigator__zoom-input"
+            value={zoomDraft ?? String(zoomPercent)}
+            aria-label="Canvas zoom percentage"
+            title={`Canvas zoom (${MIN_CANVAS_ZOOM_PERCENT}-${MAX_CANVAS_ZOOM_PERCENT}%)`}
+            data-navigator-control="zoom-value"
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => setZoomDraft(event.target.value)}
+            onBlur={commitZoomDraft}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                commitZoomDraft();
+                event.currentTarget.blur();
+                return;
+              }
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              setZoomDraft(null);
+              event.currentTarget.blur();
+            }}
+          />
+          <span className="command-canvas-navigator__zoom-unit" aria-hidden="true">%</span>
+        </span>
         <button type="button" onClick={onZoomIn} aria-label="Zoom in" data-navigator-control="zoom-in"><ZoomIn size={15} aria-hidden="true" /></button>
-        <button type="button" onClick={onFitView} aria-label="Fit canvas to view" data-navigator-control="zoom-fit"><Maximize2 size={15} aria-hidden="true" /></button>
+        <button
+          type="button"
+          onClick={onActualSize}
+          aria-label="Actual size: one centimetre cells"
+          title="Actual size — 1 cm cells on screen. Assumes a 96 dpi display; fine-tune with the zoom field if your ruler disagrees."
+          data-navigator-control="zoom-actual"
+        >
+          <Ruler size={15} aria-hidden="true" />
+        </button>
+        <button type="button" onClick={onResetZoom} aria-label="Reset zoom to 100%" title="Reset zoom to 100%" data-navigator-control="zoom-reset"><RotateCcw size={15} aria-hidden="true" /></button>
+        <button type="button" onClick={onFitView} aria-label="Fit canvas to view" title="Fit canvas to view" data-navigator-control="zoom-fit"><Maximize2 size={15} aria-hidden="true" /></button>
       </div>
     </div>
   );

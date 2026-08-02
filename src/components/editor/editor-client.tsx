@@ -237,6 +237,14 @@ import {
   type PodDock,
   type PodId,
 } from "@/lib/editor/command-canvas";
+import {
+  DEFAULT_CANVAS_ZOOM,
+  MAX_CANVAS_ZOOM,
+  MIN_CANVAS_ZOOM,
+  actualSizeCanvasZoom,
+  roundCanvasZoom,
+  stepCanvasZoom,
+} from "@/lib/editor/canvas-zoom";
 import { InspectorPanel, type SelectionConsoleModel } from "./inspector-panel";
 import {
   CommandCanvasCommandPalette,
@@ -4781,7 +4789,10 @@ export function EditorClient({
     event.preventDefault();
     const points = Array.from(canvasPointersRef.current.values()).slice(0, 2);
     const center = canvasPointerCenter(points);
-    const nextZoom = Math.max(0.35, Math.min(2.5, pinch.zoom * (canvasPointerDistance(points) / pinch.distance)));
+    const nextZoom = Math.max(
+      MIN_CANVAS_ZOOM,
+      Math.min(MAX_CANVAS_ZOOM, pinch.zoom * (canvasPointerDistance(points) / pinch.distance)),
+    );
     setZoom(Math.round(nextZoom * 100) / 100);
     setCanvasPan({
       x: pinch.panX + center.x - pinch.centerX,
@@ -8462,11 +8473,34 @@ export function EditorClient({
     if (window.innerWidth < 768) setMobileTab("controls");
   }
 
+  /** Manual zoom entry; the value is already clamped by the parser. */
+  function applyCanvasZoom(nextZoom: number) {
+    setZoom(roundCanvasZoom(nextZoom));
+  }
+
+  /**
+   * Returns to 1:1 and drops the pan, so a graph that was pushed off-screen at
+   * a high zoom is back where the user can see it. Fitting the canvas to the
+   * viewport stays a separate action.
+   */
+  function resetCanvasZoom() {
+    setZoom(DEFAULT_CANVAS_ZOOM);
+    setCanvasPan({ x: 0, y: 0 });
+  }
+
+  /**
+   * Renders the graph at its physical size: one cell measures one centimetre
+   * on a display whose CSS pixel matches the 96 dpi reference. The pan is kept
+   * so measuring does not move the area being inspected.
+   */
+  function applyActualSizeZoom() {
+    setZoom(actualSizeCanvasZoom(GRAPH_MAJOR_CELL_PIXELS));
+  }
+
   function fitCommandCanvasView() {
     const scroller = canvasScrollRef.current;
     if (!scroller) {
-      setZoom(1);
-      setCanvasPan({ x: 0, y: 0 });
+      resetCanvasZoom();
       return;
     }
     const numberGutter = settings.showNumbers && settings.gridNumberPlacement === "outside" ? 68 : 0;
@@ -8476,7 +8510,7 @@ export function EditorClient({
       availableWidth / Math.max(1, previewCanvasSize.width + numberGutter),
       availableHeight / Math.max(1, previewCanvasSize.height + numberGutter),
     );
-    setZoom(Math.max(0.35, Math.min(2.5, Math.round(nextZoom * 100) / 100)));
+    setZoom(roundCanvasZoom(nextZoom));
     setCanvasPan({ x: 0, y: 0 });
     requestAnimationFrame(() => {
       scroller.scrollTo({
@@ -8506,8 +8540,10 @@ export function EditorClient({
     { id: "inspector-color", label: "Open Color controls", group: "Panels", keywords: ["palette", "fill", "outline"], run: () => revealCommandCanvasInspector("palette") },
     { id: "view-source", label: showOriginal ? "Show processed artwork" : "Show source artwork", group: "View", keywords: ["original", "preview"], run: () => setShowOriginal((value) => !value) },
     { id: "view-numbers", label: settings.showNumbers ? "Hide graph numbers" : "Show graph numbers", group: "View", keywords: ["grid", "labels"], run: () => updateSetting("showNumbers", !settings.showNumbers) },
-    { id: "view-zoom-in", label: "Zoom in", group: "View", shortcut: "+", run: () => setZoom((value) => Math.min(2.5, value + 0.15)) },
-    { id: "view-zoom-out", label: "Zoom out", group: "View", shortcut: "-", run: () => setZoom((value) => Math.max(0.35, value - 0.15)) },
+    { id: "view-zoom-in", label: "Zoom in", group: "View", shortcut: "+", run: () => setZoom((value) => stepCanvasZoom(value, 1)) },
+    { id: "view-zoom-out", label: "Zoom out", group: "View", shortcut: "-", run: () => setZoom((value) => stepCanvasZoom(value, -1)) },
+    { id: "view-zoom-reset", label: "Reset zoom to 100%", group: "View", keywords: ["zoom", "1:1"], run: resetCanvasZoom },
+    { id: "view-zoom-actual", label: "Actual size (1 cm cells)", group: "View", keywords: ["zoom", "real", "physical", "ruler", "centimetre"], run: applyActualSizeZoom },
     { id: "view-fit", label: "Fit canvas view", group: "View", keywords: ["reset", "center"], run: fitCommandCanvasView },
     { id: "history-undo", label: "Undo", group: "History", shortcut: "Ctrl Z", run: () => restoreSettingsHistory("undo") },
     { id: "history-redo", label: "Redo", group: "History", shortcut: "Ctrl Shift Z", run: () => restoreSettingsHistory("redo") },
@@ -9382,8 +9418,11 @@ export function EditorClient({
             zoom={zoom}
             onToggleOriginal={() => setShowOriginal((value) => !value)}
             onToggleNumbers={() => updateSetting("showNumbers", !settings.showNumbers)}
-            onZoomOut={() => setZoom((value) => Math.max(0.35, value - 0.15))}
-            onZoomIn={() => setZoom((value) => Math.min(2.5, value + 0.15))}
+            onZoomOut={() => setZoom((value) => stepCanvasZoom(value, -1))}
+            onZoomIn={() => setZoom((value) => stepCanvasZoom(value, 1))}
+            onZoomChange={applyCanvasZoom}
+            onResetZoom={resetCanvasZoom}
+            onActualSize={applyActualSizeZoom}
             onFitView={fitCommandCanvasView}
           />
         </CommandCanvasPod>

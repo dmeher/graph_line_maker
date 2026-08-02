@@ -133,6 +133,30 @@ test("fractional vector outlines render over an adjacent fill without changing h
   ]);
 });
 
+test("a generated region's own sparse map still resolves the soft outline underlay", () => {
+  // Generated topology is painted from a map holding only its own regions. It
+  // has to run through the same underlay lookup as the imported pass, or the
+  // fractional contour pixel beside the fill renders as bare paper — the white
+  // hairline that appeared around every filled region.
+  const generatedFillRegionMap = new Uint16Array([
+    0, 0, 0, 0,
+    0, 4, 0, 0,
+    0, 0, 0, 0,
+  ]);
+  const outlineMask = new Uint8Array([
+    0, 0, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 0,
+  ]);
+  const outlineCoverage = new Uint8Array([
+    0, 0, 0, 0,
+    0, 0, 40, 0,
+    0, 0, 0, 0,
+  ]);
+
+  assert.equal(fillRegionNumberForRender(generatedFillRegionMap, outlineMask, outlineCoverage, 4, 3, 6), 4);
+});
+
 test("image preprocessing applies color quantization without mutating input", () => {
   const imageData = {
     width: 2,

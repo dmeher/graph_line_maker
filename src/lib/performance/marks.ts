@@ -4,6 +4,7 @@ export type GraphPerformanceStage =
   | "svg-rasterization"
   | "mask-creation"
   | "region-labeling"
+  | "generated-topology"
   | "composition"
   | "paint"
   | "export"

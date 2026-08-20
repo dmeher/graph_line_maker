@@ -445,10 +445,10 @@ function escapeHtml(value: string) {
   });
 }
 
-function uniqueCutGuideYPositions(topMm: number, bottomMm: number, pageHeightMm: number) {
-  const safeTop = Math.max(0, Math.min(pageHeightMm, topMm));
-  const safeBottom = Math.max(0, Math.min(pageHeightMm, bottomMm));
-  return Array.from(new Set([safeTop, safeBottom].map((value) => Math.round(value * 1000) / 1000)));
+function uniqueCutGuidePositions(startMm: number, endMm: number, pageSizeMm: number) {
+  const safeStart = Math.max(0, Math.min(pageSizeMm, startMm));
+  const safeEnd = Math.max(0, Math.min(pageSizeMm, endMm));
+  return Array.from(new Set([safeStart, safeEnd].map((value) => Math.round(value * 1000) / 1000)));
 }
 
 function drawPdfCutGuides(pdf: import("jspdf").jsPDF, tile: PdfExportTile, pageWidthMm: number, pageHeightMm: number) {
@@ -456,11 +456,16 @@ function drawPdfCutGuides(pdf: import("jspdf").jsPDF, tile: PdfExportTile, pageW
   pdf.setDrawColor(51, 65, 85);
   pdf.setLineWidth(0.25);
   pdf.setLineDashPattern([1.5, 1.5], 0);
-  // Full page width, but offset just outside the graph edge so the dotted line
-  // brackets the graph above/below the boundary line instead of sitting on it.
+  // Full-page dotted lines sit just outside every tile edge. They preserve the
+  // established horizontal guides and make split columns equally clear.
+  const leftMm = tile.cutGuideLeftXMm - CUT_GUIDE_GAP_MM;
+  const rightMm = tile.cutGuideRightXMm + CUT_GUIDE_GAP_MM;
   const topMm = tile.cutGuideTopYMm - CUT_GUIDE_GAP_MM;
   const bottomMm = tile.cutGuideBottomYMm + CUT_GUIDE_GAP_MM;
-  for (const y of uniqueCutGuideYPositions(topMm, bottomMm, pageHeightMm)) {
+  for (const x of uniqueCutGuidePositions(leftMm, rightMm, pageWidthMm)) {
+    pdf.line(x, 0, x, pageHeightMm);
+  }
+  for (const y of uniqueCutGuidePositions(topMm, bottomMm, pageHeightMm)) {
     pdf.line(0, y, pageWidthMm, y);
   }
   pdf.setLineDashPattern([], 0);
@@ -581,9 +586,21 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
         await canvasSliceToPngBlob(canvas, tile.sourceX, tile.sourceY, tile.sourceWidth, tile.sourceHeight),
       );
       objectUrls.push(imageUrl);
-      const cutGuides = uniqueCutGuideYPositions(tile.cutGuideTopYMm - CUT_GUIDE_GAP_MM, tile.cutGuideBottomYMm + CUT_GUIDE_GAP_MM, plan.pageHeightMm)
-        .map((y) => `<span class="cut-guide" style="top:${y}mm"></span>`)
+      const horizontalCutGuides = uniqueCutGuidePositions(
+        tile.cutGuideTopYMm - CUT_GUIDE_GAP_MM,
+        tile.cutGuideBottomYMm + CUT_GUIDE_GAP_MM,
+        plan.pageHeightMm,
+      )
+        .map((y) => `<span class="cut-guide cut-guide-horizontal" style="top:${y}mm"></span>`)
         .join("");
+      const verticalCutGuides = uniqueCutGuidePositions(
+        tile.cutGuideLeftXMm - CUT_GUIDE_GAP_MM,
+        tile.cutGuideRightXMm + CUT_GUIDE_GAP_MM,
+        plan.pageWidthMm,
+      )
+        .map((x) => `<span class="cut-guide cut-guide-vertical" style="left:${x}mm"></span>`)
+        .join("");
+      const cutGuides = `${horizontalCutGuides}${verticalCutGuides}`;
       const gridNumberSpans = outsideGridNumberLines
         ? createPrintGridNumberSpans(
             tile,
@@ -644,11 +661,20 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
     .company-hallmark img { transform: rotate(-90deg); transform-origin: center; object-fit: contain; }
     .cut-guide {
       position: absolute;
+      z-index: 5;
+      pointer-events: none;
+    }
+    .cut-guide-horizontal {
       left: 0;
       right: 0;
-      z-index: 5;
       height: 0;
       border-top: 0.25mm dotted rgba(51, 65, 85, 0.78);
+    }
+    .cut-guide-vertical {
+      top: 0;
+      bottom: 0;
+      width: 0;
+      border-left: 0.25mm dotted rgba(51, 65, 85, 0.78);
     }
     .print-grid-number {
       position: absolute;

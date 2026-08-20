@@ -2,17 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   ACTIVE_COMMAND_CANVAS_POD_IDS,
+  COMMAND_CANVAS_ACTIVE_DOCKS,
   COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
+  COMMAND_CANVAS_DOCK_GAP,
   COMMAND_CANVAS_DOCK_SNAP_DISTANCE,
   COMMAND_CANVAS_LAYOUT_STORAGE_KEY,
   clampCommandCanvasPodSize,
+  commandCanvasRectsConflict,
   commandCanvasCommandScore,
+  createCommandCanvasDesktopGeometry,
   createDefaultCommandCanvasLayout,
   deserializeCommandCanvasLayout,
   detectCommandCanvasDockSnap,
+  findCommandCanvasPodCollision,
   filterCommandCanvasCommands,
   placeCommandCanvasPod,
   quantizeCommandCanvasCoordinate,
+  repairCommandCanvasDesktopLayout,
+  resolveCommandCanvasPodAnchor,
   resolveCommandCanvasPodPlacement,
   serializeCommandCanvasLayout,
   type CommandCanvasCommand,
@@ -101,6 +108,28 @@ test("legacy selection placement remains round-trippable but is not an active mo
   );
 });
 
+test("desktop horizontal collapse persists as an opt-in edge-tab direction", () => {
+  const layout = deserializeCommandCanvasLayout({
+    version: 1,
+    modules: {
+      tools: { dock: "tool-spine" },
+      scene: { dock: "left-main" },
+      selection: { dock: "left-lower" },
+      navigator: { dock: "right-top" },
+      focus: { dock: "right-main" },
+    },
+    collapsed: ["scene"],
+    collapseDirections: {
+      scene: "horizontal",
+      focus: "horizontal",
+    },
+  });
+
+  assert.deepEqual(layout.collapsed, ["scene"]);
+  assert.deepEqual(layout.collapseDirections, { scene: "horizontal" });
+  assert.deepEqual(deserializeCommandCanvasLayout(serializeCommandCanvasLayout(layout)), layout);
+});
+
 test("invalid or incompatible layout values fall back without sharing mutable defaults", () => {
   const first = deserializeCommandCanvasLayout("{broken");
   const second = deserializeCommandCanvasLayout({ version: 2, modules: {}, collapsed: [] });
@@ -160,6 +189,198 @@ test("layout deserialization preserves valid pod dimensions and rejects invalid 
   assert.deepEqual(layout.modules.navigator, { dock: "right-top" });
   assert.deepEqual(layout.modules.focus, { dock: "right-main", width: 448, height: 640 });
   assert.deepEqual(layout.collapsed, ["tools"]);
+});
+
+test("active desktop docks are exclusive while the legacy Selection slot remains readable", () => {
+  const layout = deserializeCommandCanvasLayout({
+    version: 1,
+    modules: {
+      tools: { dock: "right-top" },
+      scene: { dock: "right-top" },
+      selection: { dock: "left-lower", x: 152, y: 488 },
+      navigator: { dock: "right-top" },
+      focus: { dock: "right-top" },
+    },
+    collapsed: [],
+  });
+
+  assert.deepEqual(COMMAND_CANVAS_ACTIVE_DOCKS, ["tool-spine", "left-main", "right-top", "right-main"]);
+  assert.equal(layout.modules.navigator.dock, "right-top");
+  assert.equal(layout.modules.tools.dock, "tool-spine");
+  assert.equal(layout.modules.scene.dock, "left-main");
+  assert.equal(layout.modules.focus.dock, "right-main");
+  assert.deepEqual(layout.modules.selection, { dock: "left-lower", x: 152, y: 488 });
+});
+
+test("desktop geometry packs left and right lanes with the shared twelve-pixel gutter", () => {
+  const geometry = createCommandCanvasDesktopGeometry(createDefaultCommandCanvasLayout(), {
+    viewportSize: { width: 1920, height: 1080 },
+    podSizes: {
+      tools: { width: 68, height: 500 },
+      scene: { width: 400, height: 976 },
+      navigator: { width: 356, height: 116 },
+      focus: { width: 430, height: 844 },
+    },
+  });
+
+  assert.equal(COMMAND_CANVAS_DOCK_GAP, 12);
+  assert.deepEqual(geometry.scene.rect, { x: 12, y: 92, width: 400, height: 976 });
+  assert.deepEqual(geometry.tools.rect, { x: 424, y: 92, width: 68, height: 500 });
+  assert.deepEqual(geometry.navigator.rect, { x: 1552, y: 96, width: 356, height: 116 });
+  assert.deepEqual(geometry.focus.rect, { x: 1478, y: 224, width: 430, height: 844 });
+  assert.equal(geometry.scene.rect.y + geometry.scene.rect.height, 1_068);
+  assert.equal(geometry.focus.rect.y + geometry.focus.rect.height, 1_068);
+  assert.equal(geometry.scene.anchor, "left");
+  assert.equal(geometry.focus.anchor, "right");
+});
+
+test("a swapped right-top pod leaves room for the right-main counterpart", () => {
+  const layout = deserializeCommandCanvasLayout({
+    version: 1,
+    modules: {
+      tools: { dock: "tool-spine" },
+      scene: { dock: "left-main" },
+      selection: { dock: "left-lower" },
+      navigator: { dock: "right-main" },
+      focus: { dock: "right-top", height: 900 },
+    },
+    collapsed: [],
+  });
+  const geometry = createCommandCanvasDesktopGeometry(layout, {
+    viewportSize: { width: 1920, height: 1080 },
+    podSizes: {
+      tools: { width: 68, height: 500 },
+      scene: { width: 400, height: 860 },
+      navigator: { width: 356, height: 116 },
+      focus: { width: 430, height: 900 },
+    },
+  });
+
+  assert.equal(geometry.focus.rect.height, 844);
+  assert.equal(geometry.navigator.rect.y, 952);
+  assert.equal(geometry.navigator.rect.y + geometry.navigator.rect.height, 1068);
+});
+
+test("restored left-side widths yield to a wider right dock instead of overlapping it", () => {
+  const layout = deserializeCommandCanvasLayout({
+    version: 1,
+    modules: {
+      tools: { dock: "tool-spine", width: 320 },
+      scene: { dock: "left-main", width: 560 },
+      selection: { dock: "left-lower" },
+      navigator: { dock: "right-top" },
+      focus: { dock: "right-main", width: 720 },
+    },
+    collapsed: [],
+  });
+  const geometry = createCommandCanvasDesktopGeometry(layout, {
+    viewportSize: { width: 1280, height: 900 },
+    podSizes: {
+      tools: { width: 320, height: 500 },
+      scene: { width: 560, height: 760 },
+      navigator: { width: 356, height: 116 },
+      focus: { width: 720, height: 640 },
+    },
+    podMinimumSizes: {
+      tools: { width: 56, height: 300 },
+      scene: { width: 260, height: 220 },
+      navigator: { width: 260, height: 88 },
+      focus: { width: 340, height: 340 },
+    },
+  });
+
+  assert.deepEqual(geometry.scene.rect, { x: 12, y: 92, width: 456, height: 760 });
+  assert.deepEqual(geometry.tools.rect, { x: 480, y: 92, width: 56, height: 500 });
+  assert.equal(geometry.focus.rect.x, 548);
+  assert.equal(geometry.tools.rect.x + geometry.tools.rect.width + COMMAND_CANVAS_DOCK_GAP, geometry.focus.rect.x);
+});
+
+test("valid legacy floating positions retain their physical point while new anchors preserve resize direction", () => {
+  const layout = deserializeCommandCanvasLayout({
+    version: 1,
+    modules: {
+      tools: { dock: "tool-spine" },
+      scene: { dock: "floating", x: 196, y: 184, width: 400, height: 500 },
+      selection: { dock: "left-lower" },
+      navigator: { dock: "right-top" },
+      focus: { dock: "floating", anchor: "right", right: 24, y: 240, width: 430, height: 400 },
+    },
+    collapsed: [],
+  });
+  const geometry = createCommandCanvasDesktopGeometry(layout, {
+    viewportSize: { width: 1440, height: 900 },
+    podSizes: {
+      tools: { width: 68, height: 500 },
+      scene: { width: 400, height: 500 },
+      navigator: { width: 356, height: 116 },
+      focus: { width: 430, height: 400 },
+    },
+  });
+
+  assert.equal(resolveCommandCanvasPodAnchor(layout.modules.scene, "scene"), "left");
+  assert.equal(resolveCommandCanvasPodAnchor(layout.modules.focus, "focus"), "right");
+  assert.deepEqual(geometry.scene.rect, { x: 200, y: 184, width: 400, height: 500 });
+  assert.deepEqual(geometry.focus.rect, { x: 974, y: 240, width: 430, height: 400 });
+});
+
+test("restored floating collisions return the affected docks to safe semantic slots", () => {
+  const layout = deserializeCommandCanvasLayout({
+    version: 1,
+    modules: {
+      tools: { dock: "floating", x: 344, y: 88, width: 56, height: 400 },
+      scene: { dock: "floating", x: 16, y: 88, width: 312, height: 635 },
+      selection: { dock: "left-lower" },
+      navigator: { dock: "floating", anchor: "right", right: 188, y: 272 },
+      focus: { dock: "floating", anchor: "right", right: 372, y: 120, width: 344, height: 504 },
+    },
+    collapsed: [],
+  });
+  const options = {
+    viewportSize: { width: 1360, height: 768 },
+    podSizes: {
+      tools: { width: 56, height: 400 },
+      scene: { width: 312, height: 635 },
+      navigator: { width: 356, height: 116 },
+      focus: { width: 344, height: 504 },
+    },
+  };
+
+  const repaired = repairCommandCanvasDesktopLayout(layout, options);
+  const geometry = createCommandCanvasDesktopGeometry(repaired, options);
+
+  assert.deepEqual(repaired.modules.tools, layout.modules.tools);
+  assert.deepEqual(repaired.modules.scene, layout.modules.scene);
+  assert.deepEqual(repaired.modules.navigator, { dock: "right-top" });
+  assert.deepEqual(repaired.modules.focus, { dock: "right-main", width: 344, height: 504 });
+  for (const podId of ACTIVE_COMMAND_CANVAS_POD_IDS) {
+    for (const peerId of ACTIVE_COMMAND_CANVAS_POD_IDS) {
+      if (podId >= peerId) continue;
+      assert.equal(commandCanvasRectsConflict(geometry[podId].rect, geometry[peerId].rect), false);
+    }
+  }
+});
+
+test("collision helpers enforce the gutter and select the strongest free-floating swap target", () => {
+  const moving = { x: 100, y: 100, width: 120, height: 120 };
+  assert.equal(
+    commandCanvasRectsConflict(moving, { x: 232, y: 100, width: 80, height: 80 }),
+    false,
+  );
+  assert.equal(
+    commandCanvasRectsConflict(moving, { x: 231, y: 100, width: 80, height: 80 }),
+    true,
+  );
+  assert.deepEqual(
+    findCommandCanvasPodCollision(moving, [
+      { podId: "tools", rect: { x: 190, y: 190, width: 80, height: 80 } },
+      { podId: "focus", rect: { x: 150, y: 150, width: 120, height: 120 } },
+    ]),
+    {
+      podId: "focus",
+      rect: { x: 150, y: 150, width: 120, height: 120 },
+      overlapArea: 4900,
+    },
+  );
 });
 
 test("pod placement quantizes movement and clamps every edge to safe viewport insets", () => {

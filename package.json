@@ -7,7 +7,7 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
-    "test:unit": "node --experimental-strip-types --test src/lib/auth/dev-bypass.test.ts src/lib/canvas/artwork-detection.test.ts src/lib/canvas/background-removal.test.ts src/lib/canvas/crop.test.ts src/lib/canvas/exports.test.ts src/lib/canvas/fill-region-identity.test.ts src/lib/canvas/fill-region-reconciliation.test.ts src/lib/canvas/generated-artwork.test.ts src/lib/canvas/grid-numbering.test.ts src/lib/canvas/ink-mask.test.ts src/lib/canvas/pdf-layout.test.ts src/lib/canvas/performance-limits.test.ts src/lib/canvas/preview-policy.test.ts src/lib/canvas/processor.test.ts src/lib/canvas/thinning.test.ts src/lib/editor/canvas-zoom.test.ts src/lib/editor/command-canvas.test.ts src/lib/editor/drawing-geometry.test.ts src/lib/editor/erase-geometry.test.ts src/lib/editor/export-readiness.test.ts src/lib/editor/history.test.ts src/lib/editor/layer-extras.test.ts src/lib/editor/session-draft.test.ts src/lib/editor/source-layout.test.ts src/lib/graph-paper.test.ts src/lib/performance/byte-lru.test.ts src/lib/projects/crop-queue.test.ts src/lib/storage/paths.test.ts src/lib/utils/concurrency.test.ts",
+    "test:unit": "node --experimental-strip-types --test src/lib/auth/dev-bypass.test.ts src/lib/design/design.test.ts src/lib/canvas/artwork-detection.test.ts src/lib/canvas/background-removal.test.ts src/lib/canvas/crop.test.ts src/lib/canvas/exports.test.ts src/lib/canvas/fill-region-identity.test.ts src/lib/canvas/fill-region-reconciliation.test.ts src/lib/canvas/generated-artwork.test.ts src/lib/canvas/grid-numbering.test.ts src/lib/canvas/ink-mask.test.ts src/lib/canvas/pdf-layout.test.ts src/lib/canvas/performance-limits.test.ts src/lib/canvas/preview-policy.test.ts src/lib/canvas/processor.test.ts src/lib/canvas/thinning.test.ts src/lib/editor/canvas-zoom.test.ts src/lib/editor/command-canvas.test.ts src/lib/editor/drawing-geometry.test.ts src/lib/editor/erase-geometry.test.ts src/lib/editor/export-readiness.test.ts src/lib/editor/history.test.ts src/lib/editor/layer-extras.test.ts src/lib/editor/session-draft.test.ts src/lib/editor/source-layout.test.ts src/lib/graph-paper.test.ts src/lib/performance/byte-lru.test.ts src/lib/projects/crop-queue.test.ts src/lib/storage/paths.test.ts src/lib/utils/concurrency.test.ts",
     "test:e2e": "playwright test",
     "test:pdf-export": "node --experimental-strip-types --test src/lib/canvas/pdf-layout.test.ts"
   },
@@ -18,11 +18,13 @@
     "@supabase/ssr": "0.12.0",
     "@supabase/supabase-js": "2.110.0",
     "jspdf": "4.2.1",
+    "konva": "^10.3.0",
     "lucide-react": "1.23.0",
     "next": "16.2.10",
     "pdfjs-dist": "5.4.296",
     "react": "19.2.7",
     "react-dom": "19.2.7",
+    "react-konva": "^19.2.5",
     "server-only": "0.0.1",
     "zod": "4.4.3"
   },

@@ -26,19 +26,23 @@ test("test2 PDF export layout keeps centimeter print size", () => {
   assert.equal(plan.graphHeightMm, 800);
   assert.equal(plan.pageWidthMm, 210);
   assert.equal(plan.pageHeightMm, 297);
-  assert.equal(plan.pagesX, 3);
+  assert.equal(plan.pageHorizontalMarginMm, 10);
+  assert.equal(plan.printablePageWidthMm, 190);
+  assert.equal(plan.pagesX, 5);
   assert.equal(plan.pagesY, 4);
-  assert.equal(plan.totalPages, 12);
+  assert.equal(plan.totalPages, 20);
 
   const firstTile = plan.tiles[0];
-  assert.equal(firstTile.destinationXMm, 0);
+  assert.equal(firstTile.destinationXMm, 10);
   assert.equal(firstTile.destinationYMm, 0);
-  assert.equal(firstTile.destinationWidthMm, 200);
+  assert.equal(firstTile.destinationWidthMm, 100);
   assert.equal(firstTile.destinationHeightMm, 200);
+  assert.equal(firstTile.cutGuideLeftXMm, 10);
+  assert.equal(firstTile.cutGuideRightXMm, 110);
 
   const lastTile = plan.tiles.at(-1);
   assert.ok(lastTile);
-  assert.equal(lastTile.destinationXMm, 0);
+  assert.equal(lastTile.destinationXMm, 10);
   assert.equal(lastTile.destinationYMm, 0);
   assert.equal(lastTile.destinationWidthMm, 100);
   assert.equal(lastTile.destinationHeightMm, 200);
@@ -61,6 +65,8 @@ test("single-page PDF export centers graph on paper", () => {
   });
 
   assert.equal(plan.totalPages, 1);
+  assert.equal(plan.pageHorizontalMarginMm, 10);
+  assert.equal(plan.printablePageWidthMm, 190);
   assert.equal(plan.tiles[0].destinationXMm, 80);
   assert.equal(plan.tiles[0].destinationYMm, 123.5);
   assert.equal(plan.tiles[0].destinationWidthMm, 50);
@@ -106,7 +112,7 @@ test("single-page PDF export supports left top alignment", () => {
   });
 
   assert.equal(plan.totalPages, 1);
-  assert.equal(plan.tiles[0].destinationXMm, 0);
+  assert.equal(plan.tiles[0].destinationXMm, 10);
   assert.equal(plan.tiles[0].destinationYMm, 0);
 });
 
@@ -125,7 +131,7 @@ test("single-page PDF export supports right bottom alignment", () => {
   });
 
   assert.equal(plan.totalPages, 1);
-  assert.equal(plan.tiles[0].destinationXMm, 160);
+  assert.equal(plan.tiles[0].destinationXMm, 150);
   assert.equal(plan.tiles[0].destinationYMm, 247);
 });
 
@@ -178,6 +184,32 @@ test("multi-page PDF export splits on whole graph-cell boundaries", () => {
   assert.equal(plan.tiles.at(-1)?.destinationHeightMm, 250);
 });
 
+test("multi-page PDF export emits each column from top to bottom before the next column", () => {
+  const plan = createPdfExportPlan({
+    settings: {
+      graphWidth: 2,
+      graphHeight: 3,
+      cellSizeCm: 10,
+      printOrientation: "portrait",
+    },
+    paper: A4_PAPER,
+    canvasWidth: 80,
+    canvasHeight: 120,
+  });
+
+  assert.equal(plan.pagesX, 2);
+  assert.equal(plan.pagesY, 2);
+  assert.deepEqual(
+    plan.tiles.map((tile) => [tile.tileX, tile.tileY]),
+    [
+      [0, 0],
+      [0, 1],
+      [1, 0],
+      [1, 1],
+    ],
+  );
+});
+
 test("every tiled PDF cell remains exactly one centimetre", () => {
   const plan = createPdfExportPlan({
     settings: {
@@ -198,6 +230,55 @@ test("every tiled PDF cell remains exactly one centimetre", () => {
   }
 });
 
+test("an 80-cell A4 graph tiles into 10 mm-safe columns without clipping cells", () => {
+  const plan = createPdfExportPlan({
+    settings: {
+      graphWidth: 80,
+      graphHeight: 20,
+      cellSizeCm: 1,
+      printOrientation: "portrait",
+    },
+    paper: A4_PAPER,
+    canvasWidth: 3200,
+    canvasHeight: 800,
+  });
+
+  assert.equal(plan.pageHorizontalMarginMm, 10);
+  assert.equal(plan.printablePageWidthMm, 190);
+  assert.equal(plan.pagesX, 5);
+  assert.equal(plan.pagesY, 1);
+
+  for (const tile of plan.tiles) {
+    assert.ok(tile.destinationXMm >= 10);
+    assert.ok(tile.destinationXMm + tile.destinationWidthMm <= plan.pageWidthMm - 10);
+    assert.equal(tile.sourceX % 40, 0);
+    assert.equal(tile.sourceWidth % 40, 0);
+    assert.equal(tile.destinationWidthMm % 10, 0);
+    assert.equal((tile.destinationWidthMm / tile.sourceWidth) * 40, 10);
+    assert.equal(tile.cutGuideLeftXMm, tile.destinationXMm);
+    assert.equal(tile.cutGuideRightXMm, tile.destinationXMm + tile.destinationWidthMm);
+  }
+});
+
+test("landscape A4 uses its 10 mm-safe printable width for column tiling", () => {
+  const plan = createPdfExportPlan({
+    settings: {
+      graphWidth: 80,
+      graphHeight: 20,
+      cellSizeCm: 1,
+      printOrientation: "landscape",
+    },
+    paper: A4_PAPER,
+    canvasWidth: 3200,
+    canvasHeight: 800,
+  });
+
+  assert.equal(plan.pageWidthMm, 297);
+  assert.equal(plan.printablePageWidthMm, 277);
+  assert.equal(plan.pagesX, 3);
+  assert.equal(plan.tiles.at(-1)?.destinationWidthMm, 260);
+});
+
 test("PDF export reserves top and bottom safe margins on every printed page", () => {
   const plan = createPdfExportPlan({
     settings: {
@@ -214,6 +295,7 @@ test("PDF export reserves top and bottom safe margins on every printed page", ()
   });
 
   assert.equal(plan.pageVerticalMarginMm, 6);
+  assert.equal(plan.pageHorizontalMarginMm, 10);
   assert.equal(plan.printablePageHeightMm, 285);
   assert.equal(plan.pagesY, 4);
   assert.equal(plan.tiles[0].destinationYMm, 6);
@@ -228,6 +310,8 @@ test("PDF export reserves top and bottom safe margins on every printed page", ()
   for (const tile of plan.tiles) {
     assert.ok(tile.destinationYMm >= plan.pageVerticalMarginMm);
     assert.ok(tile.destinationYMm + tile.destinationHeightMm <= plan.pageHeightMm - plan.pageVerticalMarginMm);
+    assert.ok(tile.destinationXMm >= plan.pageHorizontalMarginMm);
+    assert.ok(tile.destinationXMm + tile.destinationWidthMm <= plan.pageWidthMm - plan.pageHorizontalMarginMm);
     assert.equal(tile.cutGuideTopYMm, tile.destinationYMm);
     assert.equal(tile.cutGuideBottomYMm, tile.destinationYMm + tile.destinationHeightMm);
     assert.equal(tile.destinationHeightMm % 10, 0);

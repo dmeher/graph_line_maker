@@ -2,6 +2,7 @@ export const GRAPH_PIXEL_SCHEMA = "image_to_graph";
 export const GRAPH_PIXEL_SESSION_COOKIE = "graph_pixel_session";
 export const ORIGINAL_IMAGES_BUCKET = "graph-pixel-original-images";
 export const PROCESSED_IMAGES_BUCKET = "graph-pixel-processed-images";
+export const DESIGN_ASSETS_BUCKET = "graph-pixel-design-assets";
 export const BOOTSTRAP_ADMIN_EMAIL = "dmeher1996@gmail.com";
 
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;

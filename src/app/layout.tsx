@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 import "./atelier.css";
 import "./atelier-workspace.css";
@@ -113,9 +114,17 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full bg-background text-foreground antialiased">
-        <script dangerouslySetInnerHTML={{ __html: themePreferenceScript }} />
+        <Script
+          id="theme-preference"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: themePreferenceScript }}
+        />
         {children}
-        <script dangerouslySetInnerHTML={{ __html: serviceWorkerRegistrationScript }} />
+        <Script
+          id="service-worker-registration"
+          strategy="afterInteractive"
+          dangerouslySetInnerHTML={{ __html: serviceWorkerRegistrationScript }}
+        />
       </body>
     </html>
   );

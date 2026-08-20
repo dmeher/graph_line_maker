@@ -2,14 +2,16 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LibraryBig, LoaderCircle, LogOut, PenTool, SlidersHorizontal } from "lucide-react";
+import { LibraryBig, LoaderCircle, LogOut, PenTool, SlidersHorizontal, WandSparkles } from "lucide-react";
 import { useState, type MouseEvent } from "react";
 import { OFFLINE_SESSION_STORAGE_KEY, USER_DATA_CLEAR_MESSAGE } from "@/lib/auth/offline-session";
 import { clearEditorSessionDrafts } from "@/lib/editor/session-draft";
+import { clearDesignRecoveryDrafts } from "@/lib/design/recovery";
 
 const navItems = [
   { href: "/dashboard", label: "Projects", description: "Browse your studio", icon: LibraryBig },
   { href: "/projects/new", label: "Create", description: "Convert new artwork", icon: PenTool },
+  { href: "/design", label: "Design", description: "Edit and publish artwork", icon: WandSparkles },
   { href: "/settings", label: "Settings", description: "Account and access", icon: SlidersHorizontal },
 ] as const;
 
@@ -41,6 +43,7 @@ export function SignOutButton({ variant }: { variant: "rail" | "dock" }) {
       try {
         window.sessionStorage.removeItem(OFFLINE_SESSION_STORAGE_KEY);
         clearEditorSessionDrafts(window.sessionStorage);
+        await clearDesignRecoveryDrafts().catch(() => {});
       } catch {
         // Storage can be blocked in restricted browsing modes.
       }

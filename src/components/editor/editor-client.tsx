@@ -79,9 +79,8 @@ import {
 } from "@/lib/editor/erase-geometry";
 import { ALLOWED_IMAGE_LABEL, IMAGE_ACCEPT, MAX_PROJECT_UPLOAD_FILES, MAX_SOURCE_IMAGES, MAX_UPLOAD_BYTES, isAllowedImageFile, isPdfFile } from "@/lib/constants";
 import {
-  CARD_THUMBNAIL_MAX_EDGE,
   SOURCE_THUMBNAIL_MAX_EDGE,
-  createThumbnailBlob,
+  createCardThumbnailBlob,
   uploadWithThumbnail,
   type PresignedUpload,
 } from "@/lib/storage/upload-client";
@@ -219,23 +218,36 @@ import { bytesToSize } from "@/lib/utils/format";
 import { estimateCanvasBytes, startGraphPerformanceStage } from "@/lib/performance/marks";
 import {
   ACTIVE_COMMAND_CANVAS_POD_IDS,
+  COMMAND_CANVAS_ACTIVE_DOCKS,
+  COMMAND_CANVAS_DESKTOP_LEFT_DOCK_TOP,
+  COMMAND_CANVAS_DESKTOP_RIGHT_DOCK_TOP,
   COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
+  COMMAND_CANVAS_DOCK_GAP,
   COMMAND_CANVAS_LAYOUT_STORAGE_KEY,
   COMMAND_CANVAS_POD_IDS,
   clampCommandCanvasPodPosition,
   clampCommandCanvasPodSize,
+  commandCanvasRectsConflict,
+  createCommandCanvasDesktopGeometry,
   createDefaultCommandCanvasLayout,
   deserializeCommandCanvasLayout,
   detectCommandCanvasDockSnap,
+  findCommandCanvasPodCollision,
   placeCommandCanvasPod,
   quantizeCommandCanvasCoordinate,
+  repairCommandCanvasDesktopLayout,
+  resolveCommandCanvasPodAnchor,
   resolveCommandCanvasPodPlacement,
   serializeCommandCanvasLayout,
+  type ActivePodId,
   type CommandCanvasCommand,
   type CommandCanvasLayout,
   type CommandCanvasPoint,
+  type CommandCanvasPodRect,
+  type PodHorizontalAnchor,
   type PodDock,
   type PodId,
+  type PodPlacement,
 } from "@/lib/editor/command-canvas";
 import {
   DEFAULT_CANVAS_ZOOM,
@@ -246,6 +258,7 @@ import {
   stepCanvasZoom,
 } from "@/lib/editor/canvas-zoom";
 import { InspectorPanel, type SelectionConsoleModel } from "./inspector-panel";
+import { WorkspaceLibraryImporter, type ImportedWorkspaceAsset } from "./workspace-library-importer";
 import {
   CommandCanvasCommandPalette,
   CommandCanvasCompactViewTrigger,
@@ -318,6 +331,9 @@ type CommandCanvasPodDrag = {
   element: HTMLElement;
   point: CommandCanvasPoint;
   snapDock: Exclude<PodDock, "floating"> | null;
+  startDock: PodDock;
+  startAnchor: PodHorizontalAnchor;
+  swapPodId: ActivePodId | null;
 };
 type CommandCanvasPodResize = {
   podId: PodId;
@@ -1597,15 +1613,36 @@ export function EditorClient({
         if (podId === "focus") return settingsPanelCollapsed;
         return current.collapsed.includes(podId);
       });
+      const collapseDirections = Object.fromEntries(
+        Object.entries(current.collapseDirections ?? {}).filter(([podId]) => nextCollapsed.includes(podId as PodId)),
+      );
       if (
         nextCollapsed.length === current.collapsed.length
         && nextCollapsed.every((podId, index) => current.collapsed[index] === podId)
+        && JSON.stringify(collapseDirections) === JSON.stringify(current.collapseDirections ?? {})
       ) {
         return current;
       }
-      return { ...current, collapsed: nextCollapsed };
+      const layout = { ...current };
+      delete layout.collapseDirections;
+      return {
+        ...layout,
+        collapsed: nextCollapsed,
+        ...(Object.keys(collapseDirections).length > 0 ? { collapseDirections } : {}),
+      };
     });
   }, [commandCanvasLayoutHydrated, settingsPanelCollapsed, sourcePanelCollapsed]);
+
+  useEffect(() => {
+    if (!commandCanvasLayoutHydrated || commandCanvasViewportWidth < 1280) return;
+    setCommandCanvasLayout((current) => {
+      const repaired = repairCommandCanvasDesktopLayout(
+        current,
+        commandCanvasDesktopGeometryOptions(current),
+      );
+      return JSON.stringify(repaired) === JSON.stringify(current) ? current : repaired;
+    });
+  }, [commandCanvasLayoutHydrated, commandCanvasViewportHeight, commandCanvasViewportWidth]);
 
   useEffect(() => {
     if (!commandPaletteOpen) return;
@@ -5965,6 +6002,119 @@ export function EditorClient({
     }
   }
 
+  async function importWorkspaceAsset(asset: ImportedWorkspaceAsset) {
+    const previous = settingsRef.current;
+    let nextSettings: GraphSettings;
+    let importedPlacementId: string | null = null;
+    let importedSourceId: string | null = null;
+    if (asset.target === "clipart") {
+      const graphAsset: GraphClipartAsset = {
+        id: asset.id,
+        name: asset.name,
+        path: asset.path,
+        url: asset.url,
+        thumbPath: asset.thumbPath,
+        thumbUrl: asset.thumbUrl,
+        dataUrl: null,
+        mimeType: asset.mimeType,
+        width: asset.width,
+        height: asset.height,
+        createdAt: asset.createdAt,
+      };
+      const dimensions = draftClipartDimensionsCells(graphAsset, previous.cellSizeCm);
+      const placementId = drawingId("clipart");
+      nextSettings = deriveGraphSettings({
+        ...previous,
+        clipartAssets: [...previous.clipartAssets, graphAsset],
+        clipartImages: [...previous.clipartImages, {
+          id: placementId,
+          name: asset.name,
+          assetId: asset.id,
+          x: clampFreeCellCoordinate((previous.graphWidth - dimensions.width) / 2, 0),
+          y: clampFreeCellCoordinate((previous.graphHeight - dimensions.height) / 2, 0),
+          width: dimensions.width,
+          height: dimensions.height,
+          strokeColor: draftClipartStrokeColor,
+          fillColor: draftClipartFillColor,
+          imageLineThickness: previous.imageLineThickness,
+          sourceFillThreshold: previous.sourceFillThreshold,
+          sourceFillMinStrokePixels: previous.sourceFillMinStrokePixels,
+          strokeGapClosePixels: previous.strokeGapClosePixels,
+          imageAutoEnhance: previous.imageAutoEnhance,
+          imageDenoiseLevel: previous.imageDenoiseLevel,
+          imageEdgeDetection: previous.imageEdgeDetection,
+          imageColorQuantization: previous.imageColorQuantization,
+          vectorizerLineAdjust: previous.vectorizerLineAdjust,
+          vectorizerInkThreshold: previous.vectorizerInkThreshold,
+          vectorizerSketchRemoval: previous.vectorizerSketchRemoval,
+          vectorizerFidelity: previous.vectorizerFidelity,
+          locked: false,
+          visible: true,
+          rotationDegrees: 0,
+          flipX: false,
+          flipY: false,
+        }],
+      });
+      setSelectedClipartAssetId(asset.id);
+      importedPlacementId = placementId;
+    } else {
+      const maxWidth = Math.max(1, Math.min(previous.graphWidth, previous.imageWidth));
+      let width = maxWidth;
+      let height = width * asset.height / Math.max(1, asset.width);
+      if (height > previous.graphHeight) {
+        const scale = previous.graphHeight / height;
+        width *= scale;
+        height *= scale;
+      }
+      const source: GraphSourceImage = {
+        id: asset.id,
+        name: asset.name,
+        path: asset.path,
+        url: asset.url,
+        thumbPath: asset.thumbPath,
+        thumbUrl: asset.thumbUrl,
+        width,
+        height,
+        measurementUnit: previous.measurementUnit,
+        imageLineThickness: previous.imageLineThickness,
+        sourceFillThreshold: previous.sourceFillThreshold,
+        sourceFillMinStrokePixels: previous.sourceFillMinStrokePixels,
+        strokeGapClosePixels: previous.strokeGapClosePixels,
+        imageAutoEnhance: previous.imageAutoEnhance,
+        imageDenoiseLevel: previous.imageDenoiseLevel,
+        imageEdgeDetection: previous.imageEdgeDetection,
+        imageColorQuantization: previous.imageColorQuantization,
+        vectorizerLineAdjust: previous.vectorizerLineAdjust,
+        vectorizerInkThreshold: previous.vectorizerInkThreshold,
+        vectorizerSketchRemoval: previous.vectorizerSketchRemoval,
+        vectorizerFidelity: previous.vectorizerFidelity,
+        x: Math.max(0, (previous.graphWidth - width) / 2),
+        y: Math.max(0, (previous.graphHeight - height) / 2),
+        topPadding: 0,
+        bottomPadding: 0,
+        locked: false,
+        visible: true,
+        rotationDegrees: 0,
+        flipX: false,
+        flipY: false,
+      };
+      nextSettings = deriveGraphSettings({ ...previous, sourceImages: [...previous.sourceImages, source] });
+      importedSourceId = source.id;
+    }
+    settingsRef.current = nextSettings;
+    setSettings(nextSettings);
+    if (importedPlacementId) selectClipartLayer(importedPlacementId);
+    if (importedSourceId) selectSourceLayer(importedSourceId);
+    const result = await saveProjectSnapshot(nextSettings, { uploadProcessedImage: true, fallbackMessage: "Unable to save the workspace asset." });
+    if (!result.ok) {
+      settingsRef.current = previous;
+      setSettings(previous);
+      await fetch(`/api/projects/${project.id}/library-imports`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ paths: [asset.path] }) }).catch(() => {});
+      throw new Error(result.message);
+    }
+    setNotice({ tone: "ok", text: `${asset.name} imported from the Design workspace.` });
+  }
+
   async function deleteClipartAsset(assetId: string) {
     const current = settingsRef.current;
     const asset = current.clipartAssets.find((item) => item.id === assetId);
@@ -6197,7 +6347,7 @@ export function EditorClient({
       // Dashboard cards render this derivative instead of the full canvas PNG.
       // Best effort: a failure just leaves the card falling back to full size.
       try {
-        const thumbnail = await createThumbnailBlob(blob, CARD_THUMBNAIL_MAX_EDGE);
+        const thumbnail = await createCardThumbnailBlob(blob);
         if (thumbnail) {
           await fetch(`/api/projects/${project.id}/processed-image?variant=thumbnail`, {
             method: "PUT",
@@ -7598,6 +7748,8 @@ export function EditorClient({
                 <h2 className="truncate text-[13px] font-bold uppercase tracking-wide text-[var(--editor-text)]">Reusable clipart</h2>
                 <span className="rounded bg-[var(--editor-panel-2)] px-1.5 py-0.5 text-[11px] font-semibold text-[var(--editor-text-dim)]">{settings.clipartAssets.length}</span>
               </div>
+              <div className="flex items-center gap-1">
+              {isPersistableProjectId(project.id) ? <WorkspaceLibraryImporter projectId={project.id} onImported={importWorkspaceAsset} /> : null}
               <label
                 className={`grid h-8 w-8 place-items-center rounded text-[var(--editor-text-dim)] hover:bg-[var(--editor-control-hover-bg)] ${uploadingCliparts ? "cursor-wait opacity-60" : "cursor-pointer"}`}
                 title="Upload clipart"
@@ -7618,6 +7770,7 @@ export function EditorClient({
                   }}
                 />
               </label>
+              </div>
             </div>
             <div className="editor-document-panel__library-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain">
               {settings.clipartAssets.length ? (
@@ -8015,14 +8168,26 @@ export function EditorClient({
     setSettingsPanelCollapsed(false);
   }, []);
 
-  function setCommandCanvasPodCollapsed(podId: PodId, collapsed: boolean) {
+  function setCommandCanvasPodCollapsed(
+    podId: PodId,
+    collapsed: boolean,
+    collapseDirection: "vertical" | "horizontal" = "vertical",
+  ) {
     if (!ACTIVE_COMMAND_CANVAS_PODS.has(podId)) return;
-    setCommandCanvasLayout((current) => ({
-      ...current,
-      collapsed: COMMAND_CANVAS_POD_IDS.filter((candidate) =>
-        candidate === podId ? collapsed : current.collapsed.includes(candidate),
-      ),
-    }));
+    setCommandCanvasLayout((current) => {
+      const collapseDirections = { ...current.collapseDirections };
+      if (collapsed && collapseDirection === "horizontal") collapseDirections[podId] = "horizontal";
+      else delete collapseDirections[podId];
+      const layout = { ...current };
+      delete layout.collapseDirections;
+      return {
+        ...layout,
+        collapsed: COMMAND_CANVAS_POD_IDS.filter((candidate) =>
+          candidate === podId ? collapsed : current.collapsed.includes(candidate),
+        ),
+        ...(Object.keys(collapseDirections).length > 0 ? { collapseDirections } : {}),
+      };
+    });
     if (podId === "scene") setSourcePanelCollapsed(collapsed);
     if (podId === "focus") setSettingsPanelCollapsed(collapsed);
   }
@@ -8050,49 +8215,226 @@ export function EditorClient({
     setCommandCanvasPodCollapsed(podId, !collapsed);
   }
 
-  function dockCommandCanvasPod(podId: PodId, dock?: Exclude<PodDock, "floating">) {
-    const defaultDock = createDefaultCommandCanvasLayout().modules[podId].dock as Exclude<PodDock, "floating">;
-    setCommandCanvasLayout((current) => ({
-      ...current,
-      modules: {
-        ...current.modules,
-        [podId]: {
-          dock: dock ?? defaultDock,
-          ...(current.modules[podId].width === undefined ? {} : { width: current.modules[podId].width }),
-          ...(current.modules[podId].height === undefined ? {} : { height: current.modules[podId].height }),
-        },
+  function collapseCommandCanvasPodHorizontally(podId: Extract<PodId, "scene" | "focus">) {
+    if (commandCanvasViewportWidth < 1280) {
+      toggleCommandCanvasPod(podId);
+      return;
+    }
+    setCommandCanvasPodCollapsed(podId, true, "horizontal");
+  }
+
+  function isActiveCommandCanvasPod(podId: PodId): podId is ActivePodId {
+    return ACTIVE_COMMAND_CANVAS_PODS.has(podId);
+  }
+
+  function commandCanvasPodSizeForLayout(layout: CommandCanvasLayout, podId: PodId) {
+    const placement = resolveCommandCanvasPodPlacement(layout, podId, commandCanvasViewportWidth);
+    const minimumSize = COMMAND_CANVAS_POD_MIN_SIZES[podId];
+    const configuredMaximum = COMMAND_CANVAS_POD_MAX_SIZES[podId];
+    const horizontallyCollapsed = commandCanvasViewportWidth >= 1280
+      && layout.collapsed.includes(podId)
+      && layout.collapseDirections?.[podId] === "horizontal";
+    const viewportDefaultHeight = podId === "scene"
+      ? commandCanvasViewportHeight
+        - COMMAND_CANVAS_DESKTOP_LEFT_DOCK_TOP
+        - COMMAND_CANVAS_DESKTOP_SAFE_INSETS.bottom
+      : podId === "focus"
+        ? commandCanvasViewportHeight
+          - COMMAND_CANVAS_DESKTOP_RIGHT_DOCK_TOP
+          - COMMAND_CANVAS_POD_DEFAULT_SIZES.navigator.height
+          - COMMAND_CANVAS_DOCK_GAP
+          - COMMAND_CANVAS_DESKTOP_SAFE_INSETS.bottom
+        : COMMAND_CANVAS_POD_DEFAULT_SIZES[podId].height;
+    const fillsDockLane = (podId === "scene" || podId === "focus") && placement.dock !== "floating";
+    const maximumSize = {
+      width: configuredMaximum.width,
+      height: COMMAND_CANVAS_VIEWPORT_HEIGHT_PODS.has(podId)
+        ? Math.max(
+            minimumSize.height,
+            commandCanvasViewportHeight
+              - COMMAND_CANVAS_DESKTOP_SAFE_INSETS.top
+              - COMMAND_CANVAS_DESKTOP_SAFE_INSETS.bottom,
+          )
+        : configuredMaximum.height,
+    };
+    return clampCommandCanvasPodSize(
+      {
+        width: horizontallyCollapsed
+          ? 56
+          : podId === "navigator"
+          ? COMMAND_CANVAS_POD_DEFAULT_SIZES[podId].width
+          : placement.width ?? COMMAND_CANVAS_POD_DEFAULT_SIZES[podId].width,
+        height: podId === "navigator"
+          ? COMMAND_CANVAS_POD_DEFAULT_SIZES[podId].height
+          : fillsDockLane
+            ? viewportDefaultHeight
+            : placement.height ?? viewportDefaultHeight,
       },
-    }));
+      horizontallyCollapsed ? { ...minimumSize, width: 56 } : minimumSize,
+      horizontallyCollapsed ? { ...maximumSize, width: 56 } : maximumSize,
+    );
+  }
+
+  function commandCanvasDesktopGeometryOptions(layout: CommandCanvasLayout) {
+    return {
+      viewportSize: { width: commandCanvasViewportWidth, height: commandCanvasViewportHeight },
+      podSizes: {
+        tools: commandCanvasPodSizeForLayout(layout, "tools"),
+        scene: commandCanvasPodSizeForLayout(layout, "scene"),
+        navigator: commandCanvasPodSizeForLayout(layout, "navigator"),
+        focus: commandCanvasPodSizeForLayout(layout, "focus"),
+      },
+      podMinimumSizes: {
+        tools: COMMAND_CANVAS_POD_MIN_SIZES.tools,
+        scene: COMMAND_CANVAS_POD_MIN_SIZES.scene,
+        navigator: COMMAND_CANVAS_POD_MIN_SIZES.navigator,
+        focus: COMMAND_CANVAS_POD_MIN_SIZES.focus,
+      },
+      insets: COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
+      gap: COMMAND_CANVAS_DOCK_GAP,
+    };
+  }
+
+  function commandCanvasPodSize(podId: PodId) {
+    return commandCanvasPodSizeForLayout(commandCanvasLayout, podId);
+  }
+
+  function commandCanvasDesktopGeometry() {
+    return createCommandCanvasDesktopGeometry(
+      commandCanvasLayout,
+      commandCanvasDesktopGeometryOptions(commandCanvasLayout),
+    );
+  }
+
+  function commandCanvasPodRect(podId: ActivePodId): CommandCanvasPodRect | null {
+    const element = document.querySelector<HTMLElement>(`[data-editor-pod="${podId}"]`);
+    const rect = element?.getBoundingClientRect();
+    return rect ? { x: rect.left, y: rect.top, width: rect.width, height: rect.height } : null;
+  }
+
+  function commandCanvasPodPeers(podId: ActivePodId) {
+    return ACTIVE_COMMAND_CANVAS_POD_IDS
+      .filter((candidate) => candidate !== podId)
+      .map((candidate) => {
+        const rect = commandCanvasPodRect(candidate);
+        return rect ? { podId: candidate, rect } : null;
+      })
+      .filter((candidate): candidate is { podId: ActivePodId; rect: CommandCanvasPodRect } => Boolean(candidate));
+  }
+
+  function commandCanvasFloatingPlacement(
+    podId: ActivePodId,
+    rect: CommandCanvasPodRect,
+    anchor: PodHorizontalAnchor,
+    existing: PodPlacement,
+  ) {
+    const point = clampCommandCanvasPodPosition(
+      { x: rect.x, y: rect.y },
+      { width: rect.width, height: rect.height },
+      { width: window.innerWidth, height: window.innerHeight },
+      COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
+    );
+    const width = existing.width ?? quantizeCommandCanvasCoordinate(rect.width);
+    const height = existing.height ?? quantizeCommandCanvasCoordinate(rect.height);
+    const right = quantizeCommandCanvasCoordinate(
+      window.innerWidth - COMMAND_CANVAS_DESKTOP_SAFE_INSETS.right - point.x - rect.width,
+    );
+    return {
+      dock: "floating" as const,
+      anchor,
+      y: point.y,
+      ...(anchor === "right" ? { right: Math.max(0, right) } : { x: point.x }),
+      width,
+      height,
+    };
+  }
+
+  function commandCanvasDockedPlacement(
+    placement: PodPlacement,
+    dock: Exclude<PodDock, "floating">,
+  ) {
+    return {
+      dock,
+      ...(placement.width === undefined ? {} : { width: placement.width }),
+      ...(placement.height === undefined ? {} : { height: placement.height }),
+    };
+  }
+
+  function dockCommandCanvasPod(podId: PodId, dock?: Exclude<PodDock, "floating">) {
+    if (!isActiveCommandCanvasPod(podId)) return;
+    const defaultDock = createDefaultCommandCanvasLayout().modules[podId].dock as Exclude<PodDock, "floating">;
+    const destinationDock = dock ?? defaultDock;
+    if (!(COMMAND_CANVAS_ACTIVE_DOCKS as readonly PodDock[]).includes(destinationDock)) return;
+    const sourceRect = commandCanvasPodRect(podId);
+    setCommandCanvasLayout((current) => {
+      const source = current.modules[podId];
+      const occupant = ACTIVE_COMMAND_CANVAS_POD_IDS.find(
+        (candidate) => candidate !== podId && current.modules[candidate].dock === destinationDock,
+      );
+      if (!occupant || source.dock === destinationDock) {
+        return {
+          ...current,
+          modules: {
+            ...current.modules,
+            [podId]: commandCanvasDockedPlacement(source, destinationDock),
+          },
+        };
+      }
+
+      const occupantPlacement = current.modules[occupant];
+      const sourceAnchor = resolveCommandCanvasPodAnchor(source, podId);
+      if (source.dock === "floating") {
+        // A floating pod needs its rendered rectangle to exchange places safely.
+        // Do not fall through to the docked helper: `floating` is not a dock slot.
+        if (!sourceRect) return current;
+        return {
+          ...current,
+          modules: {
+            ...current.modules,
+            [podId]: commandCanvasDockedPlacement(source, destinationDock),
+            [occupant]: commandCanvasFloatingPlacement(
+              occupant,
+              sourceRect,
+              sourceAnchor,
+              occupantPlacement,
+            ),
+          },
+        };
+      }
+      return {
+        ...current,
+        modules: {
+          ...current.modules,
+          [podId]: commandCanvasDockedPlacement(source, destinationDock),
+          [occupant]: commandCanvasDockedPlacement(occupantPlacement, source.dock),
+        },
+      };
+    });
     setCommandCanvasPodCollapsed(podId, false);
   }
 
   function floatCommandCanvasPod(podId: PodId) {
+    if (!isActiveCommandCanvasPod(podId)) return;
     const element = document.querySelector<HTMLElement>(`[data-editor-pod="${podId}"]`);
     const rect = element?.getBoundingClientRect();
-    const point = rect
-      ? clampCommandCanvasPodPosition(
-          { x: rect.left, y: rect.top },
-          { width: rect.width, height: rect.height },
-          { width: window.innerWidth, height: window.innerHeight },
-          COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
-        )
-      : { x: 24, y: 112 };
     setCommandCanvasLayout((current) => ({
       ...current,
       modules: {
         ...current.modules,
-        [podId]: {
-          ...current.modules[podId],
-          dock: "floating",
-          x: point.x,
-          y: point.y,
-          ...(rect && current.modules[podId].width === undefined
-            ? { width: quantizeCommandCanvasCoordinate(rect.width) }
-            : {}),
-          ...(rect && current.modules[podId].height === undefined
-            ? { height: quantizeCommandCanvasCoordinate(rect.height) }
-            : {}),
-        },
+        [podId]: rect
+          ? commandCanvasFloatingPlacement(
+              podId,
+              { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+              resolveCommandCanvasPodAnchor(current.modules[podId], podId),
+              current.modules[podId],
+            )
+          : {
+              ...current.modules[podId],
+              dock: "floating",
+              anchor: resolveCommandCanvasPodAnchor(current.modules[podId], podId),
+              x: 24,
+              y: 112,
+            },
       },
     }));
     setCommandCanvasPodCollapsed(podId, false);
@@ -8100,20 +8442,31 @@ export function EditorClient({
 
   function resetCommandCanvasPod(podId: PodId) {
     const defaults = createDefaultCommandCanvasLayout();
-    setCommandCanvasLayout((current) => ({
-      ...current,
-      modules: {
-        ...current.modules,
-        [podId]: { ...defaults.modules[podId] },
-      },
-      collapsed: current.collapsed.filter((candidate) => candidate !== podId),
-    }));
+    if (isActiveCommandCanvasPod(podId)) {
+      dockCommandCanvasPod(podId, defaults.modules[podId].dock as Exclude<PodDock, "floating">);
+    }
+    setCommandCanvasLayout((current) => {
+      const collapseDirections = Object.fromEntries(
+        Object.entries(current.collapseDirections ?? {}).filter(([candidate]) => candidate !== podId),
+      );
+      const layout = { ...current };
+      delete layout.collapseDirections;
+      return {
+        ...layout,
+        modules: {
+          ...current.modules,
+          [podId]: { ...defaults.modules[podId] },
+        },
+        collapsed: current.collapsed.filter((candidate) => candidate !== podId),
+        ...(Object.keys(collapseDirections).length > 0 ? { collapseDirections } : {}),
+      };
+    });
     if (podId === "scene") setSourcePanelCollapsed(false);
     if (podId === "focus") setSettingsPanelCollapsed(false);
   }
 
   function nudgeCommandCanvasPod(podId: PodId, deltaX: number, deltaY: number) {
-    if (window.innerWidth < 1280) return;
+    if (window.innerWidth < 1280 || !isActiveCommandCanvasPod(podId)) return;
     const element = document.querySelector<HTMLElement>(`[data-editor-pod="${podId}"]`);
     const rect = element?.getBoundingClientRect();
     if (!rect) return;
@@ -8123,18 +8476,47 @@ export function EditorClient({
       { width: window.innerWidth, height: window.innerHeight },
       COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
     );
-    setCommandCanvasLayout((current) => ({
-      ...current,
-      modules: {
-        ...current.modules,
-        [podId]: {
-          ...current.modules[podId],
-          dock: "floating",
-          x: point.x,
-          y: point.y,
+    const nextRect = { x: point.x, y: point.y, width: rect.width, height: rect.height };
+    const collision = findCommandCanvasPodCollision(nextRect, commandCanvasPodPeers(podId));
+    setCommandCanvasLayout((current) => {
+      const source = current.modules[podId];
+      if (!collision) {
+        return {
+          ...current,
+          modules: {
+            ...current.modules,
+            [podId]: commandCanvasFloatingPlacement(
+              podId,
+              nextRect,
+              resolveCommandCanvasPodAnchor(source, podId),
+              source,
+            ),
+          },
+        };
+      }
+      const target = collision.podId;
+      const targetPlacement = current.modules[target];
+      const targetRect = commandCanvasPodRect(target);
+      if (!targetRect) return current;
+      return {
+        ...current,
+        modules: {
+          ...current.modules,
+          [podId]: commandCanvasFloatingPlacement(
+            podId,
+            nextRect,
+            resolveCommandCanvasPodAnchor(targetPlacement, target),
+            source,
+          ),
+          [target]: commandCanvasFloatingPlacement(
+            target,
+            { x: rect.left, y: rect.top, width: targetRect.width, height: targetRect.height },
+            resolveCommandCanvasPodAnchor(source, podId),
+            targetPlacement,
+          ),
         },
-      },
-    }));
+      };
+    });
   }
 
   function resetCommandCanvasLayout() {
@@ -8149,6 +8531,8 @@ export function EditorClient({
       element.style.removeProperty("--cc-live-y");
       element.style.removeProperty("--cc-live-width");
       element.style.removeProperty("--cc-live-height");
+      element.style.removeProperty("--cc-live-pack-left");
+      element.style.removeProperty("--cc-live-pack-top");
     });
     commandCanvasPodDragRef.current = null;
     commandCanvasPodResizeRef.current = null;
@@ -8171,66 +8555,134 @@ export function EditorClient({
     return commandCanvasLayout.collapsed.includes(podId);
   }
 
+  function commandCanvasPodCollapseDirection(podId: PodId) {
+    if (!commandCanvasPodCollapsed(podId)) return undefined;
+    return commandCanvasLayout.collapseDirections?.[podId] ?? "vertical";
+  }
+
   function commandCanvasPodStyle(podId: PodId) {
-    const placement = resolveCommandCanvasPodPlacement(commandCanvasLayout, podId, commandCanvasViewportWidth);
-    const minimumSize = COMMAND_CANVAS_POD_MIN_SIZES[podId];
-    const configuredMaximum = COMMAND_CANVAS_POD_MAX_SIZES[podId];
-    const maximumSize = {
-      width: configuredMaximum.width,
-      height: COMMAND_CANVAS_VIEWPORT_HEIGHT_PODS.has(podId)
-        ? Math.max(
-            minimumSize.height,
-            commandCanvasViewportHeight
-              - COMMAND_CANVAS_DESKTOP_SAFE_INSETS.top
-              - COMMAND_CANVAS_DESKTOP_SAFE_INSETS.bottom,
-          )
-        : configuredMaximum.height,
-    };
-    const storedSize = clampCommandCanvasPodSize(
-      {
-        width: placement.width ?? COMMAND_CANVAS_POD_DEFAULT_SIZES[podId].width,
-        height: placement.height ?? COMMAND_CANVAS_POD_DEFAULT_SIZES[podId].height,
-      },
-      minimumSize,
-      maximumSize,
-    );
-    const applyStoredSize = commandCanvasViewportWidth >= 1280 && podId !== "navigator";
-    const floatingPoint =
-      placement.dock === "floating" && placement.x !== undefined && placement.y !== undefined
-        ? clampCommandCanvasPodPosition(
-            { x: placement.x, y: placement.y },
-            storedSize,
-            { width: commandCanvasViewportWidth, height: commandCanvasViewportHeight },
-            COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
-          )
-        : null;
+    if (commandCanvasViewportWidth < 1280 || !isActiveCommandCanvasPod(podId)) return {};
+    const geometry = commandCanvasDesktopGeometry()[podId];
+    const right = Math.max(0, commandCanvasViewportWidth - geometry.rect.x - geometry.rect.width);
     return {
-      ...(applyStoredSize && placement.width !== undefined ? { "--cc-pod-width": `${storedSize.width}px` } : {}),
-      ...(applyStoredSize && placement.height !== undefined ? { "--cc-pod-height": `${storedSize.height}px` } : {}),
-      ...(floatingPoint
-        ? {
-            "--cc-pod-x": `${floatingPoint.x}px`,
-            "--cc-pod-y": `${floatingPoint.y}px`,
-          }
-        : {}),
+      "--cc-pod-top": `${geometry.rect.y}px`,
+      ...(geometry.anchor === "right"
+        ? { "--cc-pod-right": `${right}px`, "--cc-pod-left": "auto" }
+        : { "--cc-pod-left": `${geometry.rect.x}px`, "--cc-pod-right": "auto" }),
+      ...(podId === "navigator"
+        ? {}
+        : {
+            "--cc-pod-width": `${geometry.rect.width}px`,
+            "--cc-pod-height": `${geometry.rect.height}px`,
+          }),
+    } as CSSProperties;
+  }
+
+  function commandCanvasDockTargetStyle(dock: (typeof COMMAND_CANVAS_ACTIVE_DOCKS)[number]) {
+    if (commandCanvasViewportWidth < 1280) return {};
+    const geometry = commandCanvasDesktopGeometry();
+    const owner = ACTIVE_COMMAND_CANVAS_POD_IDS.find(
+      (podId) => geometry[podId].dock === dock,
+    );
+    const fallbackOwner: Record<(typeof COMMAND_CANVAS_ACTIVE_DOCKS)[number], ActivePodId> = {
+      "tool-spine": "tools",
+      "left-main": "scene",
+      "right-top": "navigator",
+      "right-main": "focus",
+    };
+    const fallbackGeometry = owner
+      ? geometry
+      : createCommandCanvasDesktopGeometry(createDefaultCommandCanvasLayout(), {
+          viewportSize: { width: commandCanvasViewportWidth, height: commandCanvasViewportHeight },
+          podSizes: {
+            tools: commandCanvasPodSize("tools"),
+            scene: commandCanvasPodSize("scene"),
+            navigator: commandCanvasPodSize("navigator"),
+            focus: commandCanvasPodSize("focus"),
+          },
+          podMinimumSizes: {
+            tools: COMMAND_CANVAS_POD_MIN_SIZES.tools,
+            scene: COMMAND_CANVAS_POD_MIN_SIZES.scene,
+            navigator: COMMAND_CANVAS_POD_MIN_SIZES.navigator,
+            focus: COMMAND_CANVAS_POD_MIN_SIZES.focus,
+          },
+          insets: COMMAND_CANVAS_DESKTOP_SAFE_INSETS,
+          gap: COMMAND_CANVAS_DOCK_GAP,
+        });
+    const rect = fallbackGeometry[owner ?? fallbackOwner[dock]].rect;
+    return {
+      top: `${rect.y}px`,
+      left: `${rect.x}px`,
+      right: "auto",
+      width: `${rect.width}px`,
+      height: `${rect.height}px`,
     } as CSSProperties;
   }
 
   function commandCanvasPodResizeEdge(podId: PodId): Extract<CommandCanvasResizeEdge, "bottom-left" | "bottom-right"> {
-    const dock = resolveCommandCanvasPodPlacement(commandCanvasLayout, podId, commandCanvasViewportWidth).dock;
-    return dock === "right-top" || dock === "right-main" ? "bottom-left" : "bottom-right";
+    const placement = resolveCommandCanvasPodPlacement(commandCanvasLayout, podId, commandCanvasViewportWidth);
+    return resolveCommandCanvasPodAnchor(placement, podId) === "right" ? "bottom-left" : "bottom-right";
   }
 
   function commandCanvasResizeMaximum(
     podId: PodId,
-    rect: Pick<DOMRect, "left" | "right" | "top">,
+    rect: Pick<DOMRect, "left" | "right" | "top" | "bottom">,
     edge: Extract<CommandCanvasResizeEdge, "bottom-left" | "bottom-right">,
   ) {
     const insets = COMMAND_CANVAS_DESKTOP_SAFE_INSETS;
-    const availableWidth = edge === "bottom-left"
+    let availableWidth = edge === "bottom-left"
       ? rect.right - insets.left
       : window.innerWidth - insets.right - rect.left;
-    const availableHeight = window.innerHeight - insets.bottom - rect.top;
+    let availableHeight = window.innerHeight - insets.bottom - rect.top;
+    if (isActiveCommandCanvasPod(podId)) {
+      const podDock = resolveCommandCanvasPodPlacement(commandCanvasLayout, podId, commandCanvasViewportWidth).dock;
+      const leftSideDock = podDock === "left-main" || podDock === "tool-spine";
+      const rightSideDock = podDock === "right-top" || podDock === "right-main";
+      for (const peer of commandCanvasPodPeers(podId)) {
+        const peerDock = resolveCommandCanvasPodPlacement(commandCanvasLayout, peer.podId, commandCanvasViewportWidth).dock;
+        const peerOnLeftSide = peerDock === "left-main" || peerDock === "tool-spine";
+        const peerOnRightSide = peerDock === "right-top" || peerDock === "right-main";
+        const verticalOverlap = rect.top < peer.rect.y + peer.rect.height + COMMAND_CANVAS_DOCK_GAP
+          && rect.bottom + COMMAND_CANVAS_DOCK_GAP > peer.rect.y;
+        const horizontalOverlap = rect.left < peer.rect.x + peer.rect.width + COMMAND_CANVAS_DOCK_GAP
+          && rect.right + COMMAND_CANVAS_DOCK_GAP > peer.rect.x;
+
+        // The paired lanes move together after the settled resize: widening a
+        // left dock pushes its sibling right, and growing right-top pushes the
+        // right-main dock down. Other peers remain hard collision boundaries.
+        if (!(leftSideDock && peerOnLeftSide) && verticalOverlap) {
+          if (edge === "bottom-left" && peer.rect.x + peer.rect.width <= rect.left) {
+            availableWidth = Math.min(
+              availableWidth,
+              rect.right - COMMAND_CANVAS_DOCK_GAP - (peer.rect.x + peer.rect.width),
+            );
+          }
+          if (edge === "bottom-right" && peer.rect.x >= rect.right) {
+            availableWidth = Math.min(
+              availableWidth,
+              peer.rect.x - COMMAND_CANVAS_DOCK_GAP - rect.left,
+            );
+          }
+        }
+        if (podDock === "right-top" && peerDock === "right-main") {
+          availableHeight = Math.min(
+            availableHeight,
+            window.innerHeight
+              - insets.bottom
+              - rect.top
+              - COMMAND_CANVAS_DOCK_GAP
+              - peer.rect.height,
+          );
+          continue;
+        }
+        if (!(rightSideDock && peerOnRightSide) && horizontalOverlap && peer.rect.y >= rect.bottom) {
+          availableHeight = Math.min(
+            availableHeight,
+            peer.rect.y - COMMAND_CANVAS_DOCK_GAP - rect.top,
+          );
+        }
+      }
+    }
     const configuredMaximum = COMMAND_CANVAS_POD_MAX_SIZES[podId];
     const minimum = COMMAND_CANVAS_POD_MIN_SIZES[podId];
     return {
@@ -8250,6 +8702,49 @@ export function EditorClient({
     preview.removeAttribute("data-active-dock");
     preview.style.removeProperty("--cc-preview-width");
     preview.style.removeProperty("--cc-preview-height");
+    preview.style.removeProperty("top");
+    preview.style.removeProperty("right");
+    preview.style.removeProperty("left");
+  }
+
+  function syncCommandCanvasPackedResizePeer(
+    podId: ActivePodId,
+    rect: Pick<DOMRect, "left" | "top">,
+    size: { width: number; height: number },
+  ) {
+    const dock = resolveCommandCanvasPodPlacement(commandCanvasLayoutRef.current, podId, window.innerWidth).dock;
+    const peerDock = dock === "left-main"
+      ? "tool-spine"
+      : dock === "right-top"
+        ? "right-main"
+        : null;
+    if (!peerDock) return;
+    const peerId = ACTIVE_COMMAND_CANVAS_POD_IDS.find(
+      (candidate) => candidate !== podId && commandCanvasLayoutRef.current.modules[candidate].dock === peerDock,
+    );
+    if (!peerId) return;
+    const peerElement = document.querySelector<HTMLElement>(`[data-editor-pod="${peerId}"]`);
+    if (!peerElement) return;
+    if (dock === "left-main") {
+      peerElement.style.setProperty("--cc-live-pack-left", `${rect.left + size.width + COMMAND_CANVAS_DOCK_GAP}px`);
+    } else {
+      peerElement.style.setProperty("--cc-live-pack-top", `${rect.top + size.height + COMMAND_CANVAS_DOCK_GAP}px`);
+    }
+  }
+
+  function clearCommandCanvasPackedResizePeer(podId: ActivePodId) {
+    const dock = resolveCommandCanvasPodPlacement(commandCanvasLayoutRef.current, podId, window.innerWidth).dock;
+    const peerDock = dock === "left-main"
+      ? "tool-spine"
+      : dock === "right-top"
+        ? "right-main"
+        : null;
+    if (!peerDock) return;
+    const peerId = ACTIVE_COMMAND_CANVAS_POD_IDS.find(
+      (candidate) => candidate !== podId && commandCanvasLayoutRef.current.modules[candidate].dock === peerDock,
+    );
+    document.querySelector<HTMLElement>(`[data-editor-pod="${peerId}"]`)
+      ?.style.removeProperty(dock === "left-main" ? "--cc-live-pack-left" : "--cc-live-pack-top");
   }
 
   function beginCommandCanvasPodResize(
@@ -8257,7 +8752,7 @@ export function EditorClient({
     podId: PodId,
     edge: Extract<CommandCanvasResizeEdge, "bottom-left" | "bottom-right">,
   ) {
-    if (window.innerWidth < 1280 || event.button !== 0) return;
+    if (window.innerWidth < 1280 || event.button !== 0 || !isActiveCommandCanvasPod(podId)) return;
     const podElement = event.currentTarget.closest<HTMLElement>("[data-editor-pod]");
     if (!podElement) return;
     event.preventDefault();
@@ -8283,6 +8778,7 @@ export function EditorClient({
     podElement.dataset.resizing = "true";
     podElement.style.setProperty("--cc-live-width", `${initialSize.width}px`);
     podElement.style.setProperty("--cc-live-height", `${initialSize.height}px`);
+    syncCommandCanvasPackedResizePeer(podId, rect, initialSize);
     setResizingCommandCanvasPodId(podId);
   }
 
@@ -8303,6 +8799,7 @@ export function EditorClient({
     resize.size = size;
     resize.element.style.setProperty("--cc-live-width", `${size.width}px`);
     resize.element.style.setProperty("--cc-live-height", `${size.height}px`);
+    syncCommandCanvasPackedResizePeer(resize.podId as ActivePodId, rect, size);
   }
 
   function finishCommandCanvasPodResize(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -8332,12 +8829,13 @@ export function EditorClient({
     resize.element.removeAttribute("data-resizing");
     resize.element.style.removeProperty("--cc-live-width");
     resize.element.style.removeProperty("--cc-live-height");
+    clearCommandCanvasPackedResizePeer(resize.podId as ActivePodId);
     commandCanvasPodResizeRef.current = null;
     setResizingCommandCanvasPodId(null);
   }
 
   function nudgeCommandCanvasPodSize(podId: PodId, deltaWidth: number, deltaHeight: number) {
-    if (window.innerWidth < 1280) return;
+    if (window.innerWidth < 1280 || !isActiveCommandCanvasPod(podId)) return;
     const element = document.querySelector<HTMLElement>(`[data-editor-pod="${podId}"]`);
     const rect = element?.getBoundingClientRect();
     if (!rect) return;
@@ -8367,6 +8865,7 @@ export function EditorClient({
       || event.button !== 0
       || (event.target as Element).closest("button, input, select, textarea, a")
     ) return;
+    if (!isActiveCommandCanvasPod(podId)) return;
     const podElement = event.currentTarget.closest<HTMLElement>("[data-editor-pod]");
     if (!podElement) return;
     event.preventDefault();
@@ -8384,6 +8883,9 @@ export function EditorClient({
       element: podElement,
       point: { x: rect.left, y: rect.top },
       snapDock: null,
+      startDock: resolveCommandCanvasPodPlacement(commandCanvasLayoutRef.current, podId, window.innerWidth).dock,
+      startAnchor: resolveCommandCanvasPodAnchor(commandCanvasLayoutRef.current.modules[podId], podId),
+      swapPodId: null,
     };
     podElement.dataset.dragging = "true";
     podElement.style.setProperty("--cc-live-x", `${rect.left}px`);
@@ -8396,6 +8898,7 @@ export function EditorClient({
   function moveCommandCanvasPod(event: ReactPointerEvent<HTMLElement>) {
     const drag = commandCanvasPodDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!isActiveCommandCanvasPod(drag.podId)) return;
     const point = placeCommandCanvasPod(
       {
         x: drag.startX + event.clientX - drag.startClientX,
@@ -8409,18 +8912,32 @@ export function EditorClient({
       .map((element) => {
         const dock = element.dataset.commandCanvasDockTarget as Exclude<PodDock, "floating"> | undefined;
         const rect = element.getBoundingClientRect();
-        return dock ? { dock, x: rect.left, y: rect.top } : null;
+        return dock && (COMMAND_CANVAS_ACTIVE_DOCKS as readonly PodDock[]).includes(dock)
+          ? { dock, x: rect.left, y: rect.top }
+          : null;
       })
       .filter((target): target is { dock: Exclude<PodDock, "floating">; x: number; y: number } => Boolean(target));
     const snap = detectCommandCanvasDockSnap(point, targets);
     drag.point = snap ? { x: snap.x, y: snap.y } : point;
     drag.snapDock = snap?.dock ?? null;
+    drag.swapPodId = snap
+      ? null
+      : findCommandCanvasPodCollision(
+          { x: point.x, y: point.y, width: drag.width, height: drag.height },
+          commandCanvasPodPeers(drag.podId),
+        )?.podId ?? null;
     drag.element.style.setProperty("--cc-live-x", `${drag.point.x}px`);
     drag.element.style.setProperty("--cc-live-y", `${drag.point.y}px`);
     const preview = commandCanvasDockPreviewRef.current;
     if (preview) {
-      if (snap) preview.dataset.activeDock = snap.dock;
-      else preview.removeAttribute("data-active-dock");
+      if (snap) {
+        preview.dataset.activeDock = snap.dock;
+        preview.style.left = `${snap.x}px`;
+        preview.style.right = "auto";
+        preview.style.top = `${snap.y}px`;
+      } else {
+        preview.removeAttribute("data-active-dock");
+      }
     }
   }
 
@@ -8428,22 +8945,86 @@ export function EditorClient({
     const drag = commandCanvasPodDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    const placement = drag.snapDock
-      ? { dock: drag.snapDock }
-      : { dock: "floating" as const, x: drag.point.x, y: drag.point.y };
+    if (!isActiveCommandCanvasPod(drag.podId)) return;
+    const podId = drag.podId;
+    const destinationRect = { x: drag.point.x, y: drag.point.y, width: drag.width, height: drag.height };
+    const swapTarget = drag.swapPodId;
+    const targetRect = swapTarget ? commandCanvasPodRect(swapTarget) : null;
+    const remainingPeers = commandCanvasPodPeers(podId).filter((peer) => peer.podId !== swapTarget);
+    const reciprocalRect = targetRect
+      ? { x: drag.startX, y: drag.startY, width: targetRect.width, height: targetRect.height }
+      : null;
+    const canSwapFreePlacement = Boolean(
+      swapTarget
+      && targetRect
+      && reciprocalRect
+      && !remainingPeers.some((peer) => commandCanvasRectsConflict(destinationRect, peer.rect))
+      && !remainingPeers.some((peer) => commandCanvasRectsConflict(reciprocalRect, peer.rect)),
+    );
     setCommandCanvasLayout((current) => {
-      const currentPlacement = current.modules[drag.podId];
-      const width = currentPlacement.width ?? (drag.snapDock ? undefined : drag.width);
-      const height = currentPlacement.height ?? (drag.snapDock ? undefined : drag.height);
+      const source = current.modules[podId];
+      if (drag.snapDock) {
+        const occupant = ACTIVE_COMMAND_CANVAS_POD_IDS.find(
+          (candidate) => candidate !== podId && current.modules[candidate].dock === drag.snapDock,
+        );
+        if (!occupant || source.dock === drag.snapDock) {
+          return {
+            ...current,
+            modules: {
+              ...current.modules,
+              [podId]: commandCanvasDockedPlacement(source, drag.snapDock),
+            },
+          };
+        }
+        const occupantPlacement = current.modules[occupant];
+        const reciprocalPlacement = drag.startDock === "floating"
+          ? commandCanvasFloatingPlacement(
+              occupant,
+              { x: drag.startX, y: drag.startY, width: drag.width, height: drag.height },
+              drag.startAnchor,
+              occupantPlacement,
+            )
+          : commandCanvasDockedPlacement(occupantPlacement, drag.startDock);
+        return {
+          ...current,
+          modules: {
+            ...current.modules,
+            [podId]: commandCanvasDockedPlacement(source, drag.snapDock),
+            [occupant]: reciprocalPlacement,
+          },
+        };
+      }
+
+      if (swapTarget && targetRect && reciprocalRect && canSwapFreePlacement) {
+        const targetPlacement = current.modules[swapTarget];
+        return {
+          ...current,
+          modules: {
+            ...current.modules,
+            [podId]: commandCanvasFloatingPlacement(
+              podId,
+              destinationRect,
+              resolveCommandCanvasPodAnchor(targetPlacement, swapTarget),
+              source,
+            ),
+            [swapTarget]: commandCanvasFloatingPlacement(
+              swapTarget,
+              reciprocalRect,
+              drag.startAnchor,
+              targetPlacement,
+            ),
+          },
+        };
+      }
+
+      // A free release that would still cover a third pod is rejected rather
+      // than making a previously reachable panel inaccessible.
+      if (swapTarget) return current;
       return {
         ...current,
         modules: {
           ...current.modules,
-          [drag.podId]: {
-            ...placement,
-            ...(width === undefined ? {} : { width }),
-            ...(height === undefined ? {} : { height }),
-          },
+          [podId]: commandCanvasFloatingPlacement(podId, destinationRect, drag.startAnchor, source),
         },
       };
     });
@@ -9373,6 +9954,7 @@ export function EditorClient({
           meta={<span>{visibleLayerCount}</span>}
           dock={resolveCommandCanvasPodPlacement(commandCanvasLayout, "scene", commandCanvasViewportWidth).dock}
           collapsed={commandCanvasPodCollapsed("scene")}
+          collapseDirection={commandCanvasPodCollapseDirection("scene")}
           style={commandCanvasPodStyle("scene")}
           className={`editor-side-column editor-side-column--document editor-mobile-sheet editor-mobile-sheet--left ${mobileTab === "source" ? "editor-mobile-sheet--open" : ""} ${sourcePanelCollapsed ? "editor-side-column--collapsed" : ""}`}
           onHeaderPointerDown={(event) => beginCommandCanvasPodDrag(event, "scene")}
@@ -9383,6 +9965,9 @@ export function EditorClient({
           onRequestDock={() => dockCommandCanvasPod("scene")}
           onRequestFloat={() => floatCommandCanvasPod("scene")}
           onRequestCollapse={() => toggleCommandCanvasPod("scene")}
+          onRequestHorizontalCollapse={commandCanvasViewportWidth >= 1280
+            ? () => collapseCommandCanvasPodHorizontally("scene")
+            : undefined}
           onRequestReset={() => resetCommandCanvasPod("scene")}
           resizeEdge={commandCanvasPodResizeEdge("scene")}
           resizeActive={resizingCommandCanvasPodId === "scene"}
@@ -9408,8 +9993,9 @@ export function EditorClient({
               tone={navigatorStatusTone}
             />
           )}
-          dock="right-top"
+          dock={resolveCommandCanvasPodPlacement(commandCanvasLayout, "navigator", commandCanvasViewportWidth).dock}
           collapsed={false}
+          style={commandCanvasPodStyle("navigator")}
           className={`editor-mobile-sheet editor-mobile-sheet--view ${mobileTab === "view" ? "editor-mobile-sheet--open" : ""}`}
         >
           <CommandCanvasNavigator
@@ -9445,6 +10031,7 @@ export function EditorClient({
           meta={<span>{inspectorTab === "graph" ? "Document" : inspectorTab === "source" ? "Selection" : inspectorTab === "draw" ? "Create" : "Color"}</span>}
           dock={resolveCommandCanvasPodPlacement(commandCanvasLayout, "focus", commandCanvasViewportWidth).dock}
           collapsed={commandCanvasPodCollapsed("focus")}
+          collapseDirection={commandCanvasPodCollapseDirection("focus")}
           style={commandCanvasPodStyle("focus")}
           className={`editor-side-column editor-side-column--inspector editor-mobile-sheet editor-mobile-sheet--right ${mobileTab === "controls" ? "editor-mobile-sheet--open" : ""} ${settingsPanelCollapsed ? "editor-side-column--collapsed" : ""}`}
           onHeaderPointerDown={(event) => beginCommandCanvasPodDrag(event, "focus")}
@@ -9455,6 +10042,9 @@ export function EditorClient({
           onRequestDock={() => dockCommandCanvasPod("focus")}
           onRequestFloat={() => floatCommandCanvasPod("focus")}
           onRequestCollapse={() => toggleCommandCanvasPod("focus")}
+          onRequestHorizontalCollapse={commandCanvasViewportWidth >= 1280
+            ? () => collapseCommandCanvasPodHorizontally("focus")
+            : undefined}
           onRequestReset={() => resetCommandCanvasPod("focus")}
           resizeEdge={commandCanvasPodResizeEdge("focus")}
           resizeActive={resizingCommandCanvasPodId === "focus"}
@@ -9562,11 +10152,15 @@ export function EditorClient({
           />
         </CommandCanvasPod>
 
-        <div className="command-canvas__dock-target" data-command-canvas-dock-target="tool-spine" aria-hidden="true" />
-        <div className="command-canvas__dock-target" data-command-canvas-dock-target="left-main" aria-hidden="true" />
-        <div className="command-canvas__dock-target" data-command-canvas-dock-target="left-lower" aria-hidden="true" />
-        <div className="command-canvas__dock-target" data-command-canvas-dock-target="right-top" aria-hidden="true" />
-        <div className="command-canvas__dock-target" data-command-canvas-dock-target="right-main" aria-hidden="true" />
+        {COMMAND_CANVAS_ACTIVE_DOCKS.map((dock) => (
+          <div
+            key={dock}
+            className="command-canvas__dock-target"
+            data-command-canvas-dock-target={dock}
+            style={commandCanvasDockTargetStyle(dock)}
+            aria-hidden="true"
+          />
+        ))}
         <div ref={commandCanvasDockPreviewRef} className="command-canvas__dock-preview" aria-hidden="true" />
       </div>
 

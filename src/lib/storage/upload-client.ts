@@ -10,7 +10,16 @@
  */
 
 export const SOURCE_THUMBNAIL_MAX_EDGE = 256;
-export const CARD_THUMBNAIL_MAX_EDGE = 512;
+/**
+ * Dashboard cards render the **top** of the chart cropped to the card box, not
+ * the whole graph: a 20x102-cell project is 400x4080, and a contained preview of
+ * that is an unreadable hairline. The derivative is therefore cropped to the
+ * card's aspect before it is scaled, so `object-fit: cover` on the card has a
+ * source of the right shape. A max-edge box instead produced a 50x512 strip that
+ * the card had to magnify roughly sevenfold.
+ */
+export const CARD_THUMBNAIL_ASPECT = 4 / 3;
+export const CARD_THUMBNAIL_MAX_WIDTH = 768;
 const THUMBNAIL_QUALITY = 0.72;
 
 export type PresignedUpload = {
@@ -87,19 +96,79 @@ export async function createThumbnailBlob(file: Blob, maxEdge: number): Promise<
   }
 
   const scale = Math.min(1, maxEdge / Math.max(width, height));
-  const targetWidth = Math.max(1, Math.round(width * scale));
-  const targetHeight = Math.max(1, Math.round(height * scale));
+  return renderThumbnail(source, { x: 0, y: 0, width, height }, Math.round(width * scale), Math.round(height * scale));
+}
 
+/**
+ * Renders the dashboard card derivative: the top of the image, cropped to the
+ * card's aspect ratio.
+ *
+ * The crop mirrors `object-fit: cover; object-position: center top` exactly, so
+ * the card displays the derivative one-to-one instead of magnifying it. It never
+ * upscales — a 400px-wide processed chart yields a 400px-wide derivative, which
+ * is simply the resolution the graph was rendered at.
+ */
+export async function createCardThumbnailBlob(
+  file: Blob,
+  aspectRatio = CARD_THUMBNAIL_ASPECT,
+  maxWidth = CARD_THUMBNAIL_MAX_WIDTH,
+): Promise<Blob | null> {
+  if (typeof document === "undefined") return null;
+
+  const source = await decodeToBitmapSource(file);
+  if (!source) return null;
+
+  const width = "width" in source ? source.width : 0;
+  const height = "height" in source ? source.height : 0;
+  if (!width || !height) {
+    if ("close" in source) source.close();
+    return null;
+  }
+
+  const wider = width / height > aspectRatio;
+  const cropWidth = wider ? Math.max(1, Math.round(height * aspectRatio)) : width;
+  const cropHeight = wider ? height : Math.max(1, Math.round(width / aspectRatio));
+  const scale = Math.min(1, maxWidth / cropWidth);
+
+  return renderThumbnail(
+    source,
+    // Horizontally centred, vertically top-anchored, like the card's own crop.
+    { x: Math.round((width - cropWidth) / 2), y: 0, width: cropWidth, height: cropHeight },
+    Math.round(cropWidth * scale),
+    Math.round(cropHeight * scale),
+  );
+}
+
+type SourceRect = { x: number; y: number; width: number; height: number };
+
+async function renderThumbnail(
+  source: ImageBitmap | HTMLImageElement,
+  crop: SourceRect,
+  targetWidth: number,
+  targetHeight: number,
+): Promise<Blob | null> {
   const canvas = document.createElement("canvas");
-  canvas.width = targetWidth;
-  canvas.height = targetHeight;
+  canvas.width = Math.max(1, targetWidth);
+  canvas.height = Math.max(1, targetHeight);
   const context = canvas.getContext("2d");
   if (!context) {
     if ("close" in source) source.close();
     return null;
   }
 
-  context.drawImage(source as CanvasImageSource, 0, 0, targetWidth, targetHeight);
+  // These are large downscales of fine grid lines; the default filter aliases them.
+  context.imageSmoothingQuality = "high";
+  context.drawImage(
+    source as CanvasImageSource,
+    crop.x,
+    crop.y,
+    crop.width,
+    crop.height,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
   if ("close" in source) source.close();
 
   return new Promise<Blob | null>((resolve) => {

@@ -8383,15 +8383,30 @@ export function EditorClient({
 
       const occupantPlacement = current.modules[occupant];
       const sourceAnchor = resolveCommandCanvasPodAnchor(source, podId);
-      const swappedPlacement = source.dock === "floating" && sourceRect
-        ? commandCanvasFloatingPlacement(occupant, sourceRect, sourceAnchor, occupantPlacement)
-        : commandCanvasDockedPlacement(occupantPlacement, source.dock);
+      if (source.dock === "floating") {
+        // A floating pod needs its rendered rectangle to exchange places safely.
+        // Do not fall through to the docked helper: `floating` is not a dock slot.
+        if (!sourceRect) return current;
+        return {
+          ...current,
+          modules: {
+            ...current.modules,
+            [podId]: commandCanvasDockedPlacement(source, destinationDock),
+            [occupant]: commandCanvasFloatingPlacement(
+              occupant,
+              sourceRect,
+              sourceAnchor,
+              occupantPlacement,
+            ),
+          },
+        };
+      }
       return {
         ...current,
         modules: {
           ...current.modules,
           [podId]: commandCanvasDockedPlacement(source, destinationDock),
-          [occupant]: swappedPlacement,
+          [occupant]: commandCanvasDockedPlacement(occupantPlacement, source.dock),
         },
       };
     });

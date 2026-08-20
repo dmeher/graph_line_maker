@@ -224,10 +224,13 @@ export function deserializeCommandCanvasLayout(value: unknown): CommandCanvasLay
   const collapsed = Array.isArray(parsed.collapsed)
     ? [...new Set(parsed.collapsed.filter(isPodId))]
     : [];
-  const collapseDirections = isRecord(parsed.collapseDirections)
+  const serializedCollapseDirections = isRecord(parsed.collapseDirections)
+    ? parsed.collapseDirections
+    : null;
+  const collapseDirections = serializedCollapseDirections
     ? Object.fromEntries(
         COMMAND_CANVAS_POD_IDS.flatMap((podId) => {
-          const direction = parsed.collapseDirections[podId];
+          const direction = serializedCollapseDirections[podId];
           return collapsed.includes(podId) && isPodCollapseDirection(direction)
             ? [[podId, direction]]
             : [];

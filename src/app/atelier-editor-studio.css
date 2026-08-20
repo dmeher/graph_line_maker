@@ -1500,18 +1500,65 @@
   border-radius: 8px;
 }
 
+/* Desktop side panels can also collapse into narrow edge tabs. Their model
+ * width stays collision-safe while the full lane height keeps the tab easy to
+ * find and restore. */
+@media (min-width: 1280px) {
+  .command-canvas .command-canvas-pod[data-collapsed="true"][data-collapse-direction="horizontal"] {
+    width: var(--cc-live-width, var(--cc-pod-width, 56px));
+    min-width: var(--cc-live-width, var(--cc-pod-width, 56px));
+    max-width: var(--cc-live-width, var(--cc-pod-width, 56px));
+    height: var(--cc-live-height, var(--cc-pod-height, var(--cc-pod-default-height)));
+    min-height: 0;
+    max-height: none;
+  }
+
+  .command-canvas .command-canvas-pod[data-collapsed="true"][data-collapse-direction="horizontal"] .command-canvas-pod__header {
+    height: 100%;
+    min-height: 0;
+    flex-direction: column;
+    padding: 5px;
+    border-radius: 15px;
+  }
+
+  .command-canvas .command-canvas-pod[data-collapsed="true"][data-collapse-direction="horizontal"] .command-canvas-pod__drag-handle {
+    flex: 1;
+    grid-template-columns: minmax(0, 1fr);
+    place-items: center;
+    padding: 0;
+  }
+
+  .command-canvas .command-canvas-pod[data-collapsed="true"][data-collapse-direction="horizontal"] :is(
+      .command-canvas-pod__heading-copy,
+      .command-canvas-pod__meta
+    ) {
+    display: none;
+  }
+
+  .command-canvas .command-canvas-pod[data-collapsed="true"][data-collapse-direction="horizontal"] .command-canvas-pod__header-actions {
+    flex-direction: column;
+    margin-top: auto;
+  }
+
+  .command-canvas .command-canvas-pod:is([data-dock="left-main"], [data-dock="tool-spine"])
+    .command-canvas-pod__menu {
+    right: auto;
+    left: 0;
+  }
+}
+
 .command-canvas .command-canvas-pod--selection .command-canvas-pod__body {
   overflow: auto;
 }
 
 .command-canvas .command-canvas-pod[data-dock="tool-spine"] {
   top: 108px;
-  left: 426px;
+  left: 424px;
 }
 
 .command-canvas .command-canvas-pod[data-dock="left-main"] {
   top: 108px;
-  left: 16px;
+  left: 12px;
 }
 
 .command-canvas .command-canvas-pod[data-dock="left-lower"] {
@@ -1521,13 +1568,13 @@
 
 .command-canvas .command-canvas-pod[data-dock="right-top"] {
   top: 112px;
-  right: 26px;
+  right: 12px;
   left: auto;
 }
 
 .command-canvas .command-canvas-pod[data-dock="right-main"] {
-  top: 241px;
-  right: 18px;
+  top: 240px;
+  right: 12px;
   left: auto;
 }
 
@@ -1544,7 +1591,7 @@
 .command-canvas .command-canvas__dock-target[data-command-canvas-dock-target="left-main"],
 .command-canvas .command-canvas__dock-preview[data-active-dock="left-main"] {
   top: 108px;
-  left: 16px;
+  left: 12px;
   width: 400px;
   height: calc(100dvh - 120px);
 }
@@ -1560,15 +1607,15 @@
 .command-canvas .command-canvas__dock-target[data-command-canvas-dock-target="right-top"],
 .command-canvas .command-canvas__dock-preview[data-active-dock="right-top"] {
   top: 112px;
-  right: 26px;
+  right: 12px;
   width: 356px;
   height: 116px;
 }
 
 .command-canvas .command-canvas__dock-target[data-command-canvas-dock-target="right-main"],
 .command-canvas .command-canvas__dock-preview[data-active-dock="right-main"] {
-  top: 241px;
-  right: 18px;
+  top: 240px;
+  right: 12px;
   width: 430px;
   height: calc(100dvh - 253px);
 }
@@ -1580,7 +1627,7 @@
 .command-canvas .command-canvas__dock-target[data-command-canvas-dock-target="tool-spine"],
 .command-canvas .command-canvas__dock-preview[data-active-dock="tool-spine"] {
   top: 108px;
-  left: 426px;
+  left: 424px;
   width: var(--cc-preview-width, 68px);
   height: var(--cc-preview-height, 500px);
 }
@@ -3201,49 +3248,61 @@
   .command-canvas .focus-console__workspace {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
+    gap: 12px;
+    padding: 12px;
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--cc-panel-raised) 58%, transparent), transparent 13rem),
+      var(--cc-panel);
   }
 
   .command-canvas .focus-console__command-shelf,
   .command-canvas .focus-console__shelf {
     display: block;
-    padding: 6px 7px;
-    border-right: 0;
-    border-bottom: 1px solid var(--cc-border-soft);
-    box-shadow: 0 7px 16px rgb(0 0 0 / 0.08);
+    padding: 10px;
+    overflow: hidden;
+    border: 1px solid var(--cc-border-soft);
+    border-radius: 13px;
+    background:
+      linear-gradient(145deg, color-mix(in srgb, var(--cc-accent-soft) 38%, transparent), transparent 58%),
+      var(--cc-panel-raised);
+    box-shadow:
+      0 7px 18px rgb(0 0 0 / 0.09),
+      inset 0 1px rgb(255 255 255 / 0.035);
   }
 
   .command-canvas .focus-console__shelf-panel {
-    height: 64px;
+    height: 72px;
     gap: 4px;
   }
 
   .command-canvas .focus-console__shelf-panel[data-focus-console-shelf="source"] {
-    height: 128px;
+    height: 136px;
   }
 
   /* The compact default console still keeps the only graph-dimension controls
      reachable. Quiet summaries and duplicate Grid toggles yield the space. */
   .command-canvas .focus-console__shelf-panel[data-focus-console-shelf="graph"] {
-    height: 116px;
-    grid-template-rows: 30px 44px 30px;
+    height: 122px;
+    grid-template-rows: 30px 44px 36px;
+    row-gap: 6px;
   }
 
   .command-canvas .focus-console__selection-shelf {
     display: grid;
-    height: 128px;
-    grid-template-columns: minmax(0, 1fr) 132px;
-    grid-template-rows: 128px;
-    gap: 7px;
+    height: 136px;
+    grid-template-columns: minmax(0, 1fr) 126px;
+    grid-template-rows: 136px;
+    gap: 12px;
   }
 
   .command-canvas .focus-console__selection-identity {
     grid-column: 1;
     grid-row: 1;
-    grid-template-columns: 72px minmax(0, 1fr);
+    grid-template-columns: 64px minmax(0, 1fr);
     align-content: center;
     justify-items: stretch;
-    gap: 7px;
-    padding: 0 7px 0 0;
+    gap: 9px;
+    padding: 0 12px 0 0;
     border-right: 1px solid var(--cc-border-soft);
     border-bottom: 0;
   }
@@ -3253,8 +3312,8 @@
   }
 
   .command-canvas .focus-console__selection-preview {
-    width: 72px;
-    height: 72px;
+    width: 64px;
+    height: 64px;
   }
 
   .command-canvas .focus-console__selection-identity .focus-console__selection-summary {
@@ -3309,7 +3368,7 @@
     grid-row: 3;
     width: 100%;
     min-height: 30px;
-    margin: 0;
+    margin: 4px 0 0;
   }
 
   .command-canvas
@@ -3395,11 +3454,35 @@
     grid-column: 2;
     grid-row: 1;
     min-height: 0;
-    grid-template-columns: 132px;
-    grid-template-rows: 126px;
+    grid-template-columns: 126px;
+    grid-template-rows: 136px;
     align-items: center;
     justify-content: end;
     gap: 0;
+  }
+
+  .command-canvas .focus-console__detail,
+  .command-canvas .editor-inspector__deck.focus-console__detail {
+    overflow-x: hidden;
+    overflow-y: auto;
+    border: 1px solid var(--cc-border-soft);
+    border-radius: 13px;
+    background: var(--cc-panel-raised);
+    box-shadow:
+      0 7px 18px rgb(0 0 0 / 0.08),
+      inset 0 1px rgb(255 255 255 / 0.03);
+  }
+
+  .command-canvas .focus-console__detail .editor-inspector__lens-tabs,
+  .command-canvas .focus-console__detail-tabs {
+    min-height: 44px;
+    padding: 5px 6px;
+    border-bottom: 1px solid var(--cc-border-soft);
+    background: color-mix(in srgb, var(--cc-panel-raised) 96%, transparent);
+  }
+
+  .command-canvas .focus-console__detail .editor-inspector__lens-deck {
+    padding: 12px;
   }
 
   .command-canvas :is(
@@ -5711,9 +5794,9 @@
  */
 @media (min-width: 1280px) and (max-height: 979px) {
   .command-canvas .command-canvas-pod--focus[data-dock="right-main"] {
-    --cc-focus-short-top: 240px;
+    --cc-focus-short-top: var(--cc-pod-top, 224px);
     top: var(--cc-focus-short-top);
-    right: 18px;
+    right: var(--cc-pod-right, 12px);
     bottom: auto;
     --cc-pod-default-height: calc(100dvh - var(--cc-focus-short-top) - 12px);
     max-height: calc(100dvh - var(--cc-focus-short-top) - 12px);
@@ -5731,9 +5814,9 @@
 
   .command-canvas .command-canvas__dock-target[data-command-canvas-dock-target="right-main"],
   .command-canvas .command-canvas__dock-preview[data-active-dock="right-main"] {
-    --cc-focus-short-top: 240px;
+    --cc-focus-short-top: var(--cc-pod-top, 224px);
     top: var(--cc-focus-short-top);
-    right: 18px;
+    right: var(--cc-pod-right, 12px);
     bottom: auto;
     width: var(--cc-preview-width, 430px);
     height: calc(100dvh - var(--cc-focus-short-top) - 12px);
@@ -5829,9 +5912,9 @@
   }
 
   .command-canvas .command-canvas-pod--focus[data-dock="right-main"] {
-    --cc-focus-short-top: 184px;
+    --cc-focus-short-top: var(--cc-pod-top, 224px);
     top: var(--cc-focus-short-top);
-    right: 16px;
+    right: var(--cc-pod-right, 12px);
     --cc-pod-default-height: calc(100dvh - var(--cc-focus-short-top) - 12px);
     max-height: calc(100dvh - var(--cc-focus-short-top) - 12px);
   }
@@ -6600,6 +6683,26 @@
 
   .command-canvas .editor-tool-rail {
     overflow-y: auto;
+  }
+}
+
+/* Desktop positions come from the shared layout model. Custom properties let
+ * the drag state temporarily take ownership without React rerendering every
+ * pointer move or a fixed-side dock losing its resize anchor. */
+@media (min-width: 1280px) {
+  /* Match the floating-state selector's specificity. Otherwise a restored
+   * `data-dock="floating"` panel wins with the legacy 112px origin and every
+   * panel is rendered on top of the others before it can be moved. */
+  .command-canvas .command-canvas-pod[data-dock] {
+    top: var(--cc-live-pack-top, var(--cc-pod-top));
+    right: var(--cc-pod-right);
+    left: var(--cc-live-pack-left, var(--cc-pod-left));
+  }
+
+  .command-canvas .command-canvas-pod[data-dragging="true"] {
+    top: var(--cc-live-y) !important;
+    right: auto !important;
+    left: var(--cc-live-x) !important;
   }
 }
 

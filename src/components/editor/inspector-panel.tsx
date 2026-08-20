@@ -1326,9 +1326,9 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   onChange={(value) => updateSetting("printOrientation", value as GraphSettings["printOrientation"])}
                 />
               </InspectorRow>
-              <InspectorDisclosure title="Page placement" summary={`${settings.pageMargin ?? 24}px margin`}>
+              <InspectorDisclosure title="Page placement" summary={`${settings.pageMargin ?? 24}px vertical / 10 mm sides`}>
                 <NumberField
-                  label="Page margin"
+                  label="Top/bottom margin"
                   unit="px"
                   value={settings.pageMargin ?? 24}
                   min={0}
@@ -1337,6 +1337,9 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   inputClassName={inspectorControlClass}
                   onChange={(value) => updateSetting("pageMargin", Math.round(value))}
                 />
+                <p className="text-xs leading-5 text-[var(--editor-text-dim)]">
+                  PDF and browser print reserve 10 mm on the left and right of every page.
+                </p>
                 <InspectorRow label="Align">
                   <InspectorFieldGrid>
                     <InspectorSelect

@@ -26,8 +26,9 @@ Key product traits:
 - Custom **Brevo email OTP** sign-in; no Supabase Auth OTP.
 - **Allowlist-based access**: only active `app_users` rows can log in; admins can invite/revoke users and promote any member to admin from `/settings`.
 - **Admin project oversight**: admins see every owner's projects on `/dashboard` (scope toggle, `?scope=mine` narrows it) and can open, edit, duplicate, and delete any project. Members remain scoped to their own.
+- **Design workspace**: `/design` provides private autosaved Design documents and personal templates, a shared immutable Design/Clipart library, extraction and raster publishing, and copy-based imports into graph projects. Drafts belong to their owner; admins may access all drafts.
 - **Service-role-only** Supabase access from the Next.js server; RLS is enabled but anon/authenticated roles are revoked.
-- **PWA/offline support**: a service worker (`public/sw.js`) caches the app shell and editable project pages so users can keep working offline.
+- **PWA/offline support**: a service worker (`public/sw.js`) caches the app shell and editable graph-project pages so users can keep working offline. Design routes are online-first and excluded from navigation caching; an already-open Design editor keeps a user/design-scoped IndexedDB recovery draft.
 - Heavy client-side **canvas image processing** for graph-pixel conversion, palette generation, and PDF tiling.
 - Shared canvas safety limits reject work above 16 million pixels or the estimated 512 MB processing budget before allocation, and normalize malformed saved dimensions before canvas creation.
 - **Product graph limits:** one cell renders at 1 cm; the graph is capped at **20 cells wide × 125 cells tall** (`MAX_GRAPH_WIDTH_CELLS`/`MAX_GRAPH_HEIGHT_CELLS` in `src/lib/canvas/performance-limits.ts`, enforced inside `clampGraphCellDimensions`, the Zod save schema, and the Inspector inputs). Oversized legacy projects are clamped per axis on load.
@@ -50,6 +51,7 @@ This project uses **Next.js 16.2.10** with React 19. APIs, conventions, and file
 | Framework | Next.js 16.2.10 | App Router, React Server Components by default |
 | Runtime | Node.js (Next.js dev/build) | Server-only modules use `import "server-only"` |
 | UI library | React 19.2.7 | Client components explicitly marked `"use client"` |
+| Design canvas | Konva 10.3 / react-konva 19.2 | Loaded behind a client-only dynamic editor boundary; application JSON is authoritative |
 | Styling | Tailwind CSS v4 | CSS-first config in `src/app/globals.css` (`@import "tailwindcss"`, `@theme inline`) |
 | Icons | `lucide-react` | Stroke width and size vary by screen |
 | Database | Supabase Postgres | Schema `image_to_graph`; accessed via service role |
@@ -138,7 +140,7 @@ This project uses **Next.js 16.2.10** with React 19. APIs, conventions, and file
 
 - `(app)/layout.tsx` is a **server component** that calls `getCurrentSession()` and redirects to `/login` if missing. It computes `offlineSessionTicket` via `createOfflineSessionTicket(session)` and passes both to `AppShell`.
 - `(auth)/login/page.tsx` renders `LoginForm` client component; logged-in users are redirected to `/dashboard`.
-- Root `layout.tsx` registers the service worker and loads Geist fonts.
+- Root `layout.tsx` loads Geist fonts, applies the persisted theme with a critical `next/script` bootstrap before hydration, and registers the service worker after hydration.
 - `portal/layout.tsx` is a standalone, unprotected presentation route. It deliberately does not import Graph Pixel Maker auth, storage, canvas, project, or server-action modules; its catch-all pages pass route segments to the local-only `PortalClient` demo.
 
 ### Main pages
@@ -148,6 +150,9 @@ This project uses **Next.js 16.2.10** with React 19. APIs, conventions, and file
 | `/` | `src/app/page.tsx` | Landing page |
 | `/login` | `(auth)/login/page.tsx` | Email OTP sign-in |
 | `/dashboard` | `(app)/dashboard/page.tsx` | Project list, search, duplicate/delete; admins default to the all-owners scope |
+| `/design` | `(app)/design/page.tsx` | Shared Design/Clipart library, private drafts, and personal templates |
+| `/design/new` | `(app)/design/new/page.tsx` | Create from an upload, blank preset, custom canvas, or copied personal template |
+| `/design/[id]` | `(app)/design/[id]/page.tsx` | Chrome-less desktop/tablet Design editor with a reduced phone toolset |
 | `/projects/new` | `(app)/projects/new/page.tsx` | Multi-file crop review + create project |
 | `/projects/[id]` | `(app)/projects/[id]/page.tsx` | Editor for saved projects |
 | `/projects/mock-editor` | same as above | In-memory demo project (`getMockEditorProject`) |
@@ -186,6 +191,10 @@ the two directions are selected by `data-portal-theme="pulse" | "atlas"` on
 - `/api/projects/[id]/source-images` — prepares, finalizes, or cleans up direct source-image uploads.
 - Source-image and clipart upload routes use the same JSON prepare / direct Storage upload / JSON finalize pattern; do not reintroduce multipart bodies into Next.js.
 - `/api/projects/[id]/processed-image` — PUT stores the processed PNG output.
+- `/api/designs` and `/api/designs/[id]` — list/create and load/revision-save/delete private Design documents and templates.
+- `/api/designs/[id]/files`, `/publish`, and `/duplicate` — immutable direct-upload files, immutable published snapshots, and copy-based document/template creation.
+- `/api/design-library` and `/api/design-library/[id]` — bounded shared-library browsing plus owner/admin metadata and lifecycle operations; `/remix` creates an independent flattened draft.
+- `/api/projects/[id]/library-imports` — copies a published item into project-owner storage before the existing validated project save inserts it as a source or clipart.
 - `/api/vectorize` — authenticated Node.js route that accepts multipart raster uploads, runs native `@neplex/vectorizer`, and returns SVG for source/clipart line-art generation.
 
 ---
@@ -223,8 +232,11 @@ All tables live in the `image_to_graph` schema (migrations in `supabase/migratio
 - `email_otp_attempts` — OTP hashes, purpose, consumed_at, expires_at, attempt_count.
 - `projects` — owner, title, description, original/processed image paths, JSON `settings`, width/height/pixel_size/grid_cell_size/color_count.
 - `project_palettes` — per-project colors with name, hex, locked, cell_count, sort_order.
+- `designs` — private versioned editable documents/templates with canvas metadata and optimistic revision.
+- `design_files` — immutable files owned by one Design/template, including object/thumbnail paths and bounded metadata.
+- `design_library_items` — immutable workspace-visible Design or Clipart snapshots with optional originating Design.
 
-Migration `20260710091750_optimize_project_persistence.sql` adds cursor/search indexes plus transactional `save_project_state` and `verify_login_otp` RPCs. Migration `20260714060318_bounded_project_summaries_and_otp_rate_limit.sql` adds bounded six-swatch project summaries and atomic OTP creation/cooldown. Migration `20260730120000_admin_all_project_access.sql` re-declares `get_project_summaries` with `p_include_all_owners`, returns `owner_email`/`owner_display_name`, and adds the all-owners ordering index `projects_updated_id_idx`. Apply all of them before deploying code that calls those RPCs; the summaries signature changed, so the dashboard fails until the latest migration is applied.
+Migration `20260710091750_optimize_project_persistence.sql` adds cursor/search indexes plus transactional `save_project_state` and `verify_login_otp` RPCs. Migration `20260714060318_bounded_project_summaries_and_otp_rate_limit.sql` adds bounded six-swatch project summaries and atomic OTP creation/cooldown. Migration `20260730120000_admin_all_project_access.sql` re-declares `get_project_summaries` with `p_include_all_owners`, returns `owner_email`/`owner_display_name`, and adds the all-owners ordering index `projects_updated_id_idx`. Migration `20260802090000_design_workspace.sql` adds the Design tables, indexes, triggers, grants, and bounded `get_design_library_summaries` RPC. Apply all of them before deploying code that calls those RPCs.
 
 `updated_at` columns are maintained by triggers. The migration seeds the bootstrap admin `dmeher1996@gmail.com`.
 
@@ -240,6 +252,7 @@ their first segment, so every `original_image_path`, `processed_image_path`, and
 
 - `graph-pixel-original-images/…` — source and clipart uploads; 50 MB per object; PNG/JPEG/WEBP/SVG/PDF.
 - `graph-pixel-processed-images/…` — processed PNGs and card thumbnails.
+- `graph-pixel-design-assets/{userId}/…` — normalized Design files, immutable Design/Clipart publications, and deterministic WebP thumbnails. Server-generated keys always use the persisted owner; clients never provide owner prefixes.
 
 | Concern | Module |
 |---|---|
@@ -338,7 +351,9 @@ GRAPH_PIXEL_DEV_USER_EMAIL=
 - Stores an in-flight session draft in `sessionStorage` (`src/lib/editor/session-draft.ts`) for recovery.
 - The Command Canvas chrome keeps one mounted canvas plus four rendered modules: **Tools**, Scene, Navigator, and the merged **Focus Console**. Selection summary, copy/paste, orientation, and nudge controls live in Focus's pinned command shelf; Duplicate and Lock/Unlock remain in their existing canvas, Scene, and command-palette surfaces. At desktop widths (>=1280px), Tools, Scene, and Focus drag from their headers, snap to their dedicated dock targets, and resize on both axes from an adaptive bottom corner. At the >=1536x980 reference breakpoint, Scene defaults to `400px × calc(100dvh - 120px)` at `16/108`, Tools to `68×500px` at `426/108`, Navigator to `356×116px` at `right 26/top 112`, and Focus to `430px × calc(100dvh - 253px)` at `right 18/top 241`; Focus remains resizable from 340–720px. Its compact command band must keep graph dimensions and the Shape/Clipart switch reachable, and its shelf may scroll only as an overflow safeguard after an unusually short manual resize. Scene and Focus collapse with one click. Tools is always expanded and uses a compact icon-free drag grip. Navigator is a fixed, non-draggable, non-resizable top-right view sheet; its edge-to-edge header contains only the current processing/readiness icon and text plus an icon-only online/offline signal, and its body is limited to graph-line/source view, grid-number view, and zoom controls (out, an editable percentage field, in, actual size, reset to 100%, fit). A single always-mounted, `aria-hidden` canvas bootstrap loader masks the stage only from the initial draft check through asset settlement and the first successful full graph frame. That first frame latches the loader off for the rest of the editor session, so ordinary edits, drags, and debounced re-renders remain visible in place. Its opaque mat hides artwork, graph numbers, page badges, and selection overlays, and the mounted stage is inert/hidden from assistive technology while the mask is active. An initial asset/render failure changes the same surface to a non-animated error state instead of exposing a partial graph or spinning forever. The independent screen-reader-only `aria-live` footer remains the sole status announcement. Pointer movement for movable modules writes transient position/size CSS variables through refs and commits once at pointer-up; only presentation state persists in `gpm.editor.command-canvas.layout.v1` as optional `x`/`y`/`width`/`height`. Version-1 Selection and Navigator placement data remains readable; the Selection slot is inert and Navigator geometry is ignored. At smaller breakpoints, saved desktop geometry is retained but ignored in favor of the fixed tool deck, overlays, drawers, and mobile sheets. Keep `EditorToolRail`, both panel tabpanels, all Inspector contexts, the merged command shelf, and the primary canvas mounted across those modes.
 
-- Command Canvas desktop geometry reserves the command-bar lane and keeps the screenshot-matched default pod offsets above. Scene and Focus extend to a 12px bottom inset at the reference viewport and use the available viewport height while resizing; do not restore the removed status-lane reserve or fixed content-pod height ceilings.
+- **Current desktop docking contract (supersedes the historical offsets above):** the four active slots (`left-main`, `tool-spine`, `right-top`, `right-main`) are exclusive and use a shared 12px viewport inset/gutter. The left lane begins at 92px and the right lane at 96px, keeping them clear of the command bar while reclaiming vertical space. Docked Scene and Focus fill their respective lanes through the 12px bottom inset; only their free-floating form retains a saved height. Left slots are left-anchored and resize right; right slots are right-anchored and resize left. The left pair packs horizontally and the right pair stacks vertically, including when their occupants have swapped. Scene and Focus retain the standard 46px header collapse and expose **Collapse horizontally** in their desktop overflow menu; that persisted opt-in becomes a collision-safe 56px full-height edge tab and the normal chevron expands it. Dragging onto an occupied active slot swaps placements; a free-floating collision swaps with the strongest valid overlap or restores the prior safe position. On desktop restore, any persisted rectangles that breach the gutter are rehomed together into their semantic slots, retaining dimensions but clearing stale free-position coordinates before the repaired layout is persisted; valid free-floating arrangements remain unchanged. The CSS placement selector must match a floating pod's specificity so every active pod receives its individual shared-geometry rectangle rather than the old common floating origin. Navigator remains directly fixed/non-resizable, but may move only as the counterpart of a swap. Desktop presentation state remains local `v1` storage and now accepts optional floating `anchor` plus `right` offset; old `x`-only records derive a safe side anchor. The legacy `left-lower` Selection slot remains readable but is not a snap target. The Focus Console's <=479px container mode keeps the command shelf and detail scroller as separated, padded cards with one scroll surface.
+
+- Command Canvas desktop geometry reserves the command-bar lane. Scene and Focus extend to a 12px bottom inset when their assigned slot allows it, while right-top always leaves the right-main pod plus the gutter reachable; do not restore the removed status-lane reserve or fixed content-pod height ceilings.
 
 - The command bar spans that lane between **symmetric insets** (`left`/`right` 18px at the reference breakpoint, 12px from 1024–1535px, 10px from 768–1023px, 8px below), with `width: auto` and no transform — the same pattern the <768px rule always used. Do not restore the `left: calc(50% + Npx)` / `translateX(-50%)` centring or a `width: min(…, calc(100vw - Npx))` reserve: they were tuned to an older rail offset, so the bar rendered off-centre and short of the right edge at every width. Its flexible grid column is the command-palette trigger (`minmax(0, 1fr)`); giving that column a non-zero minimum pushes the four column minimums past the track and clips the project title. `.editor-command-bar__identity` ends in an `auto` column for the optional owner badge.
 
@@ -405,10 +420,23 @@ The former read-only “Feature Suggestions” roadmap is now implemented as pra
   - Left-panel tabs are `layers` and `library`; source images are image layers and reusable/unplaced content belongs in Library. The layer action strip appears for one or more selected layers; its checkboxes and Select all control make batch grouping explicit, while grouping controls stay disabled until their selection requirements are met.
   - The bottom canvas status bar must show real editor state (processing/ready, graph size, selected layer/fill status, zoom, connection, snap), not placeholder cursor/color values.
   - Source and clipart vectorizer controls stay in the selected layer inspector; do not reintroduce the global image-generation engine selector.
+  - Tiled PDF and browser-print output reserves a fixed **10 mm left/right safe area** on every paper page, then splits wide graphs into whole-cell columns inside that width. Export pages are ordered column-major (top-to-bottom within a column, then left-to-right across columns). Dotted cut guides bracket all four tile edges; they remain export-only and must not affect canvas artwork or PNG/JSON output. The editor page-break overlay reads the same `createPdfExportPlan` geometry.
   - Tiled PDF exports and the browser print view add `public/brand/company-hallmark.jpeg` on the second output page only, rotated 90 degrees counter-clockwise. `companyHallmarkPlacement` uses the rotated footprint to choose a centered, non-overlapping page area outside the graph tile; it must remain export-only and must not affect the canvas artwork or PNG/JSON output.
   - **Canvas artwork color policy:** editor artwork and exports allow only white (`#ffffff`), transparent fills/background, black (`#000000`), and light grey (`#b0b0b0`). The graph/grid line setting defaults to red (`#dc2626`) and may additionally use green (`#16a34a`) or the artwork colors. `src/lib/graph-paper.ts` owns these palettes and legacy nearest-color normalization. Do not add freeform color pickers or arbitrary hex values; server save validation enforces the applicable set.
 
 When changing any architecture or logic above, update this section in the same change so future agent prompts do not spend credits rediscovering the contracts.
+
+### Design workspace editor
+
+- Only the exact `/design/[id]` shape is a chrome-less editor route. `/design` and `/design/new` stay inside the normal `AppShell`, including when a trailing slash is present; keep `AppShell` route classification segment-based.
+- `DesignDocumentV1` in `src/lib/design/types.ts` is the authoritative, versioned state. It stores document-pixel transforms and discriminated image/text/shape/path/group nodes; Konva nodes, selection, viewport, history, signed URLs, and raw bytes are never serialized. `src/lib/design/schema.ts` validates the same format at client/server boundaries and owns future migration entry points.
+- The heavy Konva surface is dynamically imported with `ssr: false` from `design-editor-loader.tsx`. Settled transforms normalize Konva scale into node width/height, and raster publishing waits until every visible image layer has rendered. Documents are bounded to 24,000 px per axis, 16 million canvas pixels, 200 nodes, 100,000 path/mask points, and 4 MiB serialized JSON; undo/redo retains at most 80 settled commands. At 90% of the geometry-point budget the editor flattens the current frame into a new immutable Design file as an undoable command instead of crossing the validation limit.
+- Konva node drags use document-local top-left coordinates, while the viewport pan is separate transient state. Layers are draggable and transformable only in Select mode; Pan owns viewport dragging, and drawing/mask tools own their pointer gestures. Child `dragend` events must stop bubbling, and the viewport handler must also verify that the viewport itself was the drag target; otherwise dragging a layer reinterprets its center as pan and displaces the entire editor surface.
+- Design uploads normalize PNG/JPEG/WebP/SVG and first-page PDF content into bounded PNG working files before the existing exact-length direct R2 lifecycle. File IDs and paths are immutable. Templates, remixes, published items, and graph-project imports copy dependent objects so later mutation/deletion cannot break consumers.
+- Extraction analyzes at most 2 MP in `extraction.worker.ts`, with bounded main-thread fallback, eight-connected foreground components, one-pixel closing, spatial grouping, and a 100-piece review limit. Candidate edits occur before any upload; accepted files upload in batches.
+- Server autosave sends the latest complete validated document at most once per two-minute dirty window with `baseRevision`; later edits do not reset the active deadline. Saves are serialized and a response marks the editor/recovery copy as synced only when it matches the exact submitted snapshot; edits made during a request remain dirty and schedule the next two-minute window. A genuinely stale server revision returns `409` and requires Reload or Save as Copy. IndexedDB still writes a user/design-scoped crash-recovery draft shortly after local edits so the longer server interval does not create a crash-loss window; it is cleared on logout and is not collaborative or offline synchronization.
+- Design file and publication uploads use the existing prepare/exact-length PUT/HEAD-finalize lifecycle. If PUT, thumbnail generation, or finalization fails, the client calls the matching cleanup endpoint before allowing a retry; thumbnail generation is best-effort for publication and never blocks the primary asset.
+- Shared library access is workspace-wide for active users, but only the item owner/admin may mutate metadata or delete. Draft/template access is owner/admin. All R2 keys derive from persisted ownership on the server, including admin operations.
 
 ### New-project crop flow
 
@@ -420,12 +448,12 @@ When changing any architecture or logic above, update this section in the same c
 
 ## 10. PWA / offline support
 
-- `public/sw.js` cache v41 caches only public non-redirecting shell resources plus immutable `/_next/static` assets, and keeps at most 20 canonical editable-project documents when an offline session marker is fresh. On localhost, it bypasses runtime caching and clears this app's caches to avoid stale development hydrations.
+- `public/sw.js` cache v43 caches only public non-redirecting shell resources plus immutable `/_next/static` assets, and keeps at most 20 canonical editable-project documents when an offline session marker is fresh. On localhost, it bypasses runtime caching and clears this app's caches to avoid stale development hydrations.
 - `OfflineSessionBridge` writes the offline session ticket into `sessionStorage` and notifies the service worker when the user is logged in.
 - `/offline` is shown when the network fails and no cached project page is available.
-- `BLOCKED_OFFLINE_NAVIGATION_PATHS` includes `/projects/new`, which is not available offline because source uploads require a connection.
-- `CLEAR_USER_DATA` removes the active offline marker and cached protected project documents on successful logout while preserving public shell and immutable static assets.
-- `layout.tsx` registers the service worker and tells installing workers to `SKIP_WAITING`.
+- `BLOCKED_OFFLINE_NAVIGATION_PATHS` includes `/projects/new` and every `/design` route. Design library reads, uploads, autosave, and publishing are online-first; only an already-open editor's IndexedDB recovery copy remains usable during a temporary disconnect.
+- `CLEAR_USER_DATA` removes the active offline marker, cached protected project documents, and user-scoped Design recovery drafts on successful logout while preserving public shell and immutable static assets.
+- `layout.tsx` uses `next/script` for its executable inline bootstraps: the theme runs before hydration and service-worker registration runs after hydration, then tells installing workers to `SKIP_WAITING`.
 
 ---
 

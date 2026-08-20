@@ -2,7 +2,7 @@ export const MAX_CANVAS_DIMENSION = 24_000;
 export const MAX_CANVAS_PIXELS = 16_000_000;
 export const MAX_PROCESSING_ESTIMATED_BYTES = 512 * 1024 * 1024;
 /** Product limits: one cell renders at 1 cm, so a graph is at most 20 cm wide and 125 cm tall. */
-export const MAX_GRAPH_WIDTH_CELLS = 20;
+export const MAX_GRAPH_WIDTH_CELLS = 100;
 export const MAX_GRAPH_HEIGHT_CELLS = 125;
 /**
  * Source/clipart working canvases are downscaled to at most this many pixels at load.

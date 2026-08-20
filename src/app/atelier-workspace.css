@@ -3188,7 +3188,7 @@ html[data-project-view="list"] .studio-project-grid {
     left: 50% !important;
     display: grid !important;
     width: min(calc(100% - 20px), 430px);
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     overflow: hidden;
     border: 1px solid color-mix(in srgb, var(--line-strong) 82%, transparent);
     border-radius: 15px;

@@ -14,6 +14,8 @@ import {
   Maximize2,
   MoreHorizontal,
   Move,
+  PanelLeftClose,
+  PanelRightClose,
   PanelTopClose,
   Pin,
   RotateCcw,
@@ -42,6 +44,7 @@ import {
 import {
   filterCommandCanvasCommands,
   type CommandCanvasCommand,
+  type PodCollapseDirection,
   type PodDock,
   type PodId,
 } from "@/lib/editor/command-canvas";
@@ -352,6 +355,7 @@ export type CommandCanvasPodProps = {
   style?: CSSProperties;
   dock?: PodDock;
   collapsed?: boolean;
+  collapseDirection?: PodCollapseDirection;
   dragging?: boolean;
   dockPreview?: boolean;
   headerContent?: ReactNode;
@@ -364,6 +368,7 @@ export type CommandCanvasPodProps = {
   onRequestDock?: () => void;
   onRequestFloat?: () => void;
   onRequestCollapse?: () => void;
+  onRequestHorizontalCollapse?: () => void;
   onRequestReset?: () => void;
   resizeEdge?: CommandCanvasResizeEdge;
   resizeActive?: boolean;
@@ -395,6 +400,7 @@ export const CommandCanvasPod = memo(function CommandCanvasPod({
   style,
   dock,
   collapsed = false,
+  collapseDirection,
   dragging = false,
   dockPreview = false,
   headerContent,
@@ -407,6 +413,7 @@ export const CommandCanvasPod = memo(function CommandCanvasPod({
   onRequestDock,
   onRequestFloat,
   onRequestCollapse,
+  onRequestHorizontalCollapse,
   onRequestReset,
   resizeEdge,
   resizeActive = false,
@@ -559,7 +566,12 @@ export const CommandCanvasPod = memo(function CommandCanvasPod({
     setMenuOpen(false);
     action?.();
   };
-  const hasMenuActions = Boolean(onRequestDock || onRequestFloat || onRequestCollapse || onRequestReset);
+  const hasMenuActions = Boolean(
+    onRequestDock || onRequestFloat || onRequestCollapse || onRequestHorizontalCollapse || onRequestReset,
+  );
+  const HorizontalCollapseIcon = dock === "right-top" || dock === "right-main"
+    ? PanelRightClose
+    : PanelLeftClose;
   const headerInteractive = Boolean(onHeaderPointerDown || onNudge || onRequestCollapse);
 
   return (
@@ -571,6 +583,7 @@ export const CommandCanvasPod = memo(function CommandCanvasPod({
       data-command-canvas-pod={id}
       data-dock={dock}
       data-collapsed={collapsed ? "true" : "false"}
+      data-collapse-direction={collapsed ? collapseDirection ?? "vertical" : undefined}
     >
       <header className="command-canvas-pod__header">
         <div
@@ -648,10 +661,24 @@ export const CommandCanvasPod = memo(function CommandCanvasPod({
                     <Maximize2 size={15} aria-hidden="true" />
                     <span>Float</span>
                   </button>
-                  {onRequestCollapse ? (
+                  {onRequestCollapse && collapseDirection !== "horizontal" ? (
                     <button type="button" role="menuitem" onClick={() => runMenuAction(onRequestCollapse)}>
                       {collapsed ? <ChevronDown size={15} aria-hidden="true" /> : <PanelTopClose size={15} aria-hidden="true" />}
                       <span>{collapsed ? "Expand" : "Collapse"}</span>
+                    </button>
+                  ) : null}
+                  {onRequestHorizontalCollapse ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => runMenuAction(
+                        collapseDirection === "horizontal" ? onRequestCollapse : onRequestHorizontalCollapse,
+                      )}
+                    >
+                      {collapseDirection === "horizontal"
+                        ? <ChevronDown size={15} aria-hidden="true" />
+                        : <HorizontalCollapseIcon size={15} aria-hidden="true" />}
+                      <span>{collapseDirection === "horizontal" ? "Expand" : "Collapse horizontally"}</span>
                     </button>
                   ) : null}
                   <button type="button" role="menuitem" disabled={!onRequestReset} onClick={() => runMenuAction(onRequestReset)}>

@@ -19,6 +19,8 @@ const SIDEBAR_COLLAPSED_STORAGE_KEY = "graph-pixel-sidebar-collapsed";
 
 function compactPageTitle(pathname: string) {
   if (pathname === "/projects/new") return "New project";
+  if (pathname === "/design/new") return "New Design";
+  if (pathname.startsWith("/design")) return "Design workspace";
   if (pathname.startsWith("/settings")) return "Settings";
   return "Project library";
 }
@@ -36,6 +38,8 @@ export function AppShell({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const pathname = usePathname();
   const isProjectEditor = pathname.startsWith("/projects/") && pathname !== "/projects/new";
+  const pathSegments = pathname.split("/").filter(Boolean);
+  const isDesignEditor = pathSegments.length === 2 && pathSegments[0] === "design" && pathSegments[1] !== "new";
 
   useEffect(() => {
     function syncOnlineState() {
@@ -74,7 +78,7 @@ export function AppShell({
   const accountTitle = `${session.displayName || session.email} · ${session.role}`;
   const pageTitle = compactPageTitle(pathname);
 
-  if (isProjectEditor) {
+  if (isProjectEditor || isDesignEditor) {
     return (
       <div className="shell atelier-shell atelier-shell--editor">
         {offlineSessionTicket ? <OfflineSessionBridge session={session} offlineSessionTicket={offlineSessionTicket} /> : null}

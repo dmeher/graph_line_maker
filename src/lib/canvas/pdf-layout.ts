@@ -1,4 +1,6 @@
 export const MAX_PAGES_PER_PDF_FILE = 80;
+/** Fixed left/right printer-safe area used by every PDF and browser-print page. */
+export const PDF_HORIZONTAL_PAGE_MARGIN_MM = 10;
 
 export type PdfExportPaper = {
   widthCm: number;
@@ -28,6 +30,8 @@ export type PdfExportTile = {
   destinationYMm: number;
   destinationWidthMm: number;
   destinationHeightMm: number;
+  cutGuideLeftXMm: number;
+  cutGuideRightXMm: number;
   cutGuideTopYMm: number;
   cutGuideBottomYMm: number;
 };
@@ -38,7 +42,9 @@ export type PdfExportPlan = {
   graphHeightMm: number;
   pageWidthMm: number;
   pageHeightMm: number;
+  pageHorizontalMarginMm: number;
   pageVerticalMarginMm: number;
+  printablePageWidthMm: number;
   printablePageHeightMm: number;
   pagesX: number;
   pagesY: number;
@@ -90,6 +96,12 @@ function safeVerticalPageMarginMm({
   return Math.min(rawMarginMm, maxMarginMm);
 }
 
+function safeHorizontalPageMarginMm(pageWidthMm: number, cellSizeMm: number) {
+  const minimumPrintableWidthMm = Math.min(pageWidthMm, cellSizeMm);
+  const maxMarginMm = Math.max(0, (pageWidthMm - minimumPrintableWidthMm) / 2);
+  return Math.min(PDF_HORIZONTAL_PAGE_MARGIN_MM, maxMarginMm);
+}
+
 export function getGraphPrintSizeMm(settings: PdfExportSettings) {
   const graphWidth = Math.max(1, Math.round(safePositive(settings.graphWidth, 1)));
   const graphHeight = Math.max(1, Math.round(safePositive(settings.graphHeight, 1)));
@@ -130,19 +142,28 @@ export function createPdfExportPlan({
     pageHeightMm,
     cellSizeMm,
   });
+  const pageHorizontalMarginMm = safeHorizontalPageMarginMm(pageWidthMm, cellSizeMm);
+  const printablePageWidthMm = Math.max(
+    Math.min(pageWidthMm, cellSizeMm),
+    pageWidthMm - pageHorizontalMarginMm * 2,
+  );
   const printablePageHeightMm = Math.max(cellSizeMm, pageHeightMm - pageVerticalMarginMm * 2);
-  const tileWidthMm = pageSpanWithoutCuttingCells(pageWidthMm, graphSize.widthMm, cellSizeMm);
+  const tileWidthMm = pageSpanWithoutCuttingCells(printablePageWidthMm, graphSize.widthMm, cellSizeMm);
   const tileHeightMm = pageSpanWithoutCuttingCells(printablePageHeightMm, graphSize.heightMm, cellSizeMm);
   const pagesX = Math.max(1, Math.ceil(graphSize.widthMm / tileWidthMm));
   const pagesY = Math.max(1, Math.ceil(graphSize.heightMm / tileHeightMm));
-  const singlePageOffsetX = alignmentOffset(Math.max(0, pageWidthMm - graphSize.widthMm), settings.printHorizontalAlignment ?? "center");
+  const singlePageOffsetX =
+    pageHorizontalMarginMm +
+    alignmentOffset(Math.max(0, printablePageWidthMm - graphSize.widthMm), settings.printHorizontalAlignment ?? "center");
   const singlePageOffsetY =
     pageVerticalMarginMm +
     alignmentOffset(Math.max(0, printablePageHeightMm - graphSize.heightMm), settings.printVerticalAlignment ?? "center");
   const tiles: PdfExportTile[] = [];
 
-  for (let tileY = 0; tileY < pagesY; tileY += 1) {
-    for (let tileX = 0; tileX < pagesX; tileX += 1) {
+  // Keep every vertical page in a column together before advancing right. This
+  // is the natural order for assembling or reading a wide tiled graph.
+  for (let tileX = 0; tileX < pagesX; tileX += 1) {
+    for (let tileY = 0; tileY < pagesY; tileY += 1) {
       const sourceStartMmX = tileX * tileWidthMm;
       const sourceStartMmY = tileY * tileHeightMm;
       const sourceEndMmX = Math.min(sourceStartMmX + tileWidthMm, graphSize.widthMm);
@@ -153,6 +174,7 @@ export function createPdfExportPlan({
       const sourceEndY = Math.round((sourceEndMmY / graphSize.heightMm) * safeCanvasHeight);
       const destinationWidthMm = sourceEndMmX - sourceStartMmX;
       const destinationHeightMm = sourceEndMmY - sourceStartMmY;
+      const destinationXMm = pagesX === 1 ? singlePageOffsetX : pageHorizontalMarginMm;
       const destinationYMm = pagesY === 1 ? singlePageOffsetY : pageVerticalMarginMm;
 
       tiles.push({
@@ -163,10 +185,12 @@ export function createPdfExportPlan({
         sourceY,
         sourceWidth: Math.max(1, sourceEndX - sourceX),
         sourceHeight: Math.max(1, sourceEndY - sourceY),
-        destinationXMm: pagesX === 1 ? singlePageOffsetX : 0,
+        destinationXMm,
         destinationYMm,
         destinationWidthMm,
         destinationHeightMm,
+        cutGuideLeftXMm: destinationXMm,
+        cutGuideRightXMm: destinationXMm + destinationWidthMm,
         cutGuideTopYMm: destinationYMm,
         cutGuideBottomYMm: destinationYMm + destinationHeightMm,
       });
@@ -179,7 +203,9 @@ export function createPdfExportPlan({
     graphHeightMm: graphSize.heightMm,
     pageWidthMm,
     pageHeightMm,
+    pageHorizontalMarginMm,
     pageVerticalMarginMm,
+    printablePageWidthMm,
     printablePageHeightMm,
     pagesX,
     pagesY,

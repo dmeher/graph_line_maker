@@ -327,8 +327,8 @@ export function maskFromVectorizedImageData(imageData: ImageDataLike) {
   }
 
   count += repairVectorizedInkPinholes(mask, coverage, imageData.width, imageData.height);
-  // After pinhole repair, so a repaired hole counts as ink when deciding which
-  // neighbouring pixels are interior.
+  // After pinhole repair, so a repaired hole counts as ink when deciding
+  // which neighbouring pixels are interior.
   solidifyInteriorVectorInk(mask, coverage, imageData.width, imageData.height);
 
   return { mask, coverage, count };

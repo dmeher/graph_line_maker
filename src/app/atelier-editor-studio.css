@@ -5802,7 +5802,7 @@
     max-height: calc(100dvh - var(--cc-focus-short-top) - 12px);
   }
 
-  .command-canvas .command-canvas-pod--focus[data-dock="right-main"][data-collapsed="true"] {
+  .command-canvas .command-canvas-pod--focus[data-dock="right-main"][data-collapsed="true"]:not([data-collapse-direction="horizontal"]) {
     height: 46px;
     min-height: 46px;
     max-height: 46px;

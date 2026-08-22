@@ -173,6 +173,8 @@ test("source processing cache key changes only for relevant source fields", () =
   const lineAdjusted = sourceProcessingCacheKey(source({ vectorizerLineAdjust: 0.5 }), layout);
   const thresholdChanged = sourceProcessingCacheKey(source({ vectorizerInkThreshold: 190 }), layout);
   const smoothed = sourceProcessingCacheKey(source({ vectorizerFidelity: "smooth" }), layout);
+  const cleanThin = sourceProcessingCacheKey(source({ vectorizerFidelity: "clean-thin" }), layout);
+  const directRaster = sourceProcessingCacheKey(source({ vectorize: false }), layout);
   const imageChanged = sourceProcessingCacheKey(source({ path: "sources/next.png" }), layout);
 
   assert.equal(renamed, base);
@@ -183,6 +185,9 @@ test("source processing cache key changes only for relevant source fields", () =
   assert.notEqual(lineAdjusted, base);
   assert.notEqual(thresholdChanged, base);
   assert.notEqual(smoothed, base);
+  assert.notEqual(cleanThin, base);
+  assert.notEqual(cleanThin, smoothed);
+  assert.notEqual(directRaster, base);
   assert.notEqual(imageChanged, base);
 });
 

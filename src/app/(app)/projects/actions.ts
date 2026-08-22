@@ -50,7 +50,7 @@ import {
   sourceImagePath,
   thumbnailPathFor,
 } from "@/lib/projects";
-import { getObjectStore, mediaKey } from "@/lib/storage/media";
+import { getObjectStore, mediaKey, tryGetObjectStore } from "@/lib/storage/media";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
@@ -83,6 +83,12 @@ const vectorizerLineAdjustSchema = z
     "Line adjustment must use 0.5 pixel steps.",
   );
 const groupIdSchema = z.string().min(1).max(80).nullable().optional();
+
+function isProjectScopedAssetPath(path: string | null | undefined, userId: string, projectId: string): path is string {
+  if (!path || !path.startsWith(`${userId}/${projectId}/`)) return false;
+  return !path.split("/").some((segment) => segment === "." || segment === "..");
+}
+
 const eraseStrokeSchema = z.object({
   // Normalized UV coordinates across the source's working canvas; radius is a fraction of the canvas width.
   points: z
@@ -164,6 +170,7 @@ const sourceImageSchema = z.object({
   vectorizerInkThreshold: z.number().int().min(MIN_VECTORIZER_INK_THRESHOLD).max(MAX_VECTORIZER_INK_THRESHOLD),
   vectorizerSketchRemoval: z.number().int().min(MIN_VECTORIZER_SKETCH_REMOVAL).max(MAX_VECTORIZER_SKETCH_REMOVAL).optional(),
   vectorizerFidelity: z.enum(GRAPH_VECTORIZER_FIDELITY_KEYS),
+  vectorize: z.boolean().optional(),
   x: z.number().min(-1000).max(1000),
   y: z.number().min(-1000).max(1000),
   topPadding: z.number().min(-1000).max(1000),
@@ -372,43 +379,88 @@ export async function saveProjectState(input: SaveProjectStateInput) {
   return { ok: true, message: "Project saved." };
 }
 
-export async function deleteProject(formData: FormData) {
+export async function deleteProject(formData: FormData): Promise<{ ok: boolean; message?: string }> {
   const projectId = String(formData.get("projectId") || "");
-  if (!projectId) throw new Error("Project id is required.");
+  if (!projectId) return { ok: false, message: "Project id is required." };
 
-  const owner = await assertProjectAccess(projectId);
-  const supabase = getSupabaseAdmin();
-  const settings = normalizeGraphSettings(owner.settings);
+  try {
+    const owner = await assertProjectAccess(projectId);
+    const projectAssetId = owner.id;
+    const settings = normalizeGraphSettings(owner.settings);
+    // Do not trust persisted JSON paths for deletion. Only paths under this
+    // project's immutable owner prefix are eligible for later R2 cleanup.
+    const cleanupPaths = Array.from(
+      new Set(
+        [
+          owner.original_image_path,
+          ...settings.sourceImages.map((source) => source.path),
+          ...settings.clipartAssets.map((asset) => asset.path),
+        ].filter((path): path is string => isProjectScopedAssetPath(path, owner.user_id, projectAssetId)),
+      ),
+    );
 
-  const originalPaths = Array.from(
-    new Set(
-      [
-        owner.original_image_path,
-        ...settings.sourceImages.map((source) => source.path),
-        ...settings.clipartAssets.map((asset) => asset.path),
-      ].filter((path): path is string => Boolean(path)),
-    ),
-  );
-  // Every asset's thumbnail lives beside it and must go with it, or the bucket
-  // accumulates derivatives whose originals no longer exist.
-  const keys = [
-    ...originalPaths.flatMap((path) => [
-      mediaKey(ORIGINAL_IMAGES_BUCKET, path),
-      mediaKey(ORIGINAL_IMAGES_BUCKET, thumbnailPathFor(path)),
-    ]),
-    ...(owner.processed_image_path
-      ? [
-        mediaKey(PROCESSED_IMAGES_BUCKET, owner.processed_image_path),
-        mediaKey(PROCESSED_IMAGES_BUCKET, thumbnailPathFor(owner.processed_image_path)),
-      ]
-      : []),
-  ];
-  // One batched DeleteObjects call replaces the previous per-bucket round trips.
-  if (keys.length) await getObjectStore().deleteObjects(keys);
+    // The project row is the source of truth for dashboard visibility. R2 is a
+    // separate system, so a missing local configuration or one stale object
+    // must not make a valid project impossible to delete.
+    const { data: deletedProject, error } = await getSupabaseAdmin()
+      .from("projects")
+      .delete()
+      .eq("id", projectAssetId)
+      .eq("user_id", owner.user_id)
+      .select("id")
+      .maybeSingle();
+    if (error) {
+      console.error("Unable to delete project record.", { projectId, error });
+      return { ok: false, message: "Unable to delete the project. Please try again." };
+    }
+    if (!deletedProject) return { ok: false, message: "Project not found. Refresh the dashboard and try again." };
 
-  const { error } = await supabase.from("projects").delete().eq("id", projectId).eq("user_id", owner.user_id);
-  if (error) throw new Error(error.message);
-  revalidatePath("/dashboard");
+    revalidatePath("/dashboard");
+
+    // Cleanup is best-effort after the database mutation. It prevents a storage
+    // failure from leaving a now-deleted project stuck on the dashboard.
+    try {
+      // Every asset's thumbnail lives beside it and must go with it, or the
+      // bucket accumulates derivatives whose originals no longer exist. Build
+      // object keys here so malformed legacy data cannot block the DB delete.
+      const processedImagePath = isProjectScopedAssetPath(owner.processed_image_path, owner.user_id, projectAssetId)
+        ? owner.processed_image_path
+        : null;
+      const processedThumbnailPath = isProjectScopedAssetPath(owner.processed_thumb_path, owner.user_id, projectAssetId)
+        ? owner.processed_thumb_path
+        : processedImagePath
+          ? thumbnailPathFor(processedImagePath)
+          : null;
+      const keys = [
+        ...cleanupPaths.flatMap((path) => [
+          mediaKey(ORIGINAL_IMAGES_BUCKET, path),
+          mediaKey(ORIGINAL_IMAGES_BUCKET, thumbnailPathFor(path)),
+        ]),
+        ...(processedImagePath && processedThumbnailPath
+          ? [
+            mediaKey(PROCESSED_IMAGES_BUCKET, processedImagePath),
+            mediaKey(PROCESSED_IMAGES_BUCKET, processedThumbnailPath),
+          ]
+          : []),
+      ];
+      const objectStore = tryGetObjectStore();
+      if (objectStore && keys.length) {
+        await objectStore.deleteObjects(keys);
+      } else if (keys.length) {
+        console.warn("Project was deleted without storage cleanup because R2 is not configured.", { projectId });
+      }
+    } catch (cleanupError) {
+      console.error("Project was deleted, but some stored assets could not be cleaned up.", {
+        projectId,
+        cleanupError,
+      });
+    }
+
+    return { ok: true };
+  } catch (error) {
+    console.error("Unable to delete project.", { projectId, error });
+    return { ok: false, message: "Unable to delete the project. Please try again." };
+  }
 }
 
 /**

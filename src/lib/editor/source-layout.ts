@@ -262,6 +262,7 @@ export function sourceProcessingCacheKey(source: GraphSourceImage, layout: Pick<
     source.imageDenoiseLevel,
     source.imageEdgeDetection,
     source.imageColorQuantization,
+    source.vectorize !== false ? 1 : 0,
     source.vectorizerLineAdjust,
     source.vectorizerInkThreshold,
     source.vectorizerSketchRemoval,

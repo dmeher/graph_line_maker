@@ -15,7 +15,9 @@ import {
   MoreHorizontal,
   Move,
   PanelLeftClose,
+  PanelLeftOpen,
   PanelRightClose,
+  PanelRightOpen,
   PanelTopClose,
   Pin,
   RotateCcw,
@@ -572,6 +574,10 @@ export const CommandCanvasPod = memo(function CommandCanvasPod({
   const HorizontalCollapseIcon = dock === "right-top" || dock === "right-main"
     ? PanelRightClose
     : PanelLeftClose;
+  const HorizontalExpandIcon = dock === "right-top" || dock === "right-main"
+    ? PanelRightOpen
+    : PanelLeftOpen;
+  const horizontallyCollapsed = collapsed && collapseDirection === "horizontal";
   const headerInteractive = Boolean(onHeaderPointerDown || onNudge || onRequestCollapse);
 
   return (
@@ -624,7 +630,7 @@ export const CommandCanvasPod = memo(function CommandCanvasPod({
 
         <div className="command-canvas-pod__header-actions">
           {headerActions}
-          {onRequestCollapse ? (
+          {onRequestCollapse && !horizontallyCollapsed ? (
             <button
               type="button"
               className="command-canvas-pod__menu-trigger"
@@ -636,6 +642,20 @@ export const CommandCanvasPod = memo(function CommandCanvasPod({
               {collapsed
                 ? <ChevronDown size={17} aria-hidden="true" />
                 : <PanelTopClose size={17} aria-hidden="true" />}
+            </button>
+          ) : null}
+          {onRequestHorizontalCollapse ? (
+            <button
+              type="button"
+              className="command-canvas-pod__menu-trigger"
+              onClick={horizontallyCollapsed ? onRequestCollapse : onRequestHorizontalCollapse}
+              aria-label={`${horizontallyCollapsed ? "Expand" : "Collapse"} ${title} module horizontally`}
+              aria-controls={bodyId}
+              aria-expanded={!horizontallyCollapsed}
+            >
+              {horizontallyCollapsed
+                ? <HorizontalExpandIcon size={17} aria-hidden="true" />
+                : <HorizontalCollapseIcon size={17} aria-hidden="true" />}
             </button>
           ) : null}
           {hasMenuActions ? (

@@ -118,6 +118,8 @@ export type GraphSourceImage = {
   /** Erosion steps used to strip interior sketch/hatch strokes. 0 = off. Optional for projects saved before the setting existed. */
   vectorizerSketchRemoval?: number;
   vectorizerFidelity: GraphVectorizerFidelity;
+  /** False places the original raster directly without traced fill regions; legacy records default to true. */
+  vectorize?: boolean;
   x: number;
   y: number;
   topPadding: number;

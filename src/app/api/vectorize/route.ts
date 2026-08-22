@@ -10,6 +10,14 @@ import {
   clampVectorizerSketchRemoval,
   type GraphVectorizerFidelity,
 } from "@/lib/graph-paper";
+import {
+  resolveVectorTraceProfile,
+  type VectorTraceProfile,
+} from "@/lib/canvas/vector-trace-profile";
+import {
+  binaryMaskToOpaqueRgba,
+  prepareVectorTraceMask,
+} from "@/lib/canvas/vector-mask-preparation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,27 +28,25 @@ const SHAPE_TAG_PATTERN = /<(path|polygon|polyline|line|rect|circle|ellipse)\b([
 const SVG_ATTR_PATTERN = /\s(?:fill|stroke|stroke-width|stroke-linecap|stroke-linejoin|style)=("[^"]*"|'[^']*')/gi;
 
 type VectorizerModule = typeof import("@neplex/vectorizer");
-
 function normalizeFidelity(value: FormDataEntryValue | null): GraphVectorizerFidelity {
   return GRAPH_VECTORIZER_FIDELITY_KEYS.includes(value as GraphVectorizerFidelity)
     ? (value as GraphVectorizerFidelity)
     : "exact";
 }
 
-function vectorizerConfig(vectorizer: VectorizerModule, fidelity: GraphVectorizerFidelity) {
-  const exact = fidelity === "exact";
+function vectorizerConfig(vectorizer: VectorizerModule, profile: VectorTraceProfile) {
   return {
     colorMode: vectorizer.ColorMode.Binary,
     hierarchical: vectorizer.Hierarchical.Stacked,
-    mode: exact ? vectorizer.PathSimplifyMode.None : vectorizer.PathSimplifyMode.Spline,
-    filterSpeckle: exact ? 0 : 4,
-    colorPrecision: 6,
-    layerDifference: 8,
-    cornerThreshold: 60,
-    lengthThreshold: exact ? 1 : 4,
-    maxIterations: exact ? 0 : 2,
-    spliceThreshold: 45,
-    pathPrecision: exact ? 2 : 3,
+    mode: profile.mode === "none" ? vectorizer.PathSimplifyMode.None : vectorizer.PathSimplifyMode.Spline,
+    filterSpeckle: profile.filterSpeckle,
+    colorPrecision: profile.colorPrecision,
+    layerDifference: profile.layerDifference,
+    cornerThreshold: profile.cornerThreshold,
+    lengthThreshold: profile.lengthThreshold,
+    maxIterations: profile.maxIterations,
+    spliceThreshold: profile.spliceThreshold,
+    pathPrecision: profile.pathPrecision,
   };
 }
 
@@ -51,66 +57,9 @@ function styleSvgForMask(svg: string) {
   });
 }
 
-function imageMaskFromPixels(pixels: Buffer, threshold: number) {
-  const mask = new Uint8Array(pixels.length / 4);
-  for (let pixel = 0, offset = 0; pixel < mask.length; pixel += 1, offset += 4) {
-    const alpha = pixels[offset + 3];
-    if (alpha <= 8) continue;
-    const red = pixels[offset];
-    const green = pixels[offset + 1];
-    const blue = pixels[offset + 2];
-    const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-    mask[pixel] = luminance <= threshold ? 1 : 0;
-  }
-  return mask;
-}
-
-function erodeMask(mask: Uint8Array, width: number, height: number, includeDiagonals = true) {
-  const next = new Uint8Array(mask.length);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      let keep = 1;
-      for (let dy = -1; dy <= 1 && keep; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          if (!includeDiagonals && Math.abs(dx) + Math.abs(dy) > 1) continue;
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= width || ny >= height || !mask[ny * width + nx]) {
-            keep = 0;
-            break;
-          }
-        }
-      }
-      next[y * width + x] = keep;
-    }
-  }
-  return next;
-}
-
-function dilateMask(mask: Uint8Array, width: number, height: number, includeDiagonals = true) {
-  const next = new Uint8Array(mask.length);
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      let fill = 0;
-      for (let dy = -1; dy <= 1 && !fill; dy += 1) {
-        for (let dx = -1; dx <= 1; dx += 1) {
-          if (!includeDiagonals && Math.abs(dx) + Math.abs(dy) > 1) continue;
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx >= 0 && ny >= 0 && nx < width && ny < height && mask[ny * width + nx]) {
-            fill = 1;
-            break;
-          }
-        }
-      }
-      next[y * width + x] = fill;
-    }
-  }
-  return next;
-}
-
 /**
- * Removes interior sketch/hatch strokes with a morphological opening.
+ * Decodes the raster before the shared vector-mask preparation helper applies
+ * thresholding, sketch removal, and Line adjustment.
  *
  * Hand-drawn art commonly shades the inside of a shape with thin scattered
  * lines. Eroding by N steps deletes every stroke narrower than about 2N pixels;
@@ -122,54 +71,6 @@ function dilateMask(mask: Uint8Array, width: number, height: number, includeDiag
  * The result is that the shape's interior becomes an empty enclosed region,
  * which the processor then labels as a fill region the user can colour.
  */
-function removeSketchStrokes(mask: Uint8Array, width: number, height: number, strength: number) {
-  if (strength <= 0) return mask;
-
-  let opened = mask;
-  for (let step = 0; step < strength; step += 1) {
-    opened = erodeMask(opened, width, height);
-  }
-  for (let step = 0; step < strength; step += 1) {
-    opened = dilateMask(opened, width, height);
-  }
-
-  // Erosion is destructive: on artwork whose outlines are themselves thinner
-  // than the chosen strength this deletes everything. Falling back to the
-  // original mask keeps a too-aggressive setting recoverable in the UI instead
-  // of rendering a blank layer.
-  return opened.some((value) => value) ? opened : mask;
-}
-
-function adjustMaskThickness(mask: Uint8Array, width: number, height: number, lineAdjust: number) {
-  let adjusted = mask;
-  const amount = Math.abs(lineAdjust);
-  const steps = Math.floor(amount);
-  const hasHalfStep = amount - steps >= VECTORIZER_LINE_ADJUST_STEP;
-  const thicken = lineAdjust > 0;
-
-  for (let step = 0; step < steps; step += 1) {
-    adjusted = thicken ? dilateMask(adjusted, width, height) : erodeMask(adjusted, width, height);
-  }
-
-  if (hasHalfStep) {
-    adjusted = thicken ? dilateMask(adjusted, width, height, false) : erodeMask(adjusted, width, height, false);
-  }
-
-  return adjusted;
-}
-
-function rawPixelsFromMask(mask: Uint8Array) {
-  const pixels = Buffer.alloc(mask.length * 4);
-  for (let pixel = 0, offset = 0; pixel < mask.length; pixel += 1, offset += 4) {
-    const value = mask[pixel] ? 0 : 255;
-    pixels[offset] = value;
-    pixels[offset + 1] = value;
-    pixels[offset + 2] = value;
-    pixels[offset + 3] = 255;
-  }
-  return pixels;
-}
-
 async function prepareRawVectorInput(
   vectorizer: VectorizerModule,
   image: File,
@@ -178,15 +79,20 @@ async function prepareRawVectorInput(
   sketchRemoval: number,
 ) {
   const decoded = await vectorizer.readImage(Buffer.from(await image.arrayBuffer()));
-  const mask = imageMaskFromPixels(decoded.pixels, inkThreshold);
-  // Strip sketch strokes before any thickness adjustment, so line adjust
-  // operates on the cleaned outlines rather than re-thickening the hatching.
-  const cleanedMask = removeSketchStrokes(mask, decoded.width, decoded.height, sketchRemoval);
-  const adjustedMask = lineAdjust ? adjustMaskThickness(cleanedMask, decoded.width, decoded.height, lineAdjust) : cleanedMask;
+  const prepared = prepareVectorTraceMask(
+    { data: decoded.pixels, width: decoded.width, height: decoded.height },
+    {
+      inkThreshold,
+      lineAdjust,
+      sketchRemoval,
+      lineAdjustStep: VECTORIZER_LINE_ADJUST_STEP,
+    },
+  );
   return {
-    pixels: rawPixelsFromMask(adjustedMask),
-    width: decoded.width,
-    height: decoded.height,
+    prepared,
+    pixels: Buffer.from(binaryMaskToOpaqueRgba(prepared.mask)),
+    width: prepared.width,
+    height: prepared.height,
   };
 }
 
@@ -196,13 +102,20 @@ async function createSvg(
   inkThreshold: number,
   fidelity: GraphVectorizerFidelity,
   sketchRemoval: number,
-) {
+): Promise<string> {
   const vectorizer = await import("@neplex/vectorizer");
-  const rawInput = await prepareRawVectorInput(vectorizer, image, lineAdjust, inkThreshold, sketchRemoval);
+  const contourProfile = resolveVectorTraceProfile(fidelity, inkThreshold, lineAdjust);
+  const rawInput = await prepareRawVectorInput(
+    vectorizer,
+    image,
+    contourProfile.lineAdjust,
+    contourProfile.inkThreshold,
+    sketchRemoval,
+  );
   const svg = await vectorizer.vectorizeRaw(
     rawInput.pixels,
     { width: rawInput.width, height: rawInput.height },
-    vectorizerConfig(vectorizer, fidelity),
+    vectorizerConfig(vectorizer, contourProfile),
   );
   const styledSvg = styleSvgForMask(svg);
 
@@ -240,13 +153,20 @@ export async function POST(request: NextRequest) {
     const inkThreshold = clampVectorizerInkThreshold(formData.get("inkThreshold") ?? DEFAULT_VECTORIZER_INK_THRESHOLD);
     const fidelity = normalizeFidelity(formData.get("fidelity"));
     const sketchRemoval = clampVectorizerSketchRemoval(formData.get("sketchRemoval") ?? DEFAULT_VECTORIZER_SKETCH_REMOVAL);
-    const svg = await createSvg(image, lineAdjust, inkThreshold, fidelity, sketchRemoval);
+    const svg = await createSvg(
+      image,
+      lineAdjust,
+      inkThreshold,
+      fidelity,
+      sketchRemoval,
+    );
 
+    const headers = new Headers({
+      "Cache-Control": "no-store",
+      "Content-Type": "image/svg+xml; charset=utf-8",
+    });
     return new NextResponse(svg, {
-      headers: {
-        "Cache-Control": "no-store",
-        "Content-Type": "image/svg+xml; charset=utf-8",
-      },
+      headers,
     });
   } catch (error) {
     if (error instanceof Error && error.message === "Sign in is required.") {

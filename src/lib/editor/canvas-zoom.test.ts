@@ -14,6 +14,7 @@ import {
 } from "./canvas-zoom.ts";
 
 test("zoom is clamped to the supported range", () => {
+  assert.equal(MIN_CANVAS_ZOOM, 0.01);
   assert.equal(clampCanvasZoom(2), 2);
   assert.equal(clampCanvasZoom(12), MAX_CANVAS_ZOOM);
   assert.equal(clampCanvasZoom(0.01), MIN_CANVAS_ZOOM);
@@ -47,13 +48,13 @@ test("each step moves ten percentage points and stops at the bounds", () => {
   assert.equal(canvasZoomPercent(stepCanvasZoom(1, 1)), 110);
   assert.equal(canvasZoomPercent(stepCanvasZoom(1, -1)), 90);
   assert.equal(canvasZoomPercent(stepCanvasZoom(MAX_CANVAS_ZOOM, 1)), 500);
-  assert.equal(canvasZoomPercent(stepCanvasZoom(MIN_CANVAS_ZOOM, -1)), 35);
+  assert.equal(canvasZoomPercent(stepCanvasZoom(MIN_CANVAS_ZOOM, -1)), 1);
 
   // Repeated steps must not drift off whole percents.
   let zoom = MIN_CANVAS_ZOOM;
   for (let press = 0; press < 12; press += 1) zoom = stepCanvasZoom(zoom, 1);
-  assert.equal(canvasZoomPercent(zoom), 155);
-  assert.equal(zoom, 1.55);
+  assert.equal(canvasZoomPercent(zoom), 121);
+  assert.equal(zoom, 1.21);
 });
 
 test("a typed percentage is read with or without decoration", () => {
@@ -66,7 +67,8 @@ test("a typed percentage is read with or without decoration", () => {
 
 test("an out-of-range percentage clamps, but unusable text is rejected", () => {
   assert.equal(parseCanvasZoomPercent("9000"), MAX_CANVAS_ZOOM);
-  assert.equal(parseCanvasZoomPercent("5"), MIN_CANVAS_ZOOM);
+  assert.equal(parseCanvasZoomPercent("1"), MIN_CANVAS_ZOOM);
+  assert.equal(parseCanvasZoomPercent("0.5"), MIN_CANVAS_ZOOM);
   // Null lets the caller restore the current zoom instead of jumping.
   assert.equal(parseCanvasZoomPercent(""), null);
   assert.equal(parseCanvasZoomPercent("abc"), null);

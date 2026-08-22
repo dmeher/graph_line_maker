@@ -9,6 +9,7 @@ import {
   backgroundRemovalSignature,
   eraseStrokesSignature,
   normalizeBackgroundRemoval,
+  normalizeEraseBrushPoint,
   normalizeEraseStrokes,
   normalizeGroupId,
   normalizeLayerGroups,
@@ -86,6 +87,11 @@ test("signatures change when erase/background state changes", () => {
   assert.notEqual(b, c);
   assert.equal(backgroundRemovalSignature(undefined), "0");
   assert.notEqual(backgroundRemovalSignature({ enabled: true, tolerance: 0.1 }), backgroundRemovalSignature({ enabled: true, tolerance: 0.2 }));
+});
+
+test("normalizeEraseBrushPoint bounds and rounds one transient brush sample", () => {
+  assert.deepEqual(normalizeEraseBrushPoint({ x: 0.123456, y: 0.654321 }), { x: 0.1235, y: 0.6543 });
+  assert.deepEqual(normalizeEraseBrushPoint({ x: -4, y: 8 }), { x: -0.001, y: 1.001 });
 });
 
 test("the erase signature includes each normalized stroke point and configuration", () => {

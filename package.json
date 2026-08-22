@@ -11,6 +11,11 @@
     "test:e2e": "playwright test",
     "test:pdf-export": "node --experimental-strip-types --test src/lib/canvas/pdf-layout.test.ts"
   },
+  "allowScripts": {
+    "core-js": false,
+    "sharp@0.34.5": true,
+    "unrs-resolver@1.12.2": true
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1095.0",
     "@aws-sdk/s3-request-presigner": "^3.1095.0",

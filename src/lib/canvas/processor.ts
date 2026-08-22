@@ -788,7 +788,7 @@ function placeVectorizedSourceImageData(
 }
 
 function placeSourceImageData(
-  sourceCanvas: HTMLCanvasElement,
+  sourceCanvas: CanvasLike,
   placement: VectorizerSourcePlacement,
   outputWidth: number,
   outputHeight: number,

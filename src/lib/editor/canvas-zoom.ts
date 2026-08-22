@@ -4,7 +4,8 @@
  * clamp from drifting between the surfaces that can change zoom.
  */
 
-export const MIN_CANVAS_ZOOM = 0.35;
+/** Keep the full graph reachable even for the tallest supported canvases. */
+export const MIN_CANVAS_ZOOM = 0.1;
 export const MAX_CANVAS_ZOOM = 5;
 export const DEFAULT_CANVAS_ZOOM = 1;
 /** One press of zoom in/out moves the canvas by ten percentage points. */
@@ -38,8 +39,8 @@ export function canvasZoomPercent(zoom: number) {
 
 /**
  * Moves zoom one step in or out. Rounding every step keeps the stored value on
- * whole percents: repeated float addition otherwise drifts (0.35 + 0.1 is not
- * 0.45), and that drift reaches canvas layout maths, not just the readout.
+ * whole percents: repeated float addition otherwise drifts (0.01 + 0.1 is not
+ * 0.11), and that drift reaches canvas layout maths, not just the readout.
  */
 export function stepCanvasZoom(zoom: number, direction: 1 | -1) {
   return roundCanvasZoom(clampCanvasZoom(zoom) + direction * CANVAS_ZOOM_STEP);

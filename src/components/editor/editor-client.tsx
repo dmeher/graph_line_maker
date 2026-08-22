@@ -256,8 +256,6 @@ import {
 } from "@/lib/editor/command-canvas";
 import {
   DEFAULT_CANVAS_ZOOM,
-  MAX_CANVAS_ZOOM,
-  MIN_CANVAS_ZOOM,
   actualSizeCanvasZoom,
   roundCanvasZoom,
   stepCanvasZoom,
@@ -4864,11 +4862,7 @@ export function EditorClient({
     event.preventDefault();
     const points = Array.from(canvasPointersRef.current.values()).slice(0, 2);
     const center = canvasPointerCenter(points);
-    const nextZoom = Math.max(
-      MIN_CANVAS_ZOOM,
-      Math.min(MAX_CANVAS_ZOOM, pinch.zoom * (canvasPointerDistance(points) / pinch.distance)),
-    );
-    setZoom(Math.round(nextZoom * 100) / 100);
+    setZoom(roundCanvasZoom(pinch.zoom * (canvasPointerDistance(points) / pinch.distance)));
     setCanvasPan({
       x: pinch.panX + center.x - pinch.centerX,
       y: pinch.panY + center.y - pinch.centerY,

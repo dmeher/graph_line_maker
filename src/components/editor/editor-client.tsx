@@ -6655,6 +6655,75 @@ export function EditorClient({
       });
   }
 
+  function openGraphPreview() {
+    if (processing || dragPreviewSourceId) {
+      setNotice({ tone: "info", text: "Finishing the canvas update before opening the preview." });
+      return;
+    }
+    // The flattened canvas is the user-facing graph image: paper, grid, and
+    // artwork are already composed together before the repeating strip is made.
+    const sourceCanvas = processedCanvasRef.current;
+    if (!sourceCanvas) {
+      setNotice({ tone: "error", text: "The graph image is not ready for preview yet." });
+      return;
+    }
+
+    // Open synchronously within the click action so normal browser popup rules
+    // do not block the tab while the canvas is being composed and PNG-encoded.
+    const previewWindow = window.open("", "_blank");
+    if (!previewWindow) {
+      setNotice({ tone: "error", text: "Unable to open the preview tab. Allow pop-ups for this site and try again." });
+      return;
+    }
+    previewWindow.opener = null;
+    const previewDocument = previewWindow.document;
+    previewDocument.title = `${title.trim() || "Graph pixel chart"} preview`;
+    previewDocument.documentElement.style.background = "#111827";
+    previewDocument.body.style.cssText = "margin:0;min-height:100vh;display:grid;place-items:center;background:#111827;color:#e5e7eb;font:14px system-ui,sans-serif";
+    const loading = previewDocument.createElement("p");
+    loading.textContent = "Preparing preview…";
+    previewDocument.body.replaceChildren(loading);
+
+    const finishPreview = startGraphPerformanceStage("export", {
+      format: "linear-preview",
+      width: sourceCanvas.width,
+      height: sourceCanvas.height,
+    });
+    void import("@/lib/canvas/linear-graph-preview")
+      .then(({ createLinearGraphPreview }) => {
+        const preview = createLinearGraphPreview(sourceCanvas, {
+          backgroundColor: settings.backgroundColor,
+          borderColor: settings.gridLineColor,
+        });
+        return canvasToBlob(preview.canvas).then((blob) => ({ ...preview, blob }));
+      })
+      .then(({ layout, blob }) => {
+        const previewUrl = URL.createObjectURL(blob);
+        if (previewWindow.closed) {
+          URL.revokeObjectURL(previewUrl);
+          finishPreview({ cancelled: true });
+          return;
+        }
+        const image = previewDocument.createElement("img");
+        image.src = previewUrl;
+        image.alt = "Linear graph preview with alternating mirrored repeats";
+        image.style.cssText = "display:block;max-width:100vw;max-height:100vh;width:auto;height:auto;box-shadow:0 18px 52px rgba(0,0,0,.45)";
+        image.addEventListener("load", () => window.setTimeout(() => URL.revokeObjectURL(previewUrl), 0), { once: true });
+        previewDocument.body.replaceChildren(image);
+        finishPreview({ completed: true, width: layout.width, height: layout.height, pixels: layout.width * layout.height });
+        setNotice({ tone: "ok", text: "Preview opened in a new tab." });
+      })
+      .catch((error) => {
+        finishPreview({ failed: true });
+        if (!previewWindow.closed) {
+          const message = previewDocument.createElement("p");
+          message.textContent = error instanceof Error ? error.message : "Unable to create preview.";
+          previewDocument.body.replaceChildren(message);
+        }
+        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to create preview." });
+      });
+  }
+
   function exportJSON() {
     if (processing || dragPreviewSourceId) {
       setNotice({ tone: "info", text: "Finishing the canvas update before exporting." });
@@ -9215,6 +9284,7 @@ export function EditorClient({
     { id: "history-redo", label: "Redo", group: "History", shortcut: "Ctrl Shift Z", run: () => restoreSettingsHistory("redo") },
     { id: "project-save", label: "Save project", group: "Project", shortcut: "Ctrl S", disabled: isPending || processing || Boolean(dragPreviewSourceId) || !title.trim(), run: () => saveProject() },
     { id: "export-png", label: "Export PNG", group: "Export", keywords: ["image", "download"], disabled: processing, run: exportPNG },
+    { id: "export-preview", label: "Preview repeating graph", group: "Export", keywords: ["landscape", "mirror", "border", "new tab"], disabled: processing || Boolean(dragPreviewSourceId), run: openGraphPreview },
     { id: "export-pdf", label: "Export tiled PDF", group: "Export", keywords: ["print", "pages"], disabled: !pdfOutputReady, run: exportPDF },
     { id: "export-json", label: "Export project JSON", group: "Export", keywords: ["settings", "backup"], run: exportJSON },
     { id: "export-print", label: "Print graph", group: "Export", keywords: ["browser", "paper"], disabled: processing, run: printGraph },
@@ -9945,6 +10015,19 @@ export function EditorClient({
                 type="button"
                 onClick={() => {
                   setIsExportMenuOpen(false);
+                  openGraphPreview();
+                }}
+                className="editor-export-option"
+                role="menuitem"
+                disabled={processing || Boolean(dragPreviewSourceId)}
+              >
+                <Eye size={16} aria-hidden="true" />
+                Preview
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsExportMenuOpen(false);
                   exportPNG();
                 }}
                 className="editor-export-option"
@@ -10262,6 +10345,7 @@ export function EditorClient({
           <button type="button" onClick={() => setMobileTab("canvas")} aria-label="Close export formats"><X size={17} aria-hidden="true" /></button>
         </header>
         <div>
+          <button type="button" onClick={() => { setMobileTab("canvas"); openGraphPreview(); }} disabled={processing || Boolean(dragPreviewSourceId)}><Eye size={18} aria-hidden="true" /><span><strong>Preview</strong><small>Ten mirrored repeats with 5 cm borders</small></span></button>
           <button type="button" onClick={() => { setMobileTab("canvas"); exportPNG(); }} disabled={processing}><ImageDown size={18} aria-hidden="true" /><span><strong>PNG image</strong><small>Flattened graph artwork</small></span></button>
           <button type="button" onClick={() => { setMobileTab("canvas"); exportPDF(); }} disabled={!pdfOutputReady}><FileText size={18} aria-hidden="true" /><span><strong>Tiled PDF</strong><small>Print-ready pages</small></span></button>
           <button type="button" onClick={() => { setMobileTab("canvas"); exportJSON(); }}><FileJson size={18} aria-hidden="true" /><span><strong>Project JSON</strong><small>Portable settings backup</small></span></button>

@@ -5,7 +5,7 @@
  */
 
 /** Keep the full graph reachable even for the tallest supported canvases. */
-export const MIN_CANVAS_ZOOM = 0.1;
+export const MIN_CANVAS_ZOOM = 0.01;
 export const MAX_CANVAS_ZOOM = 5;
 export const DEFAULT_CANVAS_ZOOM = 1;
 /** One press of zoom in/out moves the canvas by ten percentage points. */

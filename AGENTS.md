@@ -19,7 +19,7 @@ This file is the source of truth for AI coding agents working on **Graph Pixel M
 
 ## 1. Project overview
 
-Graph Pixel Maker lets signed-in users upload images (PNG, JPG, WEBP, SVG, PDF), position and crop them on a graph-paper canvas, adjust line thickness / fill / grid / palette settings, and export the result as PNG, tiled PDF, JSON, or a browser print view. Projects, palettes, and source/processed images are persisted in Supabase.
+Graph Pixel Maker lets signed-in users upload images (PNG, JPG, WEBP, SVG, PDF), position and crop them on a graph-paper canvas, adjust line thickness / fill / grid / palette settings, and export the result as PNG, tiled PDF, JSON, browser print, or a new-tab linear Preview. Projects, palettes, and source/processed images are persisted in Supabase.
 
 Key product traits:
 
@@ -342,6 +342,7 @@ GRAPH_PIXEL_DEV_USER_EMAIL=
 - `src/lib/canvas/processor.worker.ts` runs the same `pixelateLayeredCanvases` logic in the worker.
 - `src/lib/canvas/pdf-layout.ts` plans multi-page PDF/print tiles, respecting paper size, orientation, alignment, margins, and `MAX_PAGES_PER_PDF_FILE = 80`.
 - `src/lib/canvas/exports.ts` implements PNG download, PDF download, browser print, and JSON settings export. **PDF and print draw the grid as crisp vector lines** (jsPDF vector lines / per-page SVG) at physical mm widths over the **transparent artwork** tiles, so grid lines stay sharp at any print scale instead of blurring like the old baked raster. They therefore take the artwork-only canvas (`artworkCanvasRef`), not the flattened `processedCanvasRef`. PNG export still uses the flattened raster. PDF retains its established opaque vector-stroke treatment; browser print mirrors it with opaque SVG strokes and requests exact color adjustment. Preview retains the shared opacity hierarchy from `src/lib/canvas/grid-style.ts`. The dot pattern is exported as its equivalent line grid.
+- `src/lib/canvas/linear-graph-preview.ts` creates the user-initiated **Preview** image from the settled flattened graph: ten horizontal copies alternate normal/mirrored orientation, the strip is centered in a landscape canvas, and five cell (5 cm) decorative bands sit above and below. It scales before allocation to stay within `MAX_CANVAS_PIXELS`; the editor opens the resulting PNG in a new tab synchronously from the click so popup protection does not block it. Preview is presentation-only: it changes no project setting, export asset, or persisted image.
 
 ### Editor state
 

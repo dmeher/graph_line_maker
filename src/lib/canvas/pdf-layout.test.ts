@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createPdfExportPlan, getGraphPrintSizeMm } from "./pdf-layout.ts";
+import { PDF_FIRST_COLUMN_HALLMARK_MARGIN_MM, createPdfExportPlan, getGraphPrintSizeMm } from "./pdf-layout.ts";
 
 const A4_PAPER = { widthCm: 21, heightCm: 29.7 };
 
@@ -33,12 +33,12 @@ test("test2 PDF export layout keeps centimeter print size", () => {
   assert.equal(plan.totalPages, 20);
 
   const firstTile = plan.tiles[0];
-  assert.equal(firstTile.destinationXMm, 10);
+  assert.equal(firstTile.destinationXMm, 100);
   assert.equal(firstTile.destinationYMm, 0);
   assert.equal(firstTile.destinationWidthMm, 100);
   assert.equal(firstTile.destinationHeightMm, 200);
-  assert.equal(firstTile.cutGuideLeftXMm, 10);
-  assert.equal(firstTile.cutGuideRightXMm, 110);
+  assert.equal(firstTile.cutGuideLeftXMm, 100);
+  assert.equal(firstTile.cutGuideRightXMm, 200);
 
   const lastTile = plan.tiles.at(-1);
   assert.ok(lastTile);
@@ -257,6 +257,34 @@ test("an 80-cell A4 graph tiles into 10 mm-safe columns without clipping cells",
     assert.equal((tile.destinationWidthMm / tile.sourceWidth) * 40, 10);
     assert.equal(tile.cutGuideLeftXMm, tile.destinationXMm);
     assert.equal(tile.cutGuideRightXMm, tile.destinationXMm + tile.destinationWidthMm);
+  }
+});
+
+test("a multi-row wide graph reserves the hallmark lane for every row in its first column", () => {
+  const plan = createPdfExportPlan({
+    settings: {
+      graphWidth: 80,
+      graphHeight: 125,
+      cellSizeCm: 1,
+      printOrientation: "portrait",
+    },
+    paper: A4_PAPER,
+    canvasWidth: 3200,
+    canvasHeight: 5000,
+  });
+
+  assert.equal(plan.pagesX, 5);
+  assert.equal(plan.pagesY, 5);
+  for (const tile of plan.tiles.filter((tile) => tile.tileX === 0)) {
+    assert.equal(tile.destinationXMm, PDF_FIRST_COLUMN_HALLMARK_MARGIN_MM);
+    assert.equal(tile.destinationWidthMm, 160);
+    assert.equal(tile.destinationXMm + tile.destinationWidthMm, plan.pageWidthMm - 10);
+    assert.equal((tile.destinationWidthMm / tile.sourceWidth) * 40, 10);
+  }
+
+  for (const tile of plan.tiles.filter((tile) => tile.tileX > 0 && tile.destinationWidthMm === 190)) {
+    assert.equal(tile.destinationXMm, 10);
+    assert.equal(tile.destinationXMm + tile.destinationWidthMm, plan.pageWidthMm - 10);
   }
 });
 

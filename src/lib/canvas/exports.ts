@@ -1,6 +1,7 @@
 import { DEFAULT_PRINT_PAPER_SIZE, GRAPH_MAJOR_CELL_PIXELS, PRINT_PAPER_SIZES } from "@/lib/graph-paper";
 import { createPdfExportPlan, MAX_PAGES_PER_PDF_FILE } from "@/lib/canvas/pdf-layout";
 import { isGraphCanvasSizedForSettings } from "@/lib/canvas/pdf-export-guard";
+import { companyHallmarkPlacement } from "@/lib/canvas/company-hallmark-layout";
 import {
   GRID_BUCKET_ORDER,
   GRID_BUCKET_OPACITY,
@@ -37,50 +38,8 @@ const CUT_GUIDE_GAP_MM = 0.5;
 const LEFT_RIGHT_OUTSIDE_Y_OFFSET = 0.45;
 const OUTSIDE_GRID_NUMBER_COLOR = "#000000";
 const COMPANY_HALLMARK_PATH = "/brand/company-hallmark.jpeg";
-const COMPANY_HALLMARK_ASPECT_RATIO = 9 / 16;
 const COMPANY_HALLMARK_ROTATION_DEGREES = -90;
-const COMPANY_HALLMARK_PAGE_PADDING_MM = 4;
-const COMPANY_HALLMARK_GRAPH_GAP_MM = 3;
-const COMPANY_HALLMARK_MAX_WIDTH_MM = 70;
-
-export type CompanyHallmarkPlacement = {
-  xMm: number;
-  yMm: number;
-  widthMm: number;
-  heightMm: number;
-};
-
-/** Places the hallmark on export page two without ever covering the graph tile. */
-export function companyHallmarkPlacement(
-  tile: PdfExportTile,
-  pageWidthMm: number,
-  pageHeightMm: number,
-): CompanyHallmarkPlacement | null {
-  if (tile.index !== 1) return null;
-  const padding = COMPANY_HALLMARK_PAGE_PADDING_MM;
-  const graphRight = tile.destinationXMm + tile.destinationWidthMm;
-  const graphBottom = tile.destinationYMm + tile.destinationHeightMm;
-  const candidates = [
-    { x: padding, y: padding, width: tile.destinationXMm - padding - COMPANY_HALLMARK_GRAPH_GAP_MM, height: pageHeightMm - padding * 2 },
-    { x: graphRight + COMPANY_HALLMARK_GRAPH_GAP_MM, y: padding, width: pageWidthMm - graphRight - padding - COMPANY_HALLMARK_GRAPH_GAP_MM, height: pageHeightMm - padding * 2 },
-    { x: padding, y: padding, width: pageWidthMm - padding * 2, height: tile.destinationYMm - padding - COMPANY_HALLMARK_GRAPH_GAP_MM },
-    { x: padding, y: graphBottom + COMPANY_HALLMARK_GRAPH_GAP_MM, width: pageWidthMm - padding * 2, height: pageHeightMm - graphBottom - padding - COMPANY_HALLMARK_GRAPH_GAP_MM },
-  ]
-    .filter((candidate) => candidate.width > 0 && candidate.height > 0)
-    .sort((a, b) => b.width * b.height - a.width * a.height);
-  const area = candidates[0];
-  if (!area) return null;
-
-  const widthMm = Math.min(COMPANY_HALLMARK_MAX_WIDTH_MM, area.width, area.height * COMPANY_HALLMARK_ASPECT_RATIO);
-  const heightMm = widthMm / COMPANY_HALLMARK_ASPECT_RATIO;
-  if (widthMm < 18 || heightMm < 10) return null;
-  return {
-    xMm: area.x + (area.width - widthMm) / 2,
-    yMm: area.y + (area.height - heightMm) / 2,
-    widthMm,
-    heightMm,
-  };
-}
+export { companyHallmarkPlacement, type CompanyHallmarkPlacement } from "@/lib/canvas/company-hallmark-layout";
 
 async function loadCompanyHallmarkPdfBytes() {
   try {

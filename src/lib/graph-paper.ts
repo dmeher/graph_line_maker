@@ -86,8 +86,13 @@ export const DEFAULT_VECTORIZER_INK_THRESHOLD = 210;
 export const MIN_VECTORIZER_SKETCH_REMOVAL = 0;
 export const MAX_VECTORIZER_SKETCH_REMOVAL = 6;
 export const DEFAULT_VECTORIZER_SKETCH_REMOVAL = 0;
-export const GRAPH_VECTORIZER_FIDELITY_KEYS = ["exact", "smooth"] as const;
+export const GRAPH_VECTORIZER_FIDELITY_KEYS = ["exact", "smooth", "clean-thin"] as const;
 export type GraphVectorizerFidelity = (typeof GRAPH_VECTORIZER_FIDELITY_KEYS)[number];
+export const GRAPH_VECTORIZER_FIDELITY_LABELS: Record<GraphVectorizerFidelity, string> = {
+  exact: "Exact",
+  smooth: "Smooth",
+  "clean-thin": "Clean & thin",
+};
 export const DEFAULT_VECTORIZER_FIDELITY: GraphVectorizerFidelity = "exact";
 export const PRINT_PAPER_SIZE_KEYS = ["a4", "a3", "letter", "legal", "tabloid"] as const;
 export type PrintPaperSize = (typeof PRINT_PAPER_SIZE_KEYS)[number];

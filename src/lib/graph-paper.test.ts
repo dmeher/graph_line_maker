@@ -7,12 +7,14 @@ import {
   CANVAS_WHITE,
   DEFAULT_GRID_LINE_COLOR,
   DEFAULT_MAJOR_GRID_EVERY,
+  GRAPH_VECTORIZER_FIDELITY_LABELS,
   GRAPH_LINE_GREEN,
   GRAPH_LINE_RED,
   TRANSPARENT_FILL_COLOR,
   isCanvasColor,
   isFillColor,
   isGraphLineColor,
+  isGraphVectorizerFidelity,
   normalizeCanvasColor,
   normalizeCanvasFillColor,
   normalizeGraphLineColor,
@@ -61,4 +63,12 @@ test("sketch removal strength is clamped and defaults to off", () => {
   // Erosion is destructive, so the ceiling is deliberately low.
   assert.equal(clampVectorizerSketchRemoval(-5), 0);
   assert.equal(clampVectorizerSketchRemoval(99), 6);
+});
+
+test("vectorizer fidelity includes the opt-in clean and thin profile", () => {
+  assert.equal(isGraphVectorizerFidelity("exact"), true);
+  assert.equal(isGraphVectorizerFidelity("smooth"), true);
+  assert.equal(isGraphVectorizerFidelity("clean-thin"), true);
+  assert.equal(isGraphVectorizerFidelity("unknown"), false);
+  assert.equal(GRAPH_VECTORIZER_FIDELITY_LABELS["clean-thin"], "Clean & thin");
 });

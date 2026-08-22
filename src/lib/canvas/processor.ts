@@ -3,6 +3,7 @@ import { createGridNumberLabels } from "@/lib/canvas/grid-numbering";
 import { maskFromImageData, maskFromVectorizedImageData, type ImageDataLike } from "@/lib/canvas/ink-mask";
 import { fillRegionNumberForRender, mergeLayerPixelMasks } from "@/lib/canvas/layer-mask-merge";
 import { isPdfSource, renderPdfFirstPageToCanvas } from "@/lib/canvas/pdf";
+import { unmatteWhiteBackgroundImageData } from "@/lib/canvas/white-matte";
 import { createThinArtworkMasks, expandMaskForLineSize } from "@/lib/canvas/thinning";
 import { createLegacyCardinalFillRegionId, createStableFillRegionId } from "@/lib/canvas/fill-region-identity";
 import { generatedShapeFillColorAtPoint, resolveGeneratedTopology } from "@/lib/canvas/generated-artwork";
@@ -91,6 +92,8 @@ export type FittedImageLayer = {
   id?: string;
   canvas: HTMLCanvasElement;
   settings: GraphSettings;
+  /** False places the original raster artwork directly, without creating graph fill masks. */
+  vectorize?: boolean;
   vectorizerSource?: VectorizerSource;
   vectorizerCacheKey?: string;
   processingCacheKey?: string;
@@ -107,6 +110,7 @@ type AnyFittedImageLayer = {
   id?: string;
   canvas: CanvasLike;
   settings: GraphSettings;
+  vectorize?: boolean;
   vectorizerSource?: VectorizerSource;
   vectorizerCacheKey?: string;
   processingCacheKey?: string;
@@ -281,7 +285,12 @@ function styleVectorizedSvgForMask(svg: string, settings: GraphSettings) {
   return new XMLSerializer().serializeToString(document.documentElement);
 }
 
-async function fetchVectorizedSvg(imageData: ImageDataLike, settings: GraphSettings, signal?: AbortSignal, layerCacheKey?: string) {
+async function fetchVectorizedSvg(
+  imageData: ImageDataLike,
+  settings: GraphSettings,
+  signal?: AbortSignal,
+  layerCacheKey?: string,
+) {
   const requestKey = vectorizerRequestKey(settings, layerCacheKey, imageData.width, imageData.height);
   if (requestKey) {
     const cached = vectorizedSvgCache.get(requestKey);
@@ -359,7 +368,12 @@ async function svgToImageData(svg: string, width: number, height: number) {
   }
 }
 
-async function vectorizeImageDataToLineImageData(imageData: ImageDataLike, settings: GraphSettings, signal?: AbortSignal, layerCacheKey?: string) {
+async function vectorizeImageDataToLineImageData(
+  imageData: ImageDataLike,
+  settings: GraphSettings,
+  signal?: AbortSignal,
+  layerCacheKey?: string,
+) {
   const requestKey = vectorizerRequestKey(settings, layerCacheKey, imageData.width, imageData.height);
   if (requestKey) {
     const cached = readVectorizedImage(requestKey);
@@ -785,6 +799,32 @@ function placeSourceImageData(
   );
 }
 
+function directRasterForLayer(
+  layer: AnyFittedImageLayer,
+  fallbackImageData: ImageDataLike | null,
+  outputWidth: number,
+  outputHeight: number,
+) {
+  const vectorizerSource = layer.vectorizerSource;
+  if (vectorizerSource && hasDrawableCanvas(vectorizerSource.canvas)) {
+    return placeSourceImageData(
+      vectorizerSource.canvas,
+      vectorizerSource.placement,
+      outputWidth,
+      outputHeight,
+      vectorizerSource.contentBounds,
+    );
+  }
+  if (!fallbackImageData) return null;
+  return {
+    offsetX: 0,
+    offsetY: 0,
+    width: fallbackImageData.width,
+    height: fallbackImageData.height,
+    imageData: fallbackImageData,
+  };
+}
+
 async function buildLayerArtworkMasksAsync(
   layer: AnyFittedImageLayer,
   fallbackImageData: ImageDataLike | null,
@@ -1112,6 +1152,19 @@ function drawColoredMaskLayers(
 
   for (const [color, colorMask] of masksByColor) {
     drawMaskLayer(context, colorMask, width, height, color, alpha, blurRadius, coverage);
+  }
+}
+
+function drawDirectRasterLayers(context: ProcessingContext2D, layers: readonly PlacedImageData[]) {
+  for (const layer of layers) {
+    const raster = createProcessingCanvas(layer.width, layer.height);
+    const rasterContext = getProcessingContext(raster, { willReadFrequently: true });
+    if (!rasterContext) throw new Error("Canvas is not available.");
+    const cleaned = unmatteWhiteBackgroundImageData(layer.imageData);
+    const imageData = rasterContext.createImageData(layer.width, layer.height);
+    imageData.data.set(cleaned.data);
+    rasterContext.putImageData(imageData, 0, 0);
+    context.drawImage(raster, layer.offsetX, layer.offsetY);
   }
 }
 
@@ -1725,6 +1778,7 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
   const outlineColorNumbers = new Map<string, number>();
   const outlineColorsByNumber = new Map<number, string>();
   const regions: FillRegion[] = [];
+  const directRasterLayers: PlacedImageData[] = [];
   // Lets overlapping layers resolve a contested pixel to the tighter enclosure.
   const regionAreas = new Map<number, number>();
   let nextRegionId = 0;
@@ -1756,6 +1810,11 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     if (!fittedContext) throw new Error("Canvas is not available.");
 
     const sourceData = fittedContext.getImageData(0, 0, width, height);
+    if (layer.vectorize === false) {
+      const directRaster = directRasterForLayer(layer, sourceData, width, height);
+      if (directRaster) directRasterLayers.push(directRaster);
+      continue;
+    }
     const { enclosedFillMask, outlineMask: layerOutlineMask, sourceFillMask } = buildArtworkMasks(sourceData, layer.settings);
     const layerOutlineColorNumber = outlineColorNumber(outlineColorForSettings(layer.settings, settings));
     const local = labelFillRegions(
@@ -1855,6 +1914,7 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     : [];
 
   drawColoredMaskLayers(outputContext, outlineMask, outlineColorMap, outlineColorsByNumber, output.width, output.height, outlineColorForSettings(settings), 255, 0.12 * maxLineThickness);
+  drawDirectRasterLayers(outputContext, directRasterLayers);
   drawManualGraphArtwork(output, settings);
   if (generatedTopology && generatedDisplayRegions.length) {
     drawFillRegions(
@@ -1943,6 +2003,7 @@ export async function pixelateLayeredCanvasesAsync(
   const outlineColorNumbers = new Map<string, number>();
   const outlineColorsByNumber = new Map<number, string>();
   const regions: FillRegion[] = [];
+  const directRasterLayers: PlacedImageData[] = [];
   // Lets overlapping layers resolve a contested pixel to the tighter enclosure.
   const regionAreas = new Map<number, number>();
   let nextRegionId = 0;
@@ -1976,6 +2037,11 @@ export async function pixelateLayeredCanvasesAsync(
       const fittedContext = getProcessingContext(fitted, { willReadFrequently: true });
       if (!fittedContext) throw new Error("Canvas is not available.");
       sourceData = fittedContext.getImageData(0, 0, width, height);
+    }
+    if (layer.vectorize === false) {
+      const directRaster = directRasterForLayer(layer, sourceData, width, height);
+      if (directRaster) directRasterLayers.push(directRaster);
+      continue;
     }
     const layerMasks = await buildLayerArtworkMasksAsync(
       layer,
@@ -2129,6 +2195,7 @@ export async function pixelateLayeredCanvasesAsync(
     0.12 * maxLineThickness,
     outlineCoverage,
   );
+  drawDirectRasterLayers(outputContext, directRasterLayers);
   drawManualGraphArtwork(output, settings);
   if (generatedTopology && generatedDisplayRegions.length) {
     drawFillRegions(

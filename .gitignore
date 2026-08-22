@@ -40,3 +40,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Local native tool payloads are never committed.
+/tools/autotrace/autotrace.exe
+/tools/autotrace/*.dll

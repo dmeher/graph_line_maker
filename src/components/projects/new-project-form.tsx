@@ -261,6 +261,7 @@ export function NewProjectForm() {
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
+  const [vectorizeSources, setVectorizeSources] = useState(true);
   const [zoom, setZoom] = useState(1);
   const [aspectPreset, setAspectPreset] = useState<AspectPresetKey>("free");
   const [customAspectRatio, setCustomAspectRatio] = useState<number | null>(null);
@@ -665,6 +666,7 @@ export function NewProjectForm() {
         body: JSON.stringify({
           title,
           description,
+          vectorizeSources,
           files: uploadFiles.map((file) => ({ name: file.name, type: file.type, size: file.size })),
         }),
       });
@@ -685,6 +687,7 @@ export function NewProjectForm() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           projectId: prepared.projectId,
+          vectorizeSources: prepared.vectorizeSources !== false,
           uploads: prepared.uploads.map((upload: { id: string; name: string; path: string }, index: number) => ({
             id: upload.id,
             name: upload.name,
@@ -1081,14 +1084,29 @@ export function NewProjectForm() {
         </main>
       </div>
 
-      <div className="create-workbench-footer grid gap-2 border-t border-[var(--line)] bg-[var(--panel)] p-2">
+      <div className="create-workbench-footer border-t border-[var(--line)] bg-[var(--panel)]">
         <div className="create-workbench-notice rounded-md border border-[var(--warning)] bg-[var(--warning-soft)] p-2 text-xs text-[var(--amber)]">
           <p className="flex gap-2 font-semibold"><AlertTriangle size={18} />{isOnline ? (cropItems.length ? "Crop review ready." : "Add source files to begin.") : "Needs connection to upload source files."}</p>
           <p className="mt-1">{isOnline ? "Project creation uploads the reviewed source files when you start conversion." : "Project creation is disabled while offline."}</p>
         </div>
-        <div className="create-workbench-progress mock-card flex items-center justify-between gap-3 p-2">
-          <p className="min-w-0 text-sm text-[var(--muted)]"><strong className="text-[var(--foreground)]">{progressTotal} {progressTotal === 1 ? "file" : "files"}</strong> · {progressCropped} with custom crop · unchanged files upload at original quality</p>
-          <div className="create-workbench-actions flex shrink-0 gap-3">
+        <div className="create-workbench-progress mock-card">
+          <div className="create-workbench-controls flex min-w-0 flex-col gap-1">
+            <label className="flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-sm text-[var(--foreground)] hover:bg-[var(--surface)]">
+              <input
+                type="checkbox"
+                checked={vectorizeSources}
+                onChange={(event) => setVectorizeSources(event.target.checked)}
+                disabled={pending}
+                className="h-4 w-4 shrink-0 accent-[var(--teal)]"
+              />
+              <span className="grid min-w-0">
+                <strong className="truncate text-sm">Vectorize imported images</strong>
+                <small className="truncate text-xs text-[var(--muted)]">Clear to place original raster pixels directly on the graph.</small>
+              </span>
+            </label>
+          </div>
+          <p className="create-workbench-summary text-sm text-[var(--muted)]"><strong className="text-[var(--foreground)]">{progressTotal} {progressTotal === 1 ? "file" : "files"}</strong> · {progressCropped} with custom crop · unchanged files upload at original quality</p>
+          <div className="create-workbench-actions">
             <button type="button" onClick={() => setCropItems((current) => current.map((item) => ({ ...item, transform: copyTransform(DEFAULT_CROP_TRANSFORM), undoStack: [...item.undoStack, copyTransform(item.transform)].slice(-30), redoStack: [] })))} disabled={!cropItems.some(hasTransform)} className="mock-btn h-10">Reset all</button>
             <button disabled={pending || previewPending || !isOnline || !cropItems.length || Boolean(fileIssue) || !title.trim()} className="mock-btn mock-btn-primary h-11 min-w-0 sm:min-w-[220px] text-base">
               {pending ? <Loader2 size={18} className="animate-spin" /> : <Scissors size={18} />}

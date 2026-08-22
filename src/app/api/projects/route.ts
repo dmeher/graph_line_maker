@@ -21,6 +21,7 @@ import {
   sourceImagePath,
   thumbnailPathFor,
 } from "@/lib/projects";
+import { buildProjectSettingsWithSources } from "@/lib/projects/creation-settings";
 import { getObjectStore, mediaKey } from "@/lib/storage/media";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
@@ -58,14 +59,6 @@ function settingsForImage() {
     outputHeight: graphHeight * cellHeight,
     spotShape: "round",
   });
-}
-
-function roundCells(value: number) {
-  return Math.round(value * 100) / 100;
-}
-
-function defaultSourceX(graphWidth: number, width: number) {
-  return roundCells(Math.max(0, (graphWidth - width) / 2));
 }
 
 type UploadMetadata = {
@@ -109,37 +102,6 @@ function validateUploadMetadata(files: UploadMetadata[]) {
   return null;
 }
 
-function buildSettingsWithSources(uploadedImages: Array<{ id: string; name: string; path: string; thumbPath: string | null }>) {
-  const settings = settingsForImage();
-  const sourceImages = uploadedImages.map((image, index) => ({
-    ...image,
-    width: settings.imageWidth,
-    height: settings.imageHeight,
-    measurementUnit: settings.measurementUnit,
-    imageLineThickness: settings.imageLineThickness,
-    sourceFillThreshold: settings.sourceFillThreshold,
-    sourceFillMinStrokePixels: settings.sourceFillMinStrokePixels,
-    strokeGapClosePixels: settings.strokeGapClosePixels,
-    imageAutoEnhance: settings.imageAutoEnhance,
-    imageDenoiseLevel: settings.imageDenoiseLevel,
-    imageEdgeDetection: settings.imageEdgeDetection,
-    imageColorQuantization: settings.imageColorQuantization,
-    vectorizerLineAdjust: settings.vectorizerLineAdjust,
-    vectorizerInkThreshold: settings.vectorizerInkThreshold,
-    vectorizerFidelity: settings.vectorizerFidelity,
-    x: defaultSourceX(settings.graphWidth, settings.imageWidth),
-    y: index * settings.imageHeight,
-    topPadding: 0,
-    bottomPadding: 0,
-    locked: false,
-    visible: true,
-    rotationDegrees: 0 as const,
-    flipX: false,
-    flipY: false,
-  }));
-  return normalizeGraphSettings({ ...settings, sourceImages });
-}
-
 export async function POST(request: NextRequest) {
   try {
     const session = await requireSession();
@@ -147,6 +109,7 @@ export async function POST(request: NextRequest) {
       const body = await request.json().catch(() => ({}));
       const title = String(body.title || "").trim();
       const description = String(body.description || "").trim();
+      const vectorizeSources = body.vectorizeSources !== false;
       const files = parseUploadMetadata(body.files);
       if (!title) return NextResponse.json({ message: "Project title is required." }, { status: 400 });
       const validationError = validateUploadMetadata(files);
@@ -195,7 +158,7 @@ export async function POST(request: NextRequest) {
           ]);
           return { ...file, id, path, url, contentType, thumbPath, thumbUrl, thumbContentType: THUMBNAIL_CONTENT_TYPE };
         });
-        return NextResponse.json({ ok: true, projectId: project.id, uploads });
+        return NextResponse.json({ ok: true, projectId: project.id, uploads, vectorizeSources });
       } catch (signError) {
         await supabase.from("projects").delete().eq("id", project.id).eq("user_id", session.userId);
         throw signError;
@@ -219,6 +182,8 @@ export async function PATCH(request: NextRequest) {
     await requireSession();
     const body = await request.json().catch(() => ({}));
     const projectId = String(body.projectId || "");
+    // Defaults to the established traced import path for older clients.
+    const vectorizeSources = body.vectorizeSources !== false;
     const uploads = Array.isArray(body.uploads) ? body.uploads : [];
     if (!/^[0-9a-f-]{36}$/i.test(projectId) || !uploads.length || uploads.length > MAX_PROJECT_UPLOAD_FILES) {
       return NextResponse.json({ message: "Invalid upload finalization request." }, { status: 400 });
@@ -265,7 +230,9 @@ export async function PATCH(request: NextRequest) {
       }
       return { ...image, thumbPath };
     });
-    const finalizedSettings = buildSettingsWithSources(verifiedImages);
+    const finalizedSettings = buildProjectSettingsWithSources(settingsForImage(), verifiedImages, {
+      vectorizeSources,
+    });
     const { error } = await supabase
       .from("projects")
       .update({ original_image_path: verifiedImages[0].path, settings: finalizedSettings })

@@ -68,6 +68,7 @@ import {
   GRAPH_GRID_PATTERN_KEYS,
   GRAPH_LINE_LAYER_KEYS,
   GRAPH_VECTORIZER_FIDELITY_KEYS,
+  GRAPH_VECTORIZER_FIDELITY_LABELS,
   MAJOR_GRID_EVERY_KEYS,
   MAX_GRAPH_HEIGHT_CELLS,
   MAX_GRAPH_WIDTH_CELLS,
@@ -844,12 +845,20 @@ export function InspectorPanel(props: InspectorPanelProps) {
                     className={inspectorControlClass}
                   >
                     {GRAPH_VECTORIZER_FIDELITY_KEYS.map((key) => (
-                      <option key={key} value={key}>{key === "exact" ? "Exact" : "Smooth"}</option>
+                      <option key={key} value={key}>{GRAPH_VECTORIZER_FIDELITY_LABELS[key]}</option>
                     ))}
                   </select>
                 </label>
               </InspectorFieldGrid>
-              <InspectorDisclosure title="Trace details" summary={`Ink ${selectedSource.vectorizerInkThreshold}`}>
+              {selectedSource.vectorizerFidelity === "clean-thin" ? (
+                <p className="editor-inspector__hint">
+                  Clean &amp; thin works best with high-contrast line art. Refine Ink threshold and Line adjustment as needed.
+                </p>
+              ) : null}
+              <InspectorDisclosure
+                title="Trace details"
+                summary={`Ink ${selectedSource.vectorizerInkThreshold}`}
+              >
                 <InspectorFieldGrid>
                   <NumberField
                     label="Ink threshold"
@@ -875,10 +884,10 @@ export function InspectorPanel(props: InspectorPanelProps) {
                 type="button"
                 onClick={() => applySourceImagePropertiesToAll(selectedSource.id)}
                 className="editor-inspector__wide-action"
-                title="Apply this image processing setup to every image"
+                title="Apply this trace setup to every source and clipart"
               >
                 <Copy size={14} aria-hidden="true" />
-                Apply trace settings to all sources
+                Apply trace settings to sources and clipart
               </button>
             </InspectorGroup>
             <InspectorGroup title="Placement" icon={<Ruler size={15} aria-hidden="true" />} priority="quiet">

@@ -173,6 +173,7 @@ import {
   GRAPH_GRID_LINE_STYLE_KEYS,
   GRAPH_MAJOR_CELL_PIXELS,
   GRAPH_VECTORIZER_FIDELITY_KEYS,
+  GRAPH_VECTORIZER_FIDELITY_LABELS,
   MAX_VECTORIZER_INK_THRESHOLD,
   MAX_VECTORIZER_SKETCH_REMOVAL,
   MAX_VECTORIZER_LINE_ADJUST,
@@ -573,7 +574,7 @@ function buildProcessingSignature(settings: GraphSettings) {
     settings.sourceImages
       .map(
         (source) =>
-          `${source.id}:${source.x}:${source.y}:${source.width}:${source.height}:${source.topPadding}:${source.bottomPadding}:${source.rotationDegrees}:${source.flipX}:${source.flipY}:${source.locked}:${source.visible}:${source.imageLineThickness}:${source.sourceFillThreshold}:${source.sourceFillMinStrokePixels}:${source.strokeGapClosePixels}:${source.imageAutoEnhance}:${source.imageDenoiseLevel}:${source.imageEdgeDetection}:${source.imageColorQuantization}:${source.vectorizerLineAdjust}:${source.vectorizerInkThreshold}:${source.vectorizerSketchRemoval}:${source.vectorizerFidelity}:${eraseStrokesSignature(source.eraseStrokes)}:${backgroundRemovalSignature(source.backgroundRemoval)}`,
+          `${source.id}:${source.x}:${source.y}:${source.width}:${source.height}:${source.topPadding}:${source.bottomPadding}:${source.rotationDegrees}:${source.flipX}:${source.flipY}:${source.locked}:${source.visible}:${source.imageLineThickness}:${source.sourceFillThreshold}:${source.sourceFillMinStrokePixels}:${source.strokeGapClosePixels}:${source.imageAutoEnhance}:${source.imageDenoiseLevel}:${source.imageEdgeDetection}:${source.imageColorQuantization}:${source.vectorize !== false}:${source.vectorizerLineAdjust}:${source.vectorizerInkThreshold}:${source.vectorizerSketchRemoval}:${source.vectorizerFidelity}:${eraseStrokesSignature(source.eraseStrokes)}:${backgroundRemovalSignature(source.backgroundRemoval)}`,
       )
       .join("|"),
     settings.cellPaints.map((paint) => `${paint.id}:${paint.x}:${paint.y}:${paint.width}:${paint.height}:${paint.sides.join(",")}:${paint.lineColor}:${paint.fillColor}:${paint.lineWidth}:${paint.rotationDegrees}:${paint.flipX}:${paint.flipY}:${paint.visible}`).join("|"),
@@ -741,7 +742,7 @@ function normalizeSourceImagesForEditor(
     | "vectorizerSketchRemoval"
     | "vectorizerFidelity"
   >,
-) {
+): GraphSourceImage[] {
   if (!Array.isArray(sourceImages)) return [];
   let legacyY = 0;
   return sourceImages
@@ -767,6 +768,9 @@ function normalizeSourceImagesForEditor(
 
       const vectorizerSketchRemoval = clampVectorizerSketchRemoval(source.vectorizerSketchRemoval ?? defaults.vectorizerSketchRemoval);
       const vectorizerFidelity = normalizeVectorizerFidelity(source.vectorizerFidelity ?? defaults.vectorizerFidelity);
+      // This must survive every client-side settings normalization. A missing
+      // value is legacy traced mode; an explicit false is direct raster mode.
+      const vectorize = source.vectorize !== false;
       const x = clampSourceX(source.x, graphWidth, width);
       const topPadding = clampPaddingCells(source.topPadding, graphHeight, 0);
       const bottomPadding = clampPaddingCells(source.bottomPadding, graphHeight, 0);
@@ -799,6 +803,7 @@ function normalizeSourceImagesForEditor(
 
           vectorizerSketchRemoval,
           vectorizerFidelity,
+          vectorize,
           x,
           y,
           topPadding,
@@ -1057,7 +1062,9 @@ function cellNumberLabels(cellCount: number) {
   return Array.from({ length: count }, (_, index) => index + 1);
 }
 
-function deriveGraphSettings(settings: GraphSettings): GraphSettings {
+function deriveGraphSettings(inputSettings: GraphSettings): GraphSettings {
+  const { vectorTraceMode: _legacyVectorTraceMode, ...settings } = inputSettings as GraphSettings & { vectorTraceMode?: unknown };
+  void _legacyVectorTraceMode;
   const safeGraphDimensions = clampGraphCellDimensions(settings.graphWidth, settings.graphHeight, GRAPH_MAJOR_CELL_PIXELS);
   const graphWidth = safeGraphDimensions.width;
   const graphHeight = safeGraphDimensions.height;
@@ -2764,7 +2771,7 @@ export function EditorClient({
       sourceImages: current.sourceImages.map((image) => ({ ...image, ...properties })),
       clipartImages: current.clipartImages.map((image) => ({ ...image, ...properties })),
     }));
-    setNotice({ tone: "ok", text: "Image properties applied to every image. Individual image edits remain independent." });
+    setNotice({ tone: "ok", text: "Trace settings applied to sources and clipart. Individual image edits remain independent." });
   }
 
   function setSourceBackgroundRemoval(sourceId: string, config: GraphBackgroundRemoval | undefined) {
@@ -5266,6 +5273,7 @@ export function EditorClient({
             id: fillRegionLayerScope("source", layout.source.id),
             canvas: sourceCanvas,
             settings: sourceSettings(settings, layout.source),
+            vectorize: layout.source.vectorize !== false,
             vectorizerSource: {
               canvas: sourceCanvas,
               // Erasing/background removal changes pixels, not the physical
@@ -5306,6 +5314,10 @@ export function EditorClient({
             settings: clipartSettings(settings, clipart),
             vectorizerSource: {
               canvas: sourceCanvas,
+              // Keep the fixed-centreline source-to-graph scale tied to the
+              // same immutable artwork frame used when the returned SVG and
+              // its invisible topology mask are placed.
+              contentBounds: findContentBounds(sourceCanvas),
               placement: {
                 x: clipart.x,
                 y: clipart.y,
@@ -7300,20 +7312,25 @@ export function EditorClient({
           <ColorPresetField label="Stroke" value={clipart.strokeColor} onChange={(value) => updateClipartImage(clipart.id, { strokeColor: value })} />
           <ColorPresetField label="Fill" value={clipart.fillColor} onChange={(value) => updateClipartImage(clipart.id, { fillColor: value })} allowTransparent />
         </InspectorFieldGrid>
-        <InspectorDisclosure title="Trace details" summary={clipart.vectorizerFidelity === "exact" ? "Exact" : "Smooth"}>
+        <InspectorDisclosure title="Trace details" summary={`Ink ${clipart.vectorizerInkThreshold}`}>
           <InspectorFieldGrid>
             <NumberField label="Line adjustment" value={clipart.vectorizerLineAdjust} min={MIN_VECTORIZER_LINE_ADJUST} max={MAX_VECTORIZER_LINE_ADJUST} step={0.5} allowDecimalInput disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { vectorizerLineAdjust: value })} />
             <label className="editor-inspector-field">
               <span className="editor-inspector-field__label">Fidelity</span>
               <select value={clipart.vectorizerFidelity} disabled={clipart.locked} onChange={(event) => updateClipartImage(clipart.id, { vectorizerFidelity: event.target.value as GraphClipartImage["vectorizerFidelity"] })} className="editor-inspector-control">
                 {GRAPH_VECTORIZER_FIDELITY_KEYS.map((key) => (
-                  <option key={key} value={key}>{key === "exact" ? "Exact" : "Smooth"}</option>
+                  <option key={key} value={key}>{GRAPH_VECTORIZER_FIDELITY_LABELS[key]}</option>
                 ))}
               </select>
             </label>
             <NumberField label="Ink threshold" value={clipart.vectorizerInkThreshold} min={MIN_VECTORIZER_INK_THRESHOLD} max={MAX_VECTORIZER_INK_THRESHOLD} step={1} disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { vectorizerInkThreshold: Math.round(value) })} />
             <NumberField label="Remove sketch lines" value={clipart.vectorizerSketchRemoval ?? DEFAULT_VECTORIZER_SKETCH_REMOVAL} min={MIN_VECTORIZER_SKETCH_REMOVAL} max={MAX_VECTORIZER_SKETCH_REMOVAL} step={1} disabled={clipart.locked} onChange={(value) => updateClipartImage(clipart.id, { vectorizerSketchRemoval: Math.round(value) })} />
           </InspectorFieldGrid>
+          {clipart.vectorizerFidelity === "clean-thin" ? (
+            <p className="editor-inspector__hint">
+              Clean &amp; thin works best with high-contrast line art. Refine Ink threshold and Line adjustment as needed.
+            </p>
+          ) : null}
         </InspectorDisclosure>
       </div>
     );

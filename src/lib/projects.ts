@@ -90,6 +90,8 @@ const CELL_LINE_SIDE_KEYS = ["top", "right", "bottom", "left"] as const;
 const MOCK_EDITOR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900"><rect width="900" height="900" fill="white"/><path d="M431 95c-62 58-78 131-45 218m30-204c45 71 73 133 56 225m-73-150c-62-42-120-50-173-24 36 91 96 145 178 164m66-7c83-93 161-127 236-91-41 92-113 137-218 134M417 354c-14 111-14 227 0 348m46-348c18 116 22 229 10 341M260 716c-72-66-120-143-143-231 112 11 196 75 251 193m122 5c64-123 149-185 255-188-42 93-111 166-208 219M223 724h382l-33 95H249z" fill="none" stroke="#111" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 type StoredGraphSettings = Partial<GraphSettings> & {
   cellSizeInches?: number;
+  /** Removed trace-mode experiments are ignored when legacy settings load. */
+  vectorTraceMode?: unknown;
 };
 type SignedImageUrlMode = "all" | "original" | "none";
 
@@ -587,6 +589,7 @@ function normalizeSourceImages(
       const vectorizerInkThreshold = clampVectorizerInkThreshold(record.vectorizerInkThreshold ?? defaults.vectorizerInkThreshold);
       const vectorizerSketchRemoval = clampVectorizerSketchRemoval(record.vectorizerSketchRemoval ?? defaults.vectorizerSketchRemoval);
       const vectorizerFidelity = normalizeVectorizerFidelity(record.vectorizerFidelity ?? defaults.vectorizerFidelity);
+      const vectorize = record.vectorize !== false;
       const x = clampSourceX(record.x, graphWidth, width);
       const topPadding = clampPaddingCells(record.topPadding, graphHeight, 0);
       const bottomPadding = clampPaddingCells(record.bottomPadding, graphHeight, 0);
@@ -620,6 +623,7 @@ function normalizeSourceImages(
           vectorizerInkThreshold,
           vectorizerSketchRemoval,
           vectorizerFidelity,
+          vectorize,
           x,
           y,
           topPadding,
@@ -647,7 +651,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     ...defaultGraphSettings,
     ...(settings ?? {}),
   };
-  const { cellSizeInches: legacyCellSizeInches, ...cleanMerged } = merged;
+  const { cellSizeInches: legacyCellSizeInches, vectorTraceMode: _legacyVectorTraceMode, ...cleanMerged } = merged;
   const cellWidth = GRAPH_MAJOR_CELL_PIXELS;
   const cellHeight = GRAPH_MAJOR_CELL_PIXELS;
   const requestedGraphWidth = Math.round(merged.graphWidth || Math.round((merged.outputWidth || defaultGraphSettings.outputWidth) / cellWidth));
@@ -730,6 +734,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const showPageBreaks = typeof cleanMerged.showPageBreaks === "boolean" ? cleanMerged.showPageBreaks : true;
   const majorGridEvery = isMajorGridEvery(cleanMerged.majorGridEvery) ? cleanMerged.majorGridEvery : DEFAULT_MAJOR_GRID_EVERY;
   void legacyCellSizeInches;
+  void _legacyVectorTraceMode;
   const cellSizeCm = DEFAULT_CELL_SIZE_CM;
   const measurementUnit = isMeasurementUnit(cleanMerged.measurementUnit) ? cleanMerged.measurementUnit : defaultGraphSettings.measurementUnit;
   const sourceImages = normalizeSourceImages(cleanMerged.sourceImages, graphWidth, graphHeight, {
@@ -850,7 +855,7 @@ async function mapProject(row: DbProject, palettes: DbPalette[] = [], signedImag
           imageColorQuantization: DEFAULT_IMAGE_COLOR_QUANTIZATION,
           vectorizerLineAdjust: DEFAULT_VECTORIZER_LINE_ADJUST,
           vectorizerInkThreshold: DEFAULT_VECTORIZER_INK_THRESHOLD,
-  vectorizerSketchRemoval: DEFAULT_VECTORIZER_SKETCH_REMOVAL,
+          vectorizerSketchRemoval: DEFAULT_VECTORIZER_SKETCH_REMOVAL,
           vectorizerFidelity: DEFAULT_VECTORIZER_FIDELITY,
           x: defaultSourceX(baseSettings.graphWidth, baseSettings.imageWidth),
           y: 0,
@@ -1077,7 +1082,7 @@ export async function assertProjectAccess(projectId: string) {
   const supabase = getSupabaseAdmin();
   const query = supabase
     .from("projects")
-    .select("id, user_id, title, description, original_image_path, processed_image_path, settings, width, height, pixel_size, grid_cell_size, color_count")
+    .select("id, user_id, title, description, original_image_path, processed_image_path, processed_thumb_path, settings, width, height, pixel_size, grid_cell_size, color_count")
     .eq("id", projectId);
   if (session.role !== "admin") query.eq("user_id", session.userId);
   const { data, error } = await query.maybeSingle();
@@ -1091,6 +1096,7 @@ export async function assertProjectAccess(projectId: string) {
     description: string | null;
     original_image_path: string | null;
     processed_image_path: string | null;
+    processed_thumb_path: string | null;
     settings: StoredGraphSettings | null;
     width: number;
     height: number;

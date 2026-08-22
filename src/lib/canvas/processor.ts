@@ -24,7 +24,7 @@ import {
 import { assertCanvasBudget } from "@/lib/canvas/performance-limits";
 import { markGraphCacheHit, startGraphPerformanceStage } from "@/lib/performance/marks";
 import { ByteLruCache } from "@/lib/performance/byte-lru";
-import type { GraphSettings, PaletteColor } from "@/lib/types";
+import type { GraphEraseStroke, GraphSettings, PaletteColor } from "@/lib/types";
 
 type CanvasLike = HTMLCanvasElement | OffscreenCanvas;
 type ProcessingContext2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
@@ -95,6 +95,8 @@ export type FittedImageLayer = {
   /** False places the original raster artwork directly, without creating graph fill masks. */
   vectorize?: boolean;
   vectorizerSource?: VectorizerSource;
+  /** Applied after reading the cached base trace, before masks are rebuilt. */
+  eraseStrokes?: GraphEraseStroke[];
   vectorizerCacheKey?: string;
   processingCacheKey?: string;
 };
@@ -103,6 +105,7 @@ export type WorkerFittedImageLayer = {
   id?: string;
   canvas: OffscreenCanvas;
   settings: GraphSettings;
+  eraseStrokes?: GraphEraseStroke[];
   vectorizerCacheKey?: string;
 };
 
@@ -112,6 +115,7 @@ type AnyFittedImageLayer = {
   settings: GraphSettings;
   vectorize?: boolean;
   vectorizerSource?: VectorizerSource;
+  eraseStrokes?: GraphEraseStroke[];
   vectorizerCacheKey?: string;
   processingCacheKey?: string;
 };
@@ -806,9 +810,9 @@ function directRasterForLayer(
   outputHeight: number,
 ) {
   const vectorizerSource = layer.vectorizerSource;
-  if (vectorizerSource && hasDrawableCanvas(vectorizerSource.canvas)) {
+  if (vectorizerSource && hasDrawableCanvas(layer.canvas)) {
     return placeSourceImageData(
-      vectorizerSource.canvas,
+      layer.canvas,
       vectorizerSource.placement,
       outputWidth,
       outputHeight,
@@ -822,6 +826,93 @@ function directRasterForLayer(
     width: fallbackImageData.width,
     height: fallbackImageData.height,
     imageData: fallbackImageData,
+  };
+}
+
+/**
+ * Vectorization is keyed by the untouched (or background-cleaned) source.
+ * Erase geometry is deliberately applied to a throwaway clone here: this
+ * preserves the expensive source trace in the LRU while still rebuilding the
+ * masks and placement for every committed erase revision.
+ */
+function applyEraseStrokesToVectorizedResult(
+  vectorized: VectorizedImageResult,
+  strokes: GraphEraseStroke[] | undefined,
+): VectorizedImageResult {
+  if (!strokes?.length) return vectorized;
+  const canvas = createProcessingCanvas(vectorized.imageData.width, vectorized.imageData.height);
+  const context = getProcessingContext(canvas, { willReadFrequently: true });
+  const imageData = nativeImageDataFrom(vectorized.imageData);
+  if (!context || !imageData) return vectorized;
+  context.putImageData(imageData, 0, 0);
+  const scaleX = vectorized.imageData.width;
+  const scaleY = vectorized.imageData.height;
+
+  context.save();
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  for (const stroke of strokes) {
+    if (!stroke.points.length) continue;
+    const radius = Math.max(0.5, stroke.radius * scaleX);
+    const shape = stroke.shape ?? "circle";
+    if (shape === "polygon") {
+      // White paint obscures traced ink just like a normal erase. Black paint
+      // remains artwork, matching the pre-vectorization working-canvas rule.
+      context.globalCompositeOperation = stroke.fill === "#000000" ? "source-over" : "destination-out";
+      context.fillStyle = stroke.fill === "#000000" ? "#000000" : "rgba(0,0,0,1)";
+      context.beginPath();
+      context.moveTo(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY);
+      for (let index = 1; index < stroke.points.length; index += 1) {
+        context.lineTo(stroke.points[index].x * scaleX, stroke.points[index].y * scaleY);
+      }
+      context.closePath();
+      context.fill();
+      continue;
+    }
+
+    context.globalCompositeOperation = "destination-out";
+    context.fillStyle = "rgba(0,0,0,1)";
+    context.strokeStyle = "rgba(0,0,0,1)";
+    if (shape === "square") {
+      const size = radius * 2;
+      const stamp = (x: number, y: number) => context.fillRect(x - radius, y - radius, size, size);
+      stamp(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY);
+      const step = Math.max(1, radius / 2);
+      for (let index = 1; index < stroke.points.length; index += 1) {
+        const fromX = stroke.points[index - 1].x * scaleX;
+        const fromY = stroke.points[index - 1].y * scaleY;
+        const toX = stroke.points[index].x * scaleX;
+        const toY = stroke.points[index].y * scaleY;
+        const steps = Math.max(1, Math.ceil(Math.hypot(toX - fromX, toY - fromY) / step));
+        for (let stepIndex = 1; stepIndex <= steps; stepIndex += 1) {
+          stamp(fromX + ((toX - fromX) * stepIndex) / steps, fromY + ((toY - fromY) * stepIndex) / steps);
+        }
+      }
+      continue;
+    }
+
+    if (stroke.points.length === 1) {
+      context.beginPath();
+      context.arc(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY, radius, 0, Math.PI * 2);
+      context.fill();
+      continue;
+    }
+    context.lineWidth = radius * 2;
+    context.beginPath();
+    context.moveTo(stroke.points[0].x * scaleX, stroke.points[0].y * scaleY);
+    for (let index = 1; index < stroke.points.length; index += 1) {
+      context.lineTo(stroke.points[index].x * scaleX, stroke.points[index].y * scaleY);
+    }
+    context.stroke();
+  }
+  context.restore();
+
+  const editedImageData = context.getImageData(0, 0, vectorized.imageData.width, vectorized.imageData.height);
+  const ink = maskFromVectorizedImageData(editedImageData);
+  return {
+    imageData: editedImageData,
+    vectorizedInkMask: ink.count ? ink.mask : null,
+    vectorizedInkCoverage: ink.count ? ink.coverage : null,
   };
 }
 
@@ -888,7 +979,7 @@ async function buildLayerArtworkMasksAsync(
 
   function fallbackMasks() {
     const placedSource = placeSourceImageData(
-      vectorizerSource!.canvas,
+      layer.canvas,
       vectorizerSource!.placement,
       width,
       height,
@@ -912,12 +1003,13 @@ async function buildLayerArtworkMasksAsync(
   const sourceContext = getProcessingContext(vectorizerSource.canvas, { willReadFrequently: true });
   if (!sourceContext) return fallbackMasks();
   const sourceImageData = sourceContext.getImageData(0, 0, vectorizerSource.canvas.width, vectorizerSource.canvas.height);
-  const vectorized = await vectorizeImageDataToLineImageData(
+  const baseVectorized = await vectorizeImageDataToLineImageData(
     sourceImageData,
     layer.settings,
     signal,
     layer.vectorizerCacheKey,
   );
+  const vectorized = applyEraseStrokesToVectorizedResult(baseVectorized, layer.eraseStrokes);
   if (!vectorized.vectorizedInkMask) return fallbackMasks();
 
   const placedImage = placeVectorizedSourceImageData(

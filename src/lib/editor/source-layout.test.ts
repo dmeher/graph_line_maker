@@ -14,7 +14,6 @@ import {
   sourceLayouts,
   sourceProcessingCacheKey,
   sourceVectorizerCacheKey,
-  sourceRenderOrder,
   sourcesUseVerticalStackSlots,
   stackEndCell,
   transformLayerOrientation,
@@ -76,15 +75,6 @@ test("source layouts allow overflow instead of fitting into graph height", () =>
 
   assert.equal(layouts.at(-1)?.y, 20);
   assert.equal(stackEndCell(layouts.map((layout) => layout.source)), 30);
-});
-
-test("source render order draws bottom-to-top from the visible layer list", () => {
-  const first = source({ id: "first" });
-  const second = source({ id: "second" });
-
-  const layouts = sourceRenderOrder([first, second]);
-
-  assert.deepEqual(layouts.map((layout) => layout.source.id), ["second", "first"]);
 });
 
 test("source reorder reflows auto-stacked source slots", () => {
@@ -191,18 +181,22 @@ test("source processing cache key changes only for relevant source fields", () =
   assert.notEqual(imageChanged, base);
 });
 
-test("native vectorizer cache key ignores graph placement but changes with source content", () => {
+test("native vectorizer cache key ignores placement and erase geometry but changes base trace input", () => {
   const original = source({ id: "lion", path: "projects/lion.jpeg", url: "https://example.test/lion.jpeg" });
   const moved = source({ ...original, x: 4, y: 8, width: 12, height: 16, rotationDegrees: 90 });
   const duplicateLayer = source({ ...original, id: "lion-copy", url: "https://example.test/lion.jpeg?signature=next" });
   const replaced = source({ ...original, path: "projects/lion-v2.jpeg", url: "https://example.test/lion-v2.jpeg" });
   const erased = source({ ...original, eraseStrokes: [{ points: [{ x: 0.2, y: 0.3 }], radius: 0.02 }] });
+  const backgroundChanged = source({ ...original, backgroundRemoval: { enabled: true, tolerance: 0.2 } });
+  const layout = { x: original.x, y: original.y, width: original.width, height: original.height };
 
   assert.equal(sourceVectorizerCacheKey(moved), sourceVectorizerCacheKey(original));
   assert.equal(sourceAssetCacheKey(duplicateLayer), sourceAssetCacheKey(original));
   assert.equal(sourceVectorizerCacheKey(duplicateLayer), sourceVectorizerCacheKey(original));
   assert.notEqual(sourceVectorizerCacheKey(replaced), sourceVectorizerCacheKey(original));
-  assert.notEqual(sourceVectorizerCacheKey(erased), sourceVectorizerCacheKey(original));
+  assert.equal(sourceVectorizerCacheKey(erased), sourceVectorizerCacheKey(original));
+  assert.notEqual(sourceProcessingCacheKey(erased, layout), sourceProcessingCacheKey(original, layout));
+  assert.notEqual(sourceVectorizerCacheKey(backgroundChanged), sourceVectorizerCacheKey(original));
 });
 
 test("vectorizer line adjustment clamps to half steps inside range", () => {

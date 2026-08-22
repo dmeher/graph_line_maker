@@ -70,11 +70,10 @@ export function fillRegionNumberForRender(
  * earlier ones unconditionally, which meant a click resolved to whichever
  * enclosure happened to be merged last rather than the one the user aimed at.
  *
- * When `regionAreas` is supplied the tighter enclosure wins instead: the region
- * with fewer pixels keeps the contested pixel, so filling a small pocket that
- * sits inside another layer's large enclosure fills the pocket. The result no
- * longer depends on layer order. Without the map the previous last-wins
- * behaviour is retained.
+ * When `regionAreas` is supplied the tighter enclosure wins: the region with
+ * fewer pixels keeps the contested pixel, so filling a small pocket that sits
+ * inside another layer's large enclosure fills the pocket. The result no
+ * longer depends on source order.
  */
 export function mergeLayerPixelMasks(
   fillRegionMap: Uint16Array,

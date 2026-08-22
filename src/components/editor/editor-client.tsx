@@ -72,7 +72,6 @@ import {
   graphBrushIntersectsPlacedContent,
   graphPixelToSourcePixel,
   graphPolygonIntersectsPlacedContent,
-  isGraphPixelWithinPlacedContent,
   sourcePixelRadiusForGraphBrush,
   type ContentBounds,
   type PlacementTransform,
@@ -92,6 +91,7 @@ import {
   writeEditorSessionDraft,
 } from "@/lib/editor/session-draft";
 import { graphExportBlockReason } from "@/lib/editor/export-readiness";
+import { selectedEraseTarget } from "@/lib/editor/selected-erase-target";
 import {
   applySettingsHistoryCommand,
   boundSettingsHistory,
@@ -107,7 +107,6 @@ import {
   sourceAssetCacheKey,
   sourceLayouts,
   sourceProcessingCacheKey,
-  sourceRenderOrder,
   sourceVectorizerCacheKey,
   scaleLayerBoxToBounds,
   snapRectToLayerGuides,
@@ -128,12 +127,17 @@ import {
 import {
   DEFAULT_BACKGROUND_TOLERANCE,
   MAX_BACKGROUND_TOLERANCE,
+  MAX_ERASE_POINTS_PER_LAYER,
+  MAX_ERASE_POINTS_PER_STROKE,
+  MAX_ERASE_STROKES_PER_LAYER,
   MAX_POLYGON_UV_OVERSHOOT,
   MIN_BACKGROUND_TOLERANCE,
   backgroundRemovalSignature,
   clampBackgroundTolerance,
+  clampEraseRadius,
   eraseStrokesSignature,
   normalizeBackgroundRemoval,
+  normalizeEraseBrushPoint,
   normalizeEraseStrokes,
   normalizeGroupId,
   normalizeLayerGroups,
@@ -387,8 +391,17 @@ type ImageEraseTarget = {
   placement: PlacementTransform;
   canvasWidth: number;
   canvasHeight: number;
-  lastPoint?: { x: number; y: number };
-  startsNewStroke: boolean;
+  /** A hidden source is editable but must not cut the visible preview. */
+  previewVisible: boolean;
+};
+type ImageEraseDraft = {
+  target: ImageEraseTarget;
+  strokes: GraphEraseStroke[];
+  activeStroke?: GraphEraseStroke;
+  lastSourcePoint?: { x: number; y: number };
+  workingCanvas: HTMLCanvasElement;
+  baseStrokeCount: number;
+  basePointCount: number;
 };
 type DragState = {
   kind: "viewport" | "pan" | "source" | "shape" | "clipart" | "resize-source" | "resize-shape" | "resize-selection" | "cell-paint" | "shape-draw" | "image-erase";
@@ -428,7 +441,7 @@ type DragState = {
   startClipartY?: number;
   layerStarts?: Map<SelectableLayerKey, LayerSnapBox>;
   selectionBounds?: LayerSnapBox;
-  eraseTargets?: Map<string, ImageEraseTarget>;
+  eraseDraft?: ImageEraseDraft;
 };
 type UploadedSourceImage = {
   id: string;
@@ -1523,6 +1536,10 @@ export function EditorClient({
   // Derived working canvases (pristine source -> background removal -> erase strokes), cached by extras signature.
   const sourceWorkingCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const sourceWorkingSigRef = useRef<Map<string, string>>(new Map());
+  // Base trace inputs exclude erase geometry and can reuse the vectorized asset
+  // cache. The processor applies erase strokes to an isolated trace clone.
+  const sourceTraceCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
+  const sourceTraceSigRef = useRef<Map<string, string>>(new Map());
   const clipartCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const processedCanvasRef = useRef<HTMLCanvasElement | null>(null);
   // Transparent artwork-only canvas (no grid/backdrop) used as the preview base;
@@ -1564,6 +1581,7 @@ export function EditorClient({
   const lastProcessedSignatureRef = useRef<string | null>(null);
   const processedRevisionRef = useRef(0);
   const renderRequestRevisionRef = useRef(0);
+  const activeProcessingAbortRef = useRef<AbortController | null>(null);
   const cropDetectionUsedRef = useRef(false);
   const lastUploadedProcessedRevisionRef = useRef(project.processedImagePath ? 0 : -1);
   const lastDragProcessingAtRef = useRef(0);
@@ -1578,6 +1596,15 @@ export function EditorClient({
     forceNextProcessingRef.current = false;
     setIsDraggingGraph(true);
   }, []);
+
+  function invalidateActiveProcessingForErase() {
+    // A vector request may finish even after aborting. Advancing this revision
+    // makes its result ineligible to repaint over the transient brush preview.
+    renderRequestRevisionRef.current += 1;
+    activeProcessingAbortRef.current?.abort();
+    activeProcessingAbortRef.current = null;
+    setProcessing(false);
+  }
 
   useEffect(() => {
     let restored = createDefaultCommandCanvasLayout();
@@ -1825,6 +1852,7 @@ export function EditorClient({
   const sourceName = primarySource?.name ?? "Source image";
   const sourcePreviewUrl = primarySource ? sourceStatus[primarySource.id]?.previewUrl ?? primarySource.url ?? null : null;
   const selectedSource = selectedSourceId ? settings.sourceImages.find((source) => source.id === selectedSourceId) ?? null : null;
+  const selectedEraserSource = selectedEraseTarget(settings.sourceImages, selectedSourceId, selectedLayerKeys);
   const cropSource = selectedSource ?? primarySource;
   const cropSourcePreviewUrl = cropSource ? sourceStatus[cropSource.id]?.previewUrl ?? cropSource.url ?? null : null;
   const selectedSourceLayout = selectedSourceId ? sourceLayouts(settings.sourceImages).find((layout) => layout.source.id === selectedSourceId) ?? null : null;
@@ -2795,6 +2823,8 @@ export function EditorClient({
   }
 
   function clearSourceErasing(sourceId: string) {
+    const selectedTarget = selectedEraseTarget(settingsRef.current.sourceImages, selectedSourceId, selectedLayerKeys);
+    if (!selectedTarget || selectedTarget.id !== sourceId) return;
     setSettingsWithHistory((current) => ({
       ...current,
       fillRegions: removeFillRegionOverridesForScopes(current.fillRegions, [fillRegionLayerScope("source", sourceId)]),
@@ -3061,67 +3091,6 @@ export function EditorClient({
         type: "source",
         id: layout.source.id,
         name: layout.source.name,
-        detail: "Source image",
-        layout,
-      });
-    }
-    return hits;
-  }
-
-  /**
-   * Precise source hit testing for destructive tools. Selection intentionally
-   * keeps its forgiving layout-box hit areas, while erase/lasso operate only
-   * on the rendered, transformed source-content frames. The eraser can expand
-   * the hit by its graph-space brush radius so an image is affected whenever
-   * its visible content sits inside the brush, not just beneath its centre.
-   */
-  function erasableSourceHitsAtPoint(
-    graphX: number,
-    graphY: number,
-    options: { brushRadius?: number; brushShape?: GraphEraseBrushShape } = {},
-  ): LayerHit[] {
-    const current = settingsRef.current;
-    const hits: LayerHit[] = [];
-    const layouts = sourceLayouts(current.sourceImages);
-    const graphPixelX = graphX * GRAPH_MAJOR_CELL_PIXELS;
-    const graphPixelY = graphY * GRAPH_MAJOR_CELL_PIXELS;
-
-    for (let index = layouts.length - 1; index >= 0; index -= 1) {
-      const layout = layouts[index];
-      const source = layout?.source;
-      if (!source || source.visible === false || source.locked) continue;
-      const pristine = sourceCanvasesRef.current.get(source.id);
-      if (!pristine) continue;
-      const bounds = findContentBounds(pristine);
-      const placement: PlacementTransform = {
-        drawX: layout.x * GRAPH_MAJOR_CELL_PIXELS + current.imageOffsetX,
-        drawY: layout.y * GRAPH_MAJOR_CELL_PIXELS + current.imageOffsetY,
-        drawWidth: layout.width * GRAPH_MAJOR_CELL_PIXELS,
-        drawHeight: layout.height * GRAPH_MAJOR_CELL_PIXELS,
-        rotationDegrees: source.rotationDegrees,
-        flipX: source.flipX,
-        flipY: source.flipY,
-      };
-      const brushRadius = options.brushRadius;
-      // Lasso uses the shared `GraphEraseBrushShape` union too, but a
-      // pointer-driven brush can only render a circle or square footprint.
-      const brushShape = options.brushShape === "square" ? "square" : "circle";
-      const intersects = brushRadius && brushRadius > 0
-        ? graphBrushIntersectsPlacedContent(
-            graphPixelX,
-            graphPixelY,
-            brushRadius,
-            brushShape,
-            placement,
-            bounds,
-          )
-        : isGraphPixelWithinPlacedContent(graphPixelX, graphPixelY, placement, bounds, 1);
-      if (!intersects) continue;
-      hits.push({
-        key: `source:${source.id}`,
-        type: "source",
-        id: source.id,
-        name: source.name,
         detail: "Source image",
         layout,
       });
@@ -3534,10 +3503,9 @@ export function EditorClient({
     }
 
     // The brush stays visible anywhere inside the graph, not only over an
-    // image. It intentionally has no selected-layer affinity: every unlocked
-    // source whose content intersects the footprint is eligible for the same
-    // erase gesture. Its on-canvas ring deliberately comes straight from the
-    // graph-space size, never from a hovered source image's intrinsic scale.
+    // image. It targets only the explicit selected source, including a hidden
+    // one, and its ring comes straight from the graph-space size rather than
+    // the image's intrinsic scale.
     const radius = Math.max(4, imageEraserRadiusRef.current * zoom);
     const next = {
       x: outsideNumberMargin + point.x * GRAPH_MAJOR_CELL_PIXELS * zoom,
@@ -3558,67 +3526,69 @@ export function EditorClient({
     paintImageEraserCursor(next);
   }
 
-  /**
-   * Resolves every rendered source currently touched by the brush. A target
-   * keeps only its own source-local path state, so one drag stays a single
-   * undo step without joining strokes across unrelated images when the brush
-   * leaves and re-enters an overlap.
-   */
-  function collectEraseTargetsAtPoint(
-    dragState: DragState,
-    point: { x: number; y: number },
-  ): ImageEraseTarget[] {
-    const targets = dragState.eraseTargets ?? new Map<string, ImageEraseTarget>();
-    dragState.eraseTargets = targets;
-    const activeIds = new Set<string>();
-    const activeTargets: ImageEraseTarget[] = [];
-
-    for (const hit of erasableSourceHitsAtPoint(point.x, point.y, {
-      brushRadius: imageEraserRadiusRef.current,
-      brushShape: imageEraserShapeRef.current,
-    })) {
-      if (hit.type !== "source") continue;
-      const source = hit.layout.source;
-      const details = placementForSource(source);
-      const pristine = sourceCanvasesRef.current.get(source.id);
-      if (!details || !pristine?.width || !pristine.height) continue;
-
-      let target = targets.get(source.id);
-      if (!target) {
-        target = {
-          sourceId: source.id,
-          bounds: details.bounds,
-          placement: details.placement,
-          canvasWidth: pristine.width,
-          canvasHeight: pristine.height,
-          startsNewStroke: true,
-        };
-        targets.set(source.id, target);
-      } else {
-        target.bounds = details.bounds;
-        target.placement = details.placement;
-        target.canvasWidth = pristine.width;
-        target.canvasHeight = pristine.height;
-      }
-      activeIds.add(source.id);
-      activeTargets.push(target);
-    }
-
-    // A later re-entry must start a new stroke for that source, otherwise a
-    // gap between images would be bridged by a line of erased pixels.
-    for (const [sourceId, target] of targets) {
-      if (!activeIds.has(sourceId)) target.startsNewStroke = true;
-    }
-    return activeTargets;
+  /** Returns the only source that destructive tools may edit in this gesture. */
+  function currentSelectedEraseSource() {
+    return selectedEraseTarget(settingsRef.current.sourceImages, selectedSourceId, selectedLayerKeys);
   }
 
-  function startImageEraseAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
-    const point = graphPointAtPointer(event);
-    if (!point || !collectEraseTargetsAtPoint(dragState, point).length) {
-      setNotice({ tone: "info", text: "Start the brush on an unlocked image to erase." });
-      return;
+  function selectedEraseTargetAtPoint(point: { x: number; y: number }): ImageEraseTarget | null {
+    const source = currentSelectedEraseSource();
+    if (!source) return null;
+    const details = placementForSource(source);
+    const pristine = sourceCanvasesRef.current.get(source.id);
+    if (!details || !pristine?.width || !pristine.height) return null;
+    const intersects = graphBrushIntersectsPlacedContent(
+      point.x * GRAPH_MAJOR_CELL_PIXELS,
+      point.y * GRAPH_MAJOR_CELL_PIXELS,
+      imageEraserRadiusRef.current,
+      imageEraserShapeRef.current === "square" ? "square" : "circle",
+      details.placement,
+      details.bounds,
+    );
+    if (!intersects) return null;
+    return {
+      sourceId: source.id,
+      bounds: details.bounds,
+      placement: details.placement,
+      canvasWidth: pristine.width,
+      canvasHeight: pristine.height,
+      previewVisible: source.visible !== false,
+    };
+  }
+
+  function startImageEraseAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState): boolean {
+    const selectedSourceForErase = currentSelectedEraseSource();
+    if (!selectedSourceForErase) {
+      setNotice({ tone: "info", text: "Select one unlocked source image to erase." });
+      return false;
     }
+    const existingStrokes = normalizeEraseStrokes(selectedSourceForErase.eraseStrokes);
+    const existingPointCount = existingStrokes.reduce((total, stroke) => total + stroke.points.length, 0);
+    if (existingStrokes.length >= MAX_ERASE_STROKES_PER_LAYER || existingPointCount >= MAX_ERASE_POINTS_PER_LAYER) {
+      setNotice({ tone: "info", text: "This source has reached the erase-detail limit. Undo an older erase before adding another." });
+      return false;
+    }
+    const point = graphPointAtPointer(event);
+    const target = point ? selectedEraseTargetAtPoint(point) : null;
+    if (!target) {
+      setNotice({ tone: "info", text: "Start the brush on the selected source image." });
+      return false;
+    }
+    const working = ensureWorkingSourceCanvas(selectedSourceForErase);
+    if (!working) {
+      setNotice({ tone: "error", text: "The selected source is still loading. Try again in a moment." });
+      return false;
+    }
+    dragState.eraseDraft = {
+      target,
+      strokes: [],
+      workingCanvas: cloneSourceCanvas(working),
+      baseStrokeCount: existingStrokes.length,
+      basePointCount: existingPointCount,
+    };
+    invalidateActiveProcessingForErase();
     eraseImageAtPointer(event, dragState);
+    return true;
   }
 
   /**
@@ -3635,73 +3605,60 @@ export function EditorClient({
     setLassoCursor(null);
   }
 
-  /**
-   * Resolves every unlocked source touched or enclosed by a lasso. The lasso
-   * has no selected/topmost affinity: intersecting artwork is the only target
-   * rule, which makes overlapping source edits deterministic.
-   */
-  function resolveLassoTargetSources(vertices: LassoVertex[]): GraphSourceImage[] {
+  /** Resolves the selected source only when the traced region reaches it. */
+  function resolveLassoTargetSource(vertices: LassoVertex[]): GraphSourceImage | null {
+    const source = currentSelectedEraseSource();
+    if (!source) return null;
     const graphPoints = vertices.map((vertex) => ({
       x: vertex.x * GRAPH_MAJOR_CELL_PIXELS,
       y: vertex.y * GRAPH_MAJOR_CELL_PIXELS,
     }));
-    return sourceRenderOrder(settingsRef.current.sourceImages).flatMap((layout) => {
-      const source = layout.source;
-      if (source.visible === false || source.locked) return [];
-      const details = placementForSource(source);
-      return details && graphPolygonIntersectsPlacedContent(graphPoints, details.placement, details.bounds, 1)
-        ? [source]
-        : [];
-    });
+    const details = placementForSource(source);
+    return details && graphPolygonIntersectsPlacedContent(graphPoints, details.placement, details.bounds, 1)
+      ? source
+      : null;
   }
 
-  /**
-   * Commits one traced region to every intersected source. The polygon is
-   * clipped in each source's own coordinate system before it is converted to
-   * normalized UV, so a large lasso can safely cover a smaller overlapping
-   * image without producing invalid coordinates or selecting a single layer.
-   */
+  /** Commits one traced region to the selected source only. */
   function commitLassoRegion(vertices: LassoVertex[]) {
     if (vertices.length < 3) {
       setNotice({ tone: "info", text: "Place at least three points before closing." });
       return;
     }
-    const targets = resolveLassoTargetSources(vertices);
-    if (!targets.length) {
-      setNotice({ tone: "info", text: "Trace a region that intersects an unlocked image." });
+    const selectedSourceForErase = currentSelectedEraseSource();
+    if (!selectedSourceForErase) {
+      setNotice({ tone: "info", text: "Select one unlocked source image before using the lasso." });
+      return;
+    }
+    const target = resolveLassoTargetSource(vertices);
+    if (!target) {
+      setNotice({ tone: "info", text: "Trace a region that intersects the selected source image." });
       return;
     }
     const graphPoints = vertices.map((vertex) => ({
       x: vertex.x * GRAPH_MAJOR_CELL_PIXELS,
       y: vertex.y * GRAPH_MAJOR_CELL_PIXELS,
     }));
-    const targetPolygons = new Map<string, LassoVertex[]>();
-    let hasLoadingTarget = false;
-    for (const target of targets) {
-      const details = placementForSource(target);
-      const pristine = sourceCanvasesRef.current.get(target.id);
-      if (!details || !pristine?.width || !pristine.height) {
-        hasLoadingTarget = true;
-        continue;
-      }
-      const sourcePolygon = clipGraphPolygonToPlacedContent(graphPoints, details.placement, details.bounds);
-      if (sourcePolygon.length < 3) continue;
-      const points = sourcePolygon.map((point) => ({ x: point.x / pristine.width, y: point.y / pristine.height }));
-      const outOfRange = points.some((point) => (
-        point.x < -MAX_POLYGON_UV_OVERSHOOT
-        || point.x > 1 + MAX_POLYGON_UV_OVERSHOOT
-        || point.y < -MAX_POLYGON_UV_OVERSHOOT
-        || point.y > 1 + MAX_POLYGON_UV_OVERSHOOT
-      ));
-      if (!outOfRange) targetPolygons.set(target.id, points);
+    const details = placementForSource(target);
+    const pristine = sourceCanvasesRef.current.get(target.id);
+    if (!details || !pristine?.width || !pristine.height) {
+      setNotice({ tone: "error", text: "The selected source is still loading. Try again in a moment." });
+      return;
     }
-    if (!targetPolygons.size) {
-      setNotice({
-        tone: hasLoadingTarget ? "error" : "info",
-        text: hasLoadingTarget
-          ? "The intersected images are still loading. Try again in a moment."
-          : "Trace a region that overlaps image content.",
-      });
+    const sourcePolygon = clipGraphPolygonToPlacedContent(graphPoints, details.placement, details.bounds);
+    if (sourcePolygon.length < 3) {
+      setNotice({ tone: "info", text: "Trace a region that overlaps the selected source image." });
+      return;
+    }
+    const points = sourcePolygon.map((point) => ({ x: point.x / pristine.width, y: point.y / pristine.height }));
+    const outOfRange = points.some((point) => (
+      point.x < -MAX_POLYGON_UV_OVERSHOOT
+      || point.x > 1 + MAX_POLYGON_UV_OVERSHOOT
+      || point.y < -MAX_POLYGON_UV_OVERSHOOT
+      || point.y > 1 + MAX_POLYGON_UV_OVERSHOOT
+    ));
+    if (outOfRange) {
+      setNotice({ tone: "error", text: "The lasso region is outside the selected source's editable bounds." });
       return;
     }
 
@@ -3709,11 +3666,8 @@ export function EditorClient({
     // contract before it reaches `normalizeEraseStrokes`.
     const fill = lassoFill === "erase" ? undefined : lassoFill;
     setSettingsWithHistory((current) => {
-      let changed = false;
       const sourceImages = current.sourceImages.map((source) => {
-        const points = targetPolygons.get(source.id);
-        if (!points) return source;
-        changed = true;
+        if (source.id !== target.id) return source;
         const nextStroke = fill
           ? { points, radius: 0.01, shape: "polygon" as const, fill }
           : { points, radius: 0.01, shape: "polygon" as const };
@@ -3722,7 +3676,7 @@ export function EditorClient({
           eraseStrokes: normalizeEraseStrokes([...(source.eraseStrokes ?? []), nextStroke]),
         };
       });
-      return changed ? deriveGraphSettings({ ...current, sourceImages }) : current;
+      return deriveGraphSettings({ ...current, sourceImages });
     });
     cancelLasso();
   }
@@ -3752,7 +3706,10 @@ export function EditorClient({
     target: ImageEraseTarget,
     sourcePoint: { x: number; y: number },
     previousSourcePoint: { x: number; y: number } | undefined,
+    radius: number,
+    shape: GraphEraseBrushShape,
   ) {
+    if (!target.previewVisible) return;
     const preview = previewCanvasRef.current;
     const { placement, bounds } = target;
     if (!preview || !bounds.width || !bounds.height) return;
@@ -3767,12 +3724,6 @@ export function EditorClient({
     const centerY = placement.drawY + placement.drawHeight / 2;
     const sourceCenterX = bounds.x + bounds.width / 2;
     const sourceCenterY = bounds.y + bounds.height / 2;
-    const radius = sourcePixelRadiusForGraphBrush(
-      imageEraserRadiusRef.current,
-      placement,
-      bounds,
-    );
-
     context.save();
     context.globalCompositeOperation = "destination-out";
     context.fillStyle = "rgba(0,0,0,1)";
@@ -3786,7 +3737,51 @@ export function EditorClient({
     context.rect(bounds.x, bounds.y, bounds.width, bounds.height);
     context.clip();
 
-    if (imageEraserShapeRef.current === "square") {
+    if (shape === "square") {
+      const size = radius * 2;
+      const stamp = (x: number, y: number) => context.fillRect(x - radius, y - radius, size, size);
+      if (previousSourcePoint) {
+        const distance = Math.hypot(sourcePoint.x - previousSourcePoint.x, sourcePoint.y - previousSourcePoint.y);
+        const steps = Math.max(1, Math.ceil(distance / Math.max(1, radius / 2)));
+        for (let step = 1; step <= steps; step += 1) {
+          stamp(
+            previousSourcePoint.x + ((sourcePoint.x - previousSourcePoint.x) * step) / steps,
+            previousSourcePoint.y + ((sourcePoint.y - previousSourcePoint.y) * step) / steps,
+          );
+        }
+      }
+      stamp(sourcePoint.x, sourcePoint.y);
+    } else {
+      if (previousSourcePoint) {
+        context.lineCap = "round";
+        context.lineJoin = "round";
+        context.lineWidth = radius * 2;
+        context.beginPath();
+        context.moveTo(previousSourcePoint.x, previousSourcePoint.y);
+        context.lineTo(sourcePoint.x, sourcePoint.y);
+        context.stroke();
+      }
+      context.beginPath();
+      context.arc(sourcePoint.x, sourcePoint.y, radius, 0, Math.PI * 2);
+      context.fill();
+    }
+    context.restore();
+  }
+
+  function paintEraseStrokeSegment(
+    canvas: HTMLCanvasElement,
+    stroke: GraphEraseStroke,
+    sourcePoint: { x: number; y: number },
+    previousSourcePoint: { x: number; y: number } | undefined,
+  ) {
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return;
+    const radius = Math.max(0.5, stroke.radius * canvas.width);
+    context.save();
+    context.globalCompositeOperation = "destination-out";
+    context.fillStyle = "rgba(0,0,0,1)";
+    context.strokeStyle = "rgba(0,0,0,1)";
+    if (stroke.shape === "square") {
       const size = radius * 2;
       const stamp = (x: number, y: number) => context.fillRect(x - radius, y - radius, size, size);
       if (previousSourcePoint) {
@@ -3818,90 +3813,85 @@ export function EditorClient({
   }
 
   function eraseImageAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
+    const draft = dragState.eraseDraft;
     const point = graphPointAtPointer(event);
-    if (!point) return;
-    const mutations = new Map<string, {
-      point: { x: number; y: number };
-      radius: number;
-      startNewStroke: boolean;
-      target: ImageEraseTarget;
-      sourcePoint: { x: number; y: number };
-      previousSourcePoint?: { x: number; y: number };
-    }>();
+    if (!draft || !point) return;
+    const target = draft.target;
+    const intersects = graphBrushIntersectsPlacedContent(
+      point.x * GRAPH_MAJOR_CELL_PIXELS,
+      point.y * GRAPH_MAJOR_CELL_PIXELS,
+      imageEraserRadiusRef.current,
+      imageEraserShapeRef.current === "square" ? "square" : "circle",
+      target.placement,
+      target.bounds,
+    );
+    if (!intersects) {
+      draft.lastSourcePoint = undefined;
+      draft.activeStroke = undefined;
+      return;
+    }
 
-    for (const target of collectEraseTargetsAtPoint(dragState, point)) {
-      if (!target.canvasWidth || !target.canvasHeight) continue;
-      const sourceRadiusPx = sourcePixelRadiusForGraphBrush(
-        imageEraserRadiusRef.current,
-        target.placement,
-        target.bounds,
-      );
-      const minStep = Math.max(1, sourceRadiusPx * 0.6);
-      const mappedPoint = graphPixelToSourcePixel(
-        point.x * GRAPH_MAJOR_CELL_PIXELS,
-        point.y * GRAPH_MAJOR_CELL_PIXELS,
-        target.placement,
-        target.bounds,
-      );
-      // A brush can meet an image at its content edge while its centre is just
-      // outside the source canvas. Store the nearest valid UV centre; canvas
-      // clipping preserves only the portion that actually overlaps the image.
-      const sourcePoint = {
-        x: Math.min(target.canvasWidth, Math.max(0, mappedPoint.x)),
-        y: Math.min(target.canvasHeight, Math.max(0, mappedPoint.y)),
+    const sourceRadiusPx = sourcePixelRadiusForGraphBrush(
+      imageEraserRadiusRef.current,
+      target.placement,
+      target.bounds,
+    );
+    const minStep = Math.max(1, sourceRadiusPx * 0.6);
+    const mappedPoint = graphPixelToSourcePixel(
+      point.x * GRAPH_MAJOR_CELL_PIXELS,
+      point.y * GRAPH_MAJOR_CELL_PIXELS,
+      target.placement,
+      target.bounds,
+    );
+    const sourcePoint = {
+      x: Math.min(target.canvasWidth, Math.max(0, mappedPoint.x)),
+      y: Math.min(target.canvasHeight, Math.max(0, mappedPoint.y)),
+    };
+    const previousSourcePoint = draft.lastSourcePoint;
+    if (previousSourcePoint && Math.hypot(sourcePoint.x - previousSourcePoint.x, sourcePoint.y - previousSourcePoint.y) < minStep) return;
+
+    let stroke = draft.activeStroke;
+    if (!stroke) {
+      if (draft.baseStrokeCount + draft.strokes.length >= MAX_ERASE_STROKES_PER_LAYER) return;
+      stroke = {
+        points: [],
+        radius: clampEraseRadius(sourceRadiusPx / target.canvasWidth),
+        shape: imageEraserShapeRef.current,
       };
-      const last = target.lastPoint;
-      if (last && Math.hypot(sourcePoint.x - last.x, sourcePoint.y - last.y) < minStep) continue;
-      target.lastPoint = sourcePoint;
-      const startNewStroke = target.startsNewStroke;
-      target.startsNewStroke = false;
-      mutations.set(target.sourceId, {
-        point: { x: sourcePoint.x / target.canvasWidth, y: sourcePoint.y / target.canvasHeight },
-        radius: Math.max(0.001, Math.min(0.5, sourceRadiusPx / target.canvasWidth)),
-        startNewStroke,
-        target,
-        sourcePoint,
-        previousSourcePoint: startNewStroke ? undefined : last,
-      });
+      draft.strokes.push(stroke);
+      draft.activeStroke = stroke;
     }
-    if (!mutations.size) return;
-
-    // Fast feedback is a preview only; every target still receives its own
-    // persisted UV stroke below and the settled render remains authoritative.
-    for (const mutation of mutations.values()) {
-      paintEraseFootprintPreview(
-        mutation.target,
-        mutation.sourcePoint,
-        mutation.previousSourcePoint,
-      );
+    const draftedPointCount = draft.strokes.reduce((total, candidate) => total + candidate.points.length, 0);
+    if (draft.basePointCount + draftedPointCount >= MAX_ERASE_POINTS_PER_LAYER) return;
+    if (stroke.points.length >= MAX_ERASE_POINTS_PER_STROKE) {
+      draft.activeStroke = undefined;
+      draft.lastSourcePoint = undefined;
+      return;
     }
-
-    const current = settingsRef.current;
-    if (!dragState.historyRecorded) {
-      pushUndoSettings(current);
-      dragState.historyRecorded = true;
-    }
-    const sourceImages = current.sourceImages.map((source) => {
-      const mutation = mutations.get(source.id);
-      if (!mutation) return source;
-      const strokes = source.eraseStrokes
-        ? source.eraseStrokes.map((stroke) => ({ ...stroke, points: [...stroke.points] }))
-        : [];
-      if (strokes.length && !mutation.startNewStroke) {
-        const activeStroke = strokes[strokes.length - 1];
-        strokes[strokes.length - 1] = { ...activeStroke, points: [...activeStroke.points, mutation.point] };
-      } else {
-        strokes.push({
-          points: [mutation.point],
-          radius: mutation.radius,
-          shape: imageEraserShapeRef.current,
-        });
-      }
-      return { ...source, eraseStrokes: normalizeEraseStrokes(strokes) };
+    const normalizedPoint = normalizeEraseBrushPoint({
+      x: sourcePoint.x / target.canvasWidth,
+      y: sourcePoint.y / target.canvasHeight,
     });
-    const next = deriveGraphSettings({ ...current, sourceImages });
-    settingsRef.current = next;
-    setSettings(next);
+    const normalizedSourcePoint = {
+      x: normalizedPoint.x * target.canvasWidth,
+      y: normalizedPoint.y * target.canvasHeight,
+    };
+    const normalizedPreviousSourcePoint = previousSourcePoint
+      ? {
+          x: normalizeEraseBrushPoint({ x: previousSourcePoint.x / target.canvasWidth, y: previousSourcePoint.y / target.canvasHeight }).x * target.canvasWidth,
+          y: normalizeEraseBrushPoint({ x: previousSourcePoint.x / target.canvasWidth, y: previousSourcePoint.y / target.canvasHeight }).y * target.canvasHeight,
+        }
+      : undefined;
+    stroke.points.push(normalizedPoint);
+    paintEraseFootprintPreview(
+      target,
+      normalizedSourcePoint,
+      normalizedPreviousSourcePoint,
+      stroke.radius * target.canvasWidth,
+      stroke.shape ?? "circle",
+    );
+    paintEraseStrokeSegment(draft.workingCanvas, stroke, normalizedSourcePoint, normalizedPreviousSourcePoint);
+    draft.lastSourcePoint = normalizedSourcePoint;
   }
 
   function startLineAtPointer(event: ReactPointerEvent<HTMLElement>, dragState: DragState) {
@@ -4143,8 +4133,12 @@ export function EditorClient({
       };
       dragStateRef.current = dragState;
       if (isImageErase) {
-        startImageEraseAtPointer(event, dragState);
-        beginGraphInteraction();
+        if (startImageEraseAtPointer(event, dragState)) {
+          beginGraphInteraction();
+        } else {
+          dragStateRef.current = null;
+          canvas.releasePointerCapture(event.pointerId);
+        }
       } else {
         startLineAtPointer(event, dragState);
       }
@@ -4757,6 +4751,35 @@ export function EditorClient({
     }
   }
 
+  function commitImageEraseDraft(draft: ImageEraseDraft) {
+    const draftStrokes = normalizeEraseStrokes(draft.strokes);
+    if (!draftStrokes.length) return false;
+    let nextWorkingSignature: string | null = null;
+    setSettingsWithHistory((current) => {
+      const source = current.sourceImages.find((candidate) => candidate.id === draft.target.sourceId);
+      if (!source || source.visible === false || source.locked) return current;
+      const eraseStrokes = normalizeEraseStrokes([...(source.eraseStrokes ?? []), ...draftStrokes]);
+      if (eraseStrokesSignature(eraseStrokes) === eraseStrokesSignature(source.eraseStrokes)) return current;
+      nextWorkingSignature = `${eraseStrokesSignature(eraseStrokes)}|${backgroundRemovalSignature(source.backgroundRemoval)}`;
+      return {
+        ...current,
+        sourceImages: current.sourceImages.map((candidate) => (
+          candidate.id === source.id ? { ...candidate, eraseStrokes } : candidate
+        )),
+      };
+    });
+    if (!nextWorkingSignature) return false;
+    sourceWorkingCanvasesRef.current.set(draft.target.sourceId, draft.workingCanvas);
+    sourceWorkingSigRef.current.set(draft.target.sourceId, nextWorkingSignature);
+    forceNextProcessingRef.current = true;
+    return true;
+  }
+
+  function restorePreviewAfterCancelledErase() {
+    const artwork = artworkCanvasRef.current;
+    if (artwork) drawPreview(artwork);
+  }
+
   function endGraphDrag(event: ReactPointerEvent<HTMLElement>) {
     const dragState = dragStateRef.current;
     if (!dragState || dragState.pointerId !== event.pointerId) return;
@@ -4771,6 +4794,14 @@ export function EditorClient({
     }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (dragState.kind === "image-erase") {
+      if (event.type === "pointercancel") restorePreviewAfterCancelledErase();
+      else if (dragState.eraseDraft) commitImageEraseDraft(dragState.eraseDraft);
+      dragStateRef.current = null;
+      setIsDraggingGraph(false);
+      setSnapGuides([]);
+      return;
     }
     if (dragState.moved && (dragState.kind !== "shape-draw" || dragState.historyRecorded)) {
       forceNextProcessingRef.current = true;
@@ -4918,6 +4949,8 @@ export function EditorClient({
     sourceCanvasesRef.current = new Map();
     sourceWorkingCanvasesRef.current = new Map();
     sourceWorkingSigRef.current = new Map();
+    sourceTraceCanvasesRef.current = new Map();
+    sourceTraceSigRef.current = new Map();
     processedCanvasRef.current = null;
     artworkCanvasRef.current = null;
     setProcessing(false);
@@ -4988,6 +5021,8 @@ export function EditorClient({
         sourceCanvasesRef.current = canvases;
         sourceWorkingCanvasesRef.current = new Map();
         sourceWorkingSigRef.current = new Map();
+        sourceTraceCanvasesRef.current = new Map();
+        sourceTraceSigRef.current = new Map();
         sourceCanvasRef.current = canvases.get(sources[0]?.id ?? "") ?? null;
         sourcePreviewObjectUrlsRef.current = previewUrls;
         setSourceStatus(nextStatus);
@@ -5007,7 +5042,21 @@ export function EditorClient({
     };
   }, [draftChecked, project.id, sourceLoadKey]);
 
-  function buildWorkingSourceCanvas(source: GraphSourceImage, pristine: HTMLCanvasElement): HTMLCanvasElement {
+  function cloneSourceCanvas(source: HTMLCanvasElement): HTMLCanvasElement {
+    const canvas = document.createElement("canvas");
+    canvas.width = source.width;
+    canvas.height = source.height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return source;
+    context.drawImage(source, 0, 0);
+    return canvas;
+  }
+
+  function buildWorkingSourceCanvas(
+    source: GraphSourceImage,
+    pristine: HTMLCanvasElement,
+    options: { applyEraseStrokes?: boolean } = {},
+  ): HTMLCanvasElement {
     const canvas = document.createElement("canvas");
     canvas.width = pristine.width;
     canvas.height = pristine.height;
@@ -5020,7 +5069,7 @@ export function EditorClient({
       imageData.data.set(cleaned.data);
       context.putImageData(imageData, 0, 0);
     }
-    const strokes = source.eraseStrokes ?? [];
+    const strokes = options.applyEraseStrokes === false ? [] : source.eraseStrokes ?? [];
     if (strokes.length) {
       // Strokes are stored as normalized UV coordinates; scale to this canvas's resolution.
       const scaleX = canvas.width;
@@ -5115,6 +5164,24 @@ export function EditorClient({
     return derived;
   }
 
+  /** Returns the background-cleaned source used as the reusable vector-trace input. */
+  function ensureSourceTraceCanvas(source: GraphSourceImage): HTMLCanvasElement | null {
+    const pristine = sourceCanvasesRef.current.get(source.id);
+    if (!pristine) return null;
+    const signature = backgroundRemovalSignature(source.backgroundRemoval);
+    if (signature === "0") {
+      sourceTraceCanvasesRef.current.delete(source.id);
+      sourceTraceSigRef.current.set(source.id, signature);
+      return pristine;
+    }
+    const cached = sourceTraceCanvasesRef.current.get(source.id);
+    if (cached && sourceTraceSigRef.current.get(source.id) === signature) return cached;
+    const traceCanvas = buildWorkingSourceCanvas(source, pristine, { applyEraseStrokes: false });
+    sourceTraceCanvasesRef.current.set(source.id, traceCanvas);
+    sourceTraceSigRef.current.set(source.id, signature);
+    return traceCanvas;
+  }
+
   const currentProcessingSignature = useMemo(
     () => buildProcessingSignature(settings),
     [settings],
@@ -5206,6 +5273,7 @@ export function EditorClient({
     if (settings.clipartImages.length && (!clipartLoadSettled || !clipartReady)) return;
     let cancelled = false;
     const controller = new AbortController();
+    activeProcessingAbortRef.current = controller;
     const dragActive = isDraggingGraph && dragStateRef.current !== null;
     const dragKind = dragStateRef.current?.kind;
     // Source moves have a DOM overlay, while erasing paints a clipped
@@ -5223,6 +5291,7 @@ export function EditorClient({
       return () => {
         cancelled = true;
         controller.abort();
+        if (activeProcessingAbortRef.current === controller) activeProcessingAbortRef.current = null;
       };
     }
 
@@ -5234,6 +5303,7 @@ export function EditorClient({
       return () => {
         cancelled = true;
         controller.abort();
+        if (activeProcessingAbortRef.current === controller) activeProcessingAbortRef.current = null;
       };
     }
 
@@ -5262,23 +5332,26 @@ export function EditorClient({
       }
       setProcessing(true);
       const startAt = performance.now();
-      const layouts = sourceRenderOrder(settings.sourceImages);
+      const layouts = sourceLayouts(settings.sourceImages);
       const sourceLayers = layouts
         .filter((layout) => layout.source.visible !== false && sourceCanvasesRef.current.has(layout.source.id))
         .map((layout) => {
           const pristineSourceCanvas = sourceCanvasesRef.current.get(layout.source.id);
           const sourceCanvas = ensureWorkingSourceCanvas(layout.source);
-          if (!sourceCanvas || !pristineSourceCanvas) throw new Error(`${layout.source.name} is not available.`);
+          const traceCanvas = ensureSourceTraceCanvas(layout.source);
+          if (!sourceCanvas || !traceCanvas || !pristineSourceCanvas) throw new Error(`${layout.source.name} is not available.`);
           return {
             id: fillRegionLayerScope("source", layout.source.id),
             canvas: sourceCanvas,
             settings: sourceSettings(settings, layout.source),
             vectorize: layout.source.vectorize !== false,
+            eraseStrokes: layout.source.eraseStrokes,
             vectorizerSource: {
-              canvas: sourceCanvas,
-              // Erasing/background removal changes pixels, not the physical
-              // source frame. Keep this pristine frame for placement so a cut
-              // at an artwork edge cannot re-crop and re-scale the layer.
+              // Only background removal affects the cached base trace. Erase
+              // geometry is applied to a clone after that trace is read.
+              canvas: traceCanvas,
+              // Keep the pristine frame for placement so a cut at an artwork
+              // edge cannot re-crop and re-scale the layer.
               contentBounds: findContentBounds(pristineSourceCanvas),
               placement: {
                 x: layout.x,
@@ -5491,6 +5564,7 @@ export function EditorClient({
     return () => {
       cancelled = true;
       controller.abort();
+      if (activeProcessingAbortRef.current === controller) activeProcessingAbortRef.current = null;
       processingDebounceRef.current?.cancel();
     };
   }, [
@@ -9287,7 +9361,7 @@ export function EditorClient({
                         <option value="square">Square</option>
                       </select>
                     </label>
-                    <button type="button" className="editor-context-toolbar__btn" onClick={() => { const target = selectedSource ?? primarySource; if (target) clearSourceErasing(target.id); }} disabled={!(selectedSource ?? primarySource)?.eraseStrokes?.length}>
+                    <button type="button" className="editor-context-toolbar__btn" onClick={() => { if (selectedEraserSource) clearSourceErasing(selectedEraserSource.id); }} disabled={!selectedEraserSource?.eraseStrokes?.length}>
                       <RotateCcw size={13} aria-hidden="true" />Restore
                     </button>
                     <button type="button" className="editor-context-toolbar__btn editor-context-toolbar__btn--primary" onClick={() => selectEditorTool("select")}>

@@ -55,6 +55,14 @@ function roundEraseCoord(value: number) {
   return Math.round(value * factor) / factor;
 }
 
+/** Normalizes one brush point without walking a whole persisted stroke list. */
+export function normalizeEraseBrushPoint(point: { x: number; y: number }) {
+  return {
+    x: roundEraseCoord(Math.max(-0.001, Math.min(1.001, point.x))),
+    y: roundEraseCoord(Math.max(-0.001, Math.min(1.001, point.y))),
+  };
+}
+
 /**
  * Normalize erase strokes: UV coords in 0..1, bounded strokes/points/total-points.
  * Strokes with out-of-range coordinates (e.g. legacy pixel-space drafts) are dropped

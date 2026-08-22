@@ -120,10 +120,6 @@ export function sourceLayouts(sources: GraphSourceImage[]): SourceLayout[] {
   }));
 }
 
-export function sourceRenderOrder(sources: GraphSourceImage[]): SourceLayout[] {
-  return sourceLayouts(sources).reverse();
-}
-
 function roundCells(value: number) {
   return Math.round(value * 100) / 100;
 }
@@ -283,7 +279,6 @@ export function sourceVectorizerCacheKey(source: GraphSourceImage) {
   return [
     "source",
     sourceAssetCacheKey(source),
-    eraseStrokesSignature(source.eraseStrokes),
     backgroundRemovalSignature(source.backgroundRemoval),
   ].join("|");
 }

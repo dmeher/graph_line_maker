@@ -13,6 +13,7 @@ import {
   majorEveryMinorFor,
   type GridBucket,
 } from "@/lib/canvas/grid-style";
+import { createInteriorGridNumberLabels } from "@/lib/canvas/grid-numbering";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 import type { PdfExportTile } from "@/lib/canvas/pdf-layout";
 
@@ -25,8 +26,6 @@ type OutsideGridNumberLines = {
 };
 
 const OUTSIDE_LABEL_MARGIN_PX = 34;
-const OUTSIDE_LABEL_TOP_Y = 6;
-const OUTSIDE_LABEL_BOTTOM_Y = 8;
 const OUTSIDE_LABEL_LEFT_X = 8;
 const OUTSIDE_LABEL_RIGHT_X = 10;
 const OUTSIDE_LABEL_FALLBACK_TOLERANCE_PX = Math.round(GRAPH_MAJOR_CELL_PIXELS * 0.9);
@@ -35,6 +34,7 @@ const MAX_TOTAL_PDF_PAGES = 240;
 // graph immediately above/below the boundary grid line without overlapping it —
 // only a hair's-width gap, while still running the full page width.
 const CUT_GUIDE_GAP_MM = 0.5;
+const TOP_BOTTOM_OUTSIDE_Y_OFFSET = 0.45;
 const LEFT_RIGHT_OUTSIDE_Y_OFFSET = 0.45;
 const OUTSIDE_GRID_NUMBER_COLOR = "#000000";
 const COMPANY_HALLMARK_PATH = "/brand/company-hallmark.jpeg";
@@ -81,25 +81,25 @@ function getOutsideGridNumberLines(settings: GraphSettings): OutsideGridNumberLi
   const graphWidthPx = graphWidth * GRAPH_MAJOR_CELL_PIXELS;
   const graphHeightPx = graphHeight * GRAPH_MAJOR_CELL_PIXELS;
 
-  const topBottomLabels = Array.from({ length: graphWidth }, (_, index) => ({
-    value: index + 1,
-    x: Math.round((index + 0.5) * GRAPH_MAJOR_CELL_PIXELS),
+  const topBottomLabels = createInteriorGridNumberLabels(graphWidth).map((label) => ({
+    value: label.value,
+    x: Math.round((label.cell - 0.5) * GRAPH_MAJOR_CELL_PIXELS),
   }));
-  const leftRightLabels = Array.from({ length: graphHeight }, (_, index) => ({
-    value: index + 1,
-    y: Math.round((index + LEFT_RIGHT_OUTSIDE_Y_OFFSET) * GRAPH_MAJOR_CELL_PIXELS),
+  const leftRightLabels = createInteriorGridNumberLabels(graphHeight).map((label) => ({
+    value: label.value,
+    y: Math.round((label.cell - 1 + LEFT_RIGHT_OUTSIDE_Y_OFFSET) * GRAPH_MAJOR_CELL_PIXELS),
   }));
 
   return {
     top: topBottomLabels.map((label) => ({
       value: label.value,
       x: label.x,
-      y: OUTSIDE_LABEL_TOP_Y - OUTSIDE_LABEL_MARGIN_PX,
+      y: -Math.round(TOP_BOTTOM_OUTSIDE_Y_OFFSET * GRAPH_MAJOR_CELL_PIXELS),
     })),
     bottom: topBottomLabels.map((label) => ({
       value: label.value,
       x: label.x,
-      y: graphHeightPx + OUTSIDE_LABEL_BOTTOM_Y,
+      y: Math.round(graphHeightPx + TOP_BOTTOM_OUTSIDE_Y_OFFSET * GRAPH_MAJOR_CELL_PIXELS),
     })),
     left: leftRightLabels.map((label) => ({
       value: label.value,

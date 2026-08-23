@@ -1,6 +1,8 @@
 export const MAX_PAGES_PER_PDF_FILE = 80;
 /** Fixed left/right printer-safe area used by every PDF and browser-print page. */
 export const PDF_HORIZONTAL_PAGE_MARGIN_MM = 10;
+/** Vertical printer-safe gutter used when outside grid numbers are printed above/below the graph. */
+export const PDF_VERTICAL_LABEL_MARGIN_MM = 7;
 /** Extra left lane for the first column when it contains the hallmark row. */
 export const PDF_FIRST_COLUMN_HALLMARK_MARGIN_MM = 40;
 
@@ -15,6 +17,8 @@ export type PdfExportSettings = {
   cellSizeCm: number;
   imagePadding?: number;
   pageMargin?: number;
+  showNumbers?: boolean;
+  gridNumberPlacement?: "inside" | "outside";
   printOrientation?: "auto" | "portrait" | "landscape";
   printHorizontalAlignment?: "left" | "center" | "right";
   printVerticalAlignment?: "top" | "center" | "bottom";
@@ -82,20 +86,22 @@ function safeVerticalPageMarginMm({
   canvasHeight,
   pageHeightMm,
   cellSizeMm,
+  minimumMarginMm = 0,
 }: {
   settings: PdfExportSettings;
   graphHeightMm: number;
   canvasHeight: number;
   pageHeightMm: number;
   cellSizeMm: number;
+  minimumMarginMm?: number;
 }) {
   const pageMarginPixels = Number(settings.pageMargin);
-  if (!Number.isFinite(pageMarginPixels) || pageMarginPixels <= 0) return 0;
-
   const pixelHeightMm = graphHeightMm / Math.max(1, canvasHeight);
-  const rawMarginMm = pageMarginPixels * pixelHeightMm;
+  const rawMarginMm = Number.isFinite(pageMarginPixels) && pageMarginPixels > 0 ? pageMarginPixels * pixelHeightMm : 0;
+  const requestedMarginMm = Math.max(0, minimumMarginMm, rawMarginMm);
+  if (requestedMarginMm <= 0) return 0;
   const maxMarginMm = Math.max(0, (pageHeightMm - Math.min(pageHeightMm, cellSizeMm)) / 2);
-  return Math.min(rawMarginMm, maxMarginMm);
+  return Math.min(requestedMarginMm, maxMarginMm);
 }
 
 function safeHorizontalPageMarginMm(pageWidthMm: number, cellSizeMm: number) {
@@ -143,12 +149,14 @@ export function createPdfExportPlan({
   const safeCanvasWidth = Math.max(1, Math.round(canvasWidth));
   const safeCanvasHeight = Math.max(1, Math.round(canvasHeight));
   const cellSizeMm = cmToMm(Math.max(0.05, safePositive(settings.cellSizeCm, 1)));
+  const needsOutsideGridNumberMargin = settings.showNumbers === true && settings.gridNumberPlacement === "outside";
   const pageVerticalMarginMm = safeVerticalPageMarginMm({
     settings,
     graphHeightMm: graphSize.heightMm,
     canvasHeight: safeCanvasHeight,
     pageHeightMm,
     cellSizeMm,
+    minimumMarginMm: needsOutsideGridNumberMargin ? PDF_VERTICAL_LABEL_MARGIN_MM : 0,
   });
   const pageHorizontalMarginMm = safeHorizontalPageMarginMm(pageWidthMm, cellSizeMm);
   const printablePageWidthMm = Math.max(

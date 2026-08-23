@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PDF_FIRST_COLUMN_HALLMARK_MARGIN_MM, createPdfExportPlan, getGraphPrintSizeMm } from "./pdf-layout.ts";
+import { PDF_FIRST_COLUMN_HALLMARK_MARGIN_MM, PDF_VERTICAL_LABEL_MARGIN_MM, createPdfExportPlan, getGraphPrintSizeMm } from "./pdf-layout.ts";
 
 const A4_PAPER = { widthCm: 21, heightCm: 29.7 };
 
@@ -344,4 +344,30 @@ test("PDF export reserves top and bottom safe margins on every printed page", ()
     assert.equal(tile.cutGuideBottomYMm, tile.destinationYMm + tile.destinationHeightMm);
     assert.equal(tile.destinationHeightMm % 10, 0);
   }
+});
+
+test("outside grid numbers reserve a top and bottom label gutter", () => {
+  const plan = createPdfExportPlan({
+    settings: {
+      graphWidth: 10,
+      graphHeight: 112,
+      cellSizeCm: 1,
+      showNumbers: true,
+      gridNumberPlacement: "outside",
+      printHorizontalAlignment: "center",
+      printVerticalAlignment: "top",
+    },
+    paper: A4_PAPER,
+    canvasWidth: 400,
+    canvasHeight: 4480,
+  });
+
+  assert.equal(plan.pageVerticalMarginMm, PDF_VERTICAL_LABEL_MARGIN_MM);
+  assert.equal(plan.printablePageHeightMm, 283);
+  assert.equal(plan.pagesY, 4);
+  assert.equal(plan.tiles[0].destinationYMm, PDF_VERTICAL_LABEL_MARGIN_MM);
+  assert.equal(plan.tiles[0].destinationHeightMm, 280);
+  assert.ok(plan.tiles[0].destinationYMm > 0);
+  assert.ok(plan.tiles.at(-1));
+  assert.ok(plan.tiles.at(-1)!.destinationYMm + plan.tiles.at(-1)!.destinationHeightMm < plan.pageHeightMm);
 });

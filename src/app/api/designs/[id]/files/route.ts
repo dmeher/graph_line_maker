@@ -5,7 +5,7 @@ import { designFilePath } from "@/lib/design/paths";
 import { assertDesignAccess } from "@/lib/design/server";
 import { MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS } from "@/lib/canvas/performance-limits";
 import { MAX_THUMBNAIL_BYTES, THUMBNAIL_CONTENT_TYPE, thumbnailPathFor } from "@/lib/storage/paths";
-import { getObjectStore, mediaKey, mediaUrlsForBucket } from "@/lib/storage/media";
+import { getObjectStore, mediaKey, mediaUploadUrl, mediaUrlsForBucket } from "@/lib/storage/media";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
 
@@ -31,8 +31,8 @@ export async function POST(request: NextRequest, context: Context) {
       const thumbPath = thumbnailPathFor(path);
       if (await store.objectExists(mediaKey(DESIGN_ASSETS_BUCKET, path))) throw new Error("A Design object with this immutable ID already exists.");
       const [url, thumbUrl] = await Promise.all([
-        store.presignPut(mediaKey(DESIGN_ASSETS_BUCKET, path), { contentType: file.type, contentLength: file.size, ttlSeconds: UPLOAD_TTL_SECONDS }),
-        store.presignPut(mediaKey(DESIGN_ASSETS_BUCKET, thumbPath), { contentType: THUMBNAIL_CONTENT_TYPE, ttlSeconds: UPLOAD_TTL_SECONDS }),
+        mediaUploadUrl(DESIGN_ASSETS_BUCKET, path, { contentType: file.type, contentLength: file.size, ttlSeconds: UPLOAD_TTL_SECONDS }),
+        mediaUploadUrl(DESIGN_ASSETS_BUCKET, thumbPath, { contentType: THUMBNAIL_CONTENT_TYPE, ttlSeconds: UPLOAD_TTL_SECONDS }),
       ]);
       return { ...file, path, url, contentType: file.type, thumbPath, thumbUrl, thumbContentType: THUMBNAIL_CONTENT_TYPE };
     });

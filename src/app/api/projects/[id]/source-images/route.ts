@@ -16,7 +16,7 @@ import {
   sourceImagePath,
   thumbnailPathFor,
 } from "@/lib/projects";
-import { getObjectStore, mediaKey, mediaUrlsForBucket } from "@/lib/storage/media";
+import { getObjectStore, mediaKey, mediaUploadUrl, mediaUrlsForBucket } from "@/lib/storage/media";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
 
 const MAX_SOURCE_UPLOADS = 100;
@@ -68,7 +68,6 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       if (file.size > MAX_UPLOAD_BYTES) return NextResponse.json({ message: "File is too large." }, { status: 400 });
     }
 
-    const store = getObjectStore();
     const uploads = await mapWithConcurrency(files, 4, async (file) => {
       const path = sourceImagePath(ownerUserId, projectId, file.id, getExtension(file));
       const thumbPath = thumbnailPathFor(path);
@@ -77,12 +76,12 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       // presigned PUT. R2 has no POST-policy equivalent.
       const contentType = getAllowedImageContentType(file) || "application/octet-stream";
       const [url, thumbUrl] = await Promise.all([
-        store.presignPut(mediaKey(ORIGINAL_IMAGES_BUCKET, path), {
+        mediaUploadUrl(ORIGINAL_IMAGES_BUCKET, path, {
           contentType,
           contentLength: file.size,
           ttlSeconds: UPLOAD_URL_TTL_SECONDS,
         }),
-        store.presignPut(mediaKey(ORIGINAL_IMAGES_BUCKET, thumbPath), {
+        mediaUploadUrl(ORIGINAL_IMAGES_BUCKET, thumbPath, {
           contentType: THUMBNAIL_CONTENT_TYPE,
           ttlSeconds: UPLOAD_URL_TTL_SECONDS,
         }),

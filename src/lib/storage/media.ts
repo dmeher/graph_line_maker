@@ -2,6 +2,8 @@ import "server-only";
 
 import {
   createObjectStore,
+  encodeObjectKey,
+  mediaReadModeFromEnv,
   objectKey,
   objectStoreConfigFromEnv,
   signReadUrl,
@@ -10,6 +12,15 @@ import {
   type ObjectStore,
   type SignerOptions,
 } from "@/lib/object-storage";
+import { signPayload } from "@/lib/auth/security";
+
+type LocalMediaUploadOptions = {
+  contentType: string;
+  contentLength?: number;
+  ttlSeconds?: number;
+};
+
+const DEFAULT_LOCAL_UPLOAD_TTL_SECONDS = 15 * 60;
 
 /**
  * Cloudflare R2 replaces Supabase Storage for every source and processed image.
@@ -30,8 +41,8 @@ export const hasMediaConfig = Boolean(
 
 /**
  * Signing is possible when either the media gateway is configured, or the app
- * is in local-development `direct` read mode, which signs presigned S3 GETs
- * straight against R2 and needs no gateway at all.
+ * is in local-development `direct` mode, which uses same-origin media proxies
+ * and needs no gateway at all.
  */
 export const hasMediaSignerConfig =
   process.env.MEDIA_READ_MODE?.trim().toLowerCase() === "direct"
@@ -43,6 +54,26 @@ export const missingMediaConfigMessage =
 
 let store: ObjectStore | null = null;
 let signer: SignerOptions | null = null;
+
+function isDirectReadMode() {
+  return process.env.MEDIA_READ_MODE?.trim().toLowerCase() === "direct";
+}
+
+function localMediaUrlForKey(key: string) {
+  return `/api/media/${encodeObjectKey(key)}`;
+}
+
+function localMediaUploadUrlForKey(key: string, options: LocalMediaUploadOptions) {
+  const token = signPayload({
+    kind: "local-media-upload",
+    key,
+    contentType: options.contentType,
+    contentLength: options.contentLength,
+    exp: Math.floor(Date.now() / 1000) + (options.ttlSeconds ?? DEFAULT_LOCAL_UPLOAD_TTL_SECONDS),
+  });
+  const params = new URLSearchParams({ token });
+  return `/api/media-upload/${encodeObjectKey(key)}?${params}`;
+}
 
 export function getObjectStore(): ObjectStore {
   if (!hasMediaConfig) throw new Error(missingMediaConfigMessage);
@@ -72,7 +103,25 @@ export function mediaKey(bucket: string, path: string): string {
 
 /** Signs one stored path into a stable, cacheable gateway URL. */
 export function mediaUrl(bucket: string, path: string): string {
-  return signReadUrl(mediaKey(bucket, path), getSignerOptions());
+  const key = mediaKey(bucket, path);
+  if (mediaReadModeFromEnv() === "direct") {
+    if (!hasMediaConfig) throw new Error(missingMediaConfigMessage);
+    return localMediaUrlForKey(key);
+  }
+  return signReadUrl(key, getSignerOptions());
+}
+
+export async function mediaUploadUrl(
+  bucket: string,
+  path: string,
+  options: LocalMediaUploadOptions,
+): Promise<string> {
+  const key = mediaKey(bucket, path);
+  if (isDirectReadMode()) {
+    if (!hasMediaConfig) throw new Error(missingMediaConfigMessage);
+    return localMediaUploadUrlForKey(key, options);
+  }
+  return getObjectStore().presignPut(key, options);
 }
 
 /**
@@ -88,6 +137,13 @@ export function mediaUrlsForBucket(
   const byPath = new Map<string, string | null>();
   const unique = Array.from(new Set(paths.filter((path): path is string => Boolean(path))));
   if (!unique.length || !hasMediaSignerConfig) return byPath;
+
+  if (isDirectReadMode()) {
+    for (const path of unique) {
+      byPath.set(path, localMediaUrlForKey(mediaKey(bucket, path)));
+    }
+    return byPath;
+  }
 
   const signed = signReadUrls(unique.map((path) => mediaKey(bucket, path)), getSignerOptions());
   for (const path of unique) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGridNumberLabels } from "./grid-numbering.ts";
+import { createGridNumberLabels, createInteriorGridNumberLabels } from "./grid-numbering.ts";
 
 test("grid numbering creates labels on all four graph edges", () => {
   const labels = createGridNumberLabels(10, 12, 40, 40);
@@ -24,4 +24,20 @@ test("grid numbering clamps invalid graph sizes to a visible one-cell graph", ()
   assert.equal(labels.right.length, 1);
   assert.equal(labels.top[0].value, 1);
   assert.equal(labels.left[0].value, 1);
+});
+
+test("outside grid numbering renumbers the interior cells from one", () => {
+  assert.deepEqual(createInteriorGridNumberLabels(10), [
+    { value: 1, cell: 2 },
+    { value: 2, cell: 3 },
+    { value: 3, cell: 4 },
+    { value: 4, cell: 5 },
+    { value: 5, cell: 6 },
+    { value: 6, cell: 7 },
+    { value: 7, cell: 8 },
+    { value: 8, cell: 9 },
+  ]);
+  assert.deepEqual(createInteriorGridNumberLabels(3), [{ value: 1, cell: 2 }]);
+  assert.deepEqual(createInteriorGridNumberLabels(2), []);
+  assert.deepEqual(createInteriorGridNumberLabels(0), []);
 });

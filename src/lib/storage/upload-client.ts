@@ -1,12 +1,11 @@
 "use client";
 
 /**
- * Browser-side helpers for direct-to-R2 uploads.
+ * Browser-side helpers for prepared media uploads.
  *
- * Uploads bypass the media gateway deliberately: they are rare next to reads,
- * gain nothing from a CDN, and streaming 50 MB bodies through a Worker would
- * burn paid request duration. The browser PUTs straight to R2 with a presigned
- * URL, which requires CORS on the bucket.
+ * In production the browser PUTs straight to R2 with a presigned URL. In local
+ * direct mode the same contract uses a same-origin proxy URL so development
+ * does not depend on R2 browser CORS.
  */
 
 export const SOURCE_THUMBNAIL_MAX_EDGE = 256;
@@ -32,10 +31,9 @@ export type PresignedUpload = {
 };
 
 /**
- * The content type and byte length are covered by the presigned signature, so
+ * The content type and byte length are covered by the prepared upload URL, so
  * they must match exactly what the server signed. Sending a different value
- * fails with a SignatureDoesNotMatch from R2 rather than silently storing the
- * wrong metadata.
+ * fails instead of silently storing the wrong metadata.
  */
 export async function putToPresignedUrl(url: string, body: Blob, contentType: string) {
   const response = await fetch(url, {

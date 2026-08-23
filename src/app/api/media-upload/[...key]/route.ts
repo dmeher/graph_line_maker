@@ -10,12 +10,14 @@ export const runtime = "nodejs";
 type Context = { params: Promise<{ key?: string[] }> };
 
 type LocalMediaUploadToken = {
-  kind?: string;
-  key?: string;
-  contentType?: string;
+  kind: "local-media-upload";
+  key: string;
+  contentType: string;
   contentLength?: number;
-  exp?: number;
+  exp: number;
 };
+
+type LocalMediaUploadTokenPayload = Partial<LocalMediaUploadToken>;
 
 const ALLOWED_MEDIA_KEY_PREFIXES = [
   `${ORIGINAL_IMAGES_BUCKET}/`,
@@ -32,17 +34,26 @@ function uploadError(message: string, status: number) {
 }
 
 function verifyUploadToken(token: string | null, key: string): LocalMediaUploadToken | null {
-  const payload = verifySignedPayload<LocalMediaUploadToken>(token);
+  const payload = verifySignedPayload<LocalMediaUploadTokenPayload>(token);
   if (
-    payload?.kind !== "local-media-upload" ||
+    !payload ||
+    payload.kind !== "local-media-upload" ||
     payload.key !== key ||
-    !payload.contentType ||
+    typeof payload.contentType !== "string" ||
+    payload.contentType.length === 0 ||
+    typeof payload.exp !== "number" ||
     !Number.isInteger(payload.exp) ||
     payload.exp <= Math.floor(Date.now() / 1000)
   ) {
     return null;
   }
-  return payload;
+  return {
+    kind: "local-media-upload",
+    key,
+    contentType: payload.contentType,
+    contentLength: payload.contentLength,
+    exp: payload.exp,
+  };
 }
 
 export async function PUT(request: Request, context: Context) {

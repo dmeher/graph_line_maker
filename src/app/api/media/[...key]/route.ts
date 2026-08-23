@@ -34,7 +34,10 @@ export async function GET(_request: Request, context: Context) {
     const object = await getObjectStore().getObject(key);
     if (!object) return mediaError("Media not found.", 404);
 
-    return new NextResponse(object.body, {
+    const responseBody = new Uint8Array(object.body.byteLength);
+    responseBody.set(object.body);
+
+    return new NextResponse(responseBody.buffer, {
       headers: {
         "cache-control": "private, max-age=3600",
         "content-length": String(object.body.byteLength),

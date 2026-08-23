@@ -3,7 +3,8 @@ import { MAX_CANVAS_DIMENSION, MAX_CANVAS_PIXELS } from "./performance-limits.ts
 
 export const LINEAR_GRAPH_PREVIEW_REPEAT_COUNT = 10;
 export const LINEAR_GRAPH_PREVIEW_BORDER_CELLS = 5;
-const LANDSCAPE_RATIO = 16 / 9;
+export const LINEAR_GRAPH_PREVIEW_SIDE_PADDING_CELLS = 1;
+export const LINEAR_GRAPH_PREVIEW_WIDTH_CELLS = 200;
 
 export type LinearGraphPreviewLayout = {
   width: number;
@@ -15,6 +16,10 @@ export type LinearGraphPreviewLayout = {
   sourceHeight: number;
   repeatCount: number;
   borderHeight: number;
+  sourceContentX: number;
+  sourceContentWidth: number;
+  sourceContentHeight: number;
+  repeatTileScale: number;
   repeatStripWidth: number;
   repeatStripX: number;
 };
@@ -62,11 +67,22 @@ export function createLinearGraphPreviewLayout({
   const safeBorderCells = positiveInteger(borderCells, LINEAR_GRAPH_PREVIEW_BORDER_CELLS);
   const safeMaxPixels = positiveInteger(maxPixels, MAX_CANVAS_PIXELS);
   const borderHeight = safeCellPixels * safeBorderCells;
-  const repeatStripWidth = safeSourceWidth * safeRepeatCount;
-  const logicalHeight = safeSourceHeight + borderHeight * 2;
-  // The ten-copy strip can be very narrow for tall graphs. Extra paper on each
-  // side keeps the result landscape while retaining the graph at its center.
-  const logicalWidth = Math.max(repeatStripWidth, Math.ceil(logicalHeight * LANDSCAPE_RATIO));
+  // Preview joins every alternating mirror at the graph's horizontal edge.
+  // Omit the otherwise empty first and last columns so artwork joins cleanly.
+  // A narrow legacy graph with no interior column remains intact.
+  const sourceCellCount = Math.floor(safeSourceWidth / safeCellPixels);
+  const sourceContentX = sourceCellCount >= LINEAR_GRAPH_PREVIEW_SIDE_PADDING_CELLS * 2 + 1
+    ? safeCellPixels * LINEAR_GRAPH_PREVIEW_SIDE_PADDING_CELLS
+    : 0;
+  const sourceContentWidth = safeSourceWidth - sourceContentX * 2;
+  const logicalWidth = safeCellPixels * LINEAR_GRAPH_PREVIEW_WIDTH_CELLS;
+  // Keep the entire repeat strip inside the fixed 200 cm-wide canvas even for
+  // wide legacy graphs, without distorting the source artwork.
+  const naturalRepeatStripWidth = sourceContentWidth * safeRepeatCount;
+  const repeatTileScale = Math.min(1, logicalWidth / naturalRepeatStripWidth);
+  const sourceContentHeight = safeSourceHeight * repeatTileScale;
+  const repeatStripWidth = Math.min(naturalRepeatStripWidth, logicalWidth);
+  const logicalHeight = sourceContentHeight + borderHeight * 2;
   const scale = Math.min(
     1,
     Math.sqrt(safeMaxPixels / (logicalWidth * logicalHeight)),
@@ -88,6 +104,10 @@ export function createLinearGraphPreviewLayout({
     sourceHeight: safeSourceHeight,
     repeatCount: safeRepeatCount,
     borderHeight,
+    sourceContentX,
+    sourceContentWidth,
+    sourceContentHeight,
+    repeatTileScale,
     repeatStripWidth,
     repeatStripX: (logicalWidth - repeatStripWidth) / 2,
   };
@@ -183,7 +203,7 @@ export function createLinearGraphPreview(
     top: true,
   });
   drawDecorativeBorder(context, {
-    y: layout.borderHeight + layout.sourceHeight,
+    y: layout.borderHeight + layout.sourceContentHeight,
     width: layout.logicalWidth,
     height: layout.borderHeight,
     cellPixels,
@@ -193,15 +213,27 @@ export function createLinearGraphPreview(
 
   context.imageSmoothingEnabled = true;
   for (let index = 0; index < layout.repeatCount; index += 1) {
-    const x = layout.repeatStripX + index * layout.sourceWidth;
+    const tileWidth = layout.sourceContentWidth * layout.repeatTileScale;
+    const x = layout.repeatStripX + index * tileWidth;
     context.save();
     if (isLinearGraphPreviewTileMirrored(index)) {
-      context.translate(x + layout.sourceWidth, layout.borderHeight);
-      context.scale(-1, 1);
-      context.drawImage(sourceCanvas, 0, 0, layout.sourceWidth, layout.sourceHeight);
+      context.translate(x + tileWidth, layout.borderHeight);
+      context.scale(-layout.repeatTileScale, layout.repeatTileScale);
     } else {
-      context.drawImage(sourceCanvas, x, layout.borderHeight, layout.sourceWidth, layout.sourceHeight);
+      context.translate(x, layout.borderHeight);
+      context.scale(layout.repeatTileScale, layout.repeatTileScale);
     }
+    context.drawImage(
+      sourceCanvas,
+      layout.sourceContentX,
+      0,
+      layout.sourceContentWidth,
+      layout.sourceHeight,
+      0,
+      0,
+      layout.sourceContentWidth,
+      layout.sourceHeight,
+    );
     context.restore();
   }
   context.setTransform(1, 0, 0, 1, 0, 0);

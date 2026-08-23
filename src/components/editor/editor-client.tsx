@@ -52,6 +52,7 @@ import {
 import { saveProjectState } from "@/app/(app)/projects/actions";
 import { fullCrop, quickCropWithin, transformedImageSize, type CropPixels, type QuickCropSegment } from "@/lib/canvas/crop";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
+import { createInteriorGridNumberLabels } from "@/lib/canvas/grid-numbering";
 import { QuickCropControls } from "@/components/projects/quick-crop-controls";
 import {
   copyFillRegionOverrides,
@@ -1066,11 +1067,6 @@ function SelectPointerIcon({ size = 18, ...props }: SVGProps<SVGSVGElement> & { 
       <path d="M5.5 4.8 18.4 10.3c.78.34.75 1.46-.04 1.77l-5.32 2.08a1.45 1.45 0 0 0-.81.81l-2.04 5.13c-.32.81-1.47.81-1.78-.01L5.5 4.8Z" />
     </svg>
   );
-}
-
-function cellNumberLabels(cellCount: number) {
-  const count = Math.max(1, Math.round(cellCount || 1));
-  return Array.from({ length: count }, (_, index) => index + 1);
 }
 
 function deriveGraphSettings(inputSettings: GraphSettings): GraphSettings {
@@ -5807,8 +5803,8 @@ export function EditorClient({
         return handleUploadFailure(prepared.message || "Unable to prepare source uploads.");
       }
       pendingPaths = prepared.uploads.map((upload: { path: string }) => upload.path);
-      // Direct browser-to-R2 PUTs, plus a bounded WebP derivative for the
-      // library grid so it stops pulling full-resolution originals.
+      // Prepared PUTs, plus a bounded WebP derivative for the library grid so
+      // it stops pulling full-resolution originals.
       const thumbUploads = await mapWithConcurrency(prepared.uploads, 2, async (upload: PresignedUpload, index) => {
         const result = await uploadWithThumbnail(upload, uploadItems[index].file, SOURCE_THUMBNAIL_MAX_EDGE);
         return result.thumbUploaded;
@@ -5979,8 +5975,8 @@ export function EditorClient({
           throw new Error(signedPayload.message || "Unable to prepare clipart uploads.");
         }
         pendingClipartPaths = signedPayload.uploads.map((upload: { path: string }) => upload.path);
-        // Direct browser-to-R2 PUTs. The 256px derivative is what the library
-        // grid renders, instead of the full-resolution original it used to pull.
+        // Prepared PUTs. The 256px derivative is what the library grid renders,
+        // instead of the full-resolution original it used to pull.
         const thumbUploads = await mapWithConcurrency(signedPayload.uploads, 2, async (upload: PresignedUpload, index) => {
           const result = await uploadWithThumbnail(upload, prepared[index].file, SOURCE_THUMBNAIL_MAX_EDGE);
           return result.thumbUploaded;
@@ -8039,8 +8035,9 @@ export function EditorClient({
   // the vector SVG overlay, so the old zoom>1 "pixelated" mode is no longer needed.
   const previewImageRendering: "auto" | "pixelated" = "auto";
   const outsideNumberMargin = settings.showNumbers && settings.gridNumberPlacement === "outside" ? 34 : 0;
-  const outsideHorizontalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? cellNumberLabels(settings.graphWidth) : [];
-  const outsideVerticalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? cellNumberLabels(settings.graphHeight) : [];
+  const outsideColumnNumberInset = 0.45 * GRAPH_MAJOR_CELL_PIXELS * zoom;
+  const outsideHorizontalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? createInteriorGridNumberLabels(settings.graphWidth) : [];
+  const outsideVerticalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? createInteriorGridNumberLabels(settings.graphHeight) : [];
   const { pageBreakGuideX, pageBreakGuideY } = useMemo(() => {
     if (!settings.showPageBreaks) return { pageBreakGuideX: [], pageBreakGuideY: [] };
     const paperForPreview = PRINT_PAPER_SIZES[settings.printPaperSize] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
@@ -9670,35 +9667,37 @@ export function EditorClient({
               ) : null}
               {settings.showNumbers && settings.gridNumberPlacement === "outside" ? (
                 <div className="pointer-events-none absolute inset-0 text-[11px] font-semibold text-[var(--editor-text-dim)]">
-                  {outsideHorizontalLabels.map((value) => {
-                    const x = outsideNumberMargin + (value - 0.5) * GRAPH_MAJOR_CELL_PIXELS * zoom;
+                  {outsideHorizontalLabels.map((label) => {
+                    const x = outsideNumberMargin + (label.cell - 0.5) * GRAPH_MAJOR_CELL_PIXELS * zoom;
+                    const y = outsideNumberMargin - outsideColumnNumberInset;
                     return (
-                      <span key={`top-${value}`} className="absolute -translate-x-1/2" style={{ left: x, top: 6 }}>
-                        {value}
+                      <span key={`top-${label.cell}`} className="absolute -translate-x-1/2 -translate-y-1/2" style={{ left: x, top: y }}>
+                        {label.value}
                       </span>
                     );
                   })}
-                  {outsideHorizontalLabels.map((value) => {
-                    const x = outsideNumberMargin + (value - 0.5) * GRAPH_MAJOR_CELL_PIXELS * zoom;
+                  {outsideHorizontalLabels.map((label) => {
+                    const x = outsideNumberMargin + (label.cell - 0.5) * GRAPH_MAJOR_CELL_PIXELS * zoom;
+                    const y = outsideNumberMargin + graphPreviewHeight + outsideColumnNumberInset;
                     return (
-                      <span key={`bottom-${value}`} className="absolute -translate-x-1/2" style={{ left: x, top: outsideNumberMargin + graphPreviewHeight + 8 }}>
-                        {value}
+                      <span key={`bottom-${label.cell}`} className="absolute -translate-x-1/2 -translate-y-1/2" style={{ left: x, top: y }}>
+                        {label.value}
                       </span>
                     );
                   })}
-                  {outsideVerticalLabels.map((value) => {
-                    const y = outsideNumberMargin + (value - 0.45) * GRAPH_MAJOR_CELL_PIXELS * zoom;
+                  {outsideVerticalLabels.map((label) => {
+                    const y = outsideNumberMargin + (label.cell - 0.45) * GRAPH_MAJOR_CELL_PIXELS * zoom;
                     return (
-                      <span key={`left-${value}`} className="absolute -translate-y-1/2" style={{ left: 8, top: y }}>
-                        {value}
+                      <span key={`left-${label.cell}`} className="absolute -translate-y-1/2" style={{ left: 8, top: y }}>
+                        {label.value}
                       </span>
                     );
                   })}
-                  {outsideVerticalLabels.map((value) => {
-                    const y = outsideNumberMargin + (value - 0.45) * GRAPH_MAJOR_CELL_PIXELS * zoom;
+                  {outsideVerticalLabels.map((label) => {
+                    const y = outsideNumberMargin + (label.cell - 0.45) * GRAPH_MAJOR_CELL_PIXELS * zoom;
                     return (
-                      <span key={`right-${value}`} className="absolute -translate-y-1/2" style={{ left: outsideNumberMargin + graphPreviewWidth + 10, top: y }}>
-                        {value}
+                      <span key={`right-${label.cell}`} className="absolute -translate-y-1/2" style={{ left: outsideNumberMargin + graphPreviewWidth + 10, top: y }}>
+                        {label.value}
                       </span>
                     );
                   })}

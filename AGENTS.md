@@ -268,11 +268,17 @@ their first segment, so every `original_image_path`, `processed_image_path`, and
 *local computation* — the previous `createSignedUrls` call was an HTTP round trip to Supabase on the
 render path, and the editor signs up to 132 paths per open. Expiries are rounded up to a time bucket,
 so repeated renders emit byte-identical URLs that browser and edge caches can actually reuse; Supabase
-minted a fresh JWT per call, which is why the upload-time `cacheControl` never did anything.
+minted a fresh JWT per call, which is why the upload-time `cacheControl` never did anything. In local
+`MEDIA_READ_MODE=direct`, reads use the app's authenticated same-origin `/api/media/...` proxy instead
+of browser-facing R2 GET URLs, so project opening does not depend on R2 GET CORS. Direct mode also
+returns signed same-origin `/api/media-upload/...` URLs for prepared uploads, so create-project and
+asset uploads do not depend on R2 PUT CORS in local development. Gateway mode remains the production
+path.
 
-**Writes.** The browser PUTs directly to R2 with a presigned URL. Content type *and* byte length are
-folded into the SigV4 signature — the only way to bound a presigned PUT, since R2 has no POST-policy
-equivalent — and the finalize step re-checks size with `headObject`, deleting anything oversized.
+**Writes.** In gateway mode, the browser PUTs directly to R2 with a presigned URL. In local
+`MEDIA_READ_MODE=direct`, the browser PUTs to `/api/media-upload/...`, which verifies a signed token
+and writes to R2 server-side. Content type *and* byte length are bound by the prepared upload URL, and
+the finalize step re-checks size with `headObject`, deleting anything oversized.
 Uploads deliberately bypass the gateway Worker.
 
 **Thumbnails.** Uploads also generate a bounded WebP derivative client-side at
@@ -341,7 +347,7 @@ GRAPH_PIXEL_DEV_USER_EMAIL=
 - Development-only performance marks cover decode, vector request, SVG rasterization, mask creation, region labeling, composition, paint, export, cache hits, payload bytes, and estimated retained canvas bytes.
 - `src/lib/canvas/processor.worker.ts` runs the same `pixelateLayeredCanvases` logic in the worker.
 - `src/lib/canvas/pdf-layout.ts` plans multi-page PDF/print tiles, respecting paper size, orientation, alignment, margins, and `MAX_PAGES_PER_PDF_FILE = 80`. Every output page uses a 10 mm right safe area. When a wide graph has a second vertical row, its full first column uses an at least 40 mm left hallmark lane and whole-cell tile boundaries, keeping every first-column row aligned; all later columns keep 10 mm left/right safe areas.
-- `src/lib/canvas/exports.ts` implements PNG download, PDF download, browser print, and JSON settings export. **PDF and print draw the grid as crisp vector lines** (jsPDF vector lines / per-page SVG) at physical mm widths over the **transparent artwork** tiles, so grid lines stay sharp at any print scale instead of blurring like the old baked raster. They therefore take the artwork-only canvas (`artworkCanvasRef`), not the flattened `processedCanvasRef`. PNG export still uses the flattened raster. PDF retains its established opaque vector-stroke treatment; browser print mirrors it with opaque SVG strokes and requests exact color adjustment. Preview retains the shared opacity hierarchy from `src/lib/canvas/grid-style.ts`. The dot pattern is exported as its equivalent line grid. `company-hallmark-layout.ts` draws the first-column-second-row hallmark in that dedicated lane, with a 3 mm clearance calculated from the real outside-number position.
+- `src/lib/canvas/exports.ts` implements PNG download, PDF download, browser print, and JSON settings export. **PDF and print draw the grid as crisp vector lines** (jsPDF vector lines / per-page SVG) at physical mm widths over the **transparent artwork** tiles, so grid lines stay sharp at any print scale instead of blurring like the old baked raster. They therefore take the artwork-only canvas (`artworkCanvasRef`), not the flattened `processedCanvasRef`. PNG export still uses the flattened raster. PDF retains its established opaque vector-stroke treatment; browser print mirrors it with opaque SVG strokes and requests exact color adjustment. Preview retains the shared opacity hierarchy from `src/lib/canvas/grid-style.ts`. The dot pattern is exported as its equivalent line grid. Outside PDF/print numbers use `createInteriorGridNumberLabels`, so the non-drawn first/last row and column are not numbered and interior labels start at 1; PDF/print reserves a small vertical label gutter so column labels sit outside the graph like row labels without print clipping. `company-hallmark-layout.ts` draws the first-column-second-row hallmark in that dedicated lane, with a 3 mm clearance calculated from the real outside-number position.
 - `src/lib/canvas/linear-graph-preview.ts` creates the user-initiated **Preview** image from the settled flattened graph: ten horizontal copies alternate normal/mirrored orientation, the strip is centered in a landscape canvas, and five cell (5 cm) decorative bands sit above and below. It scales before allocation to stay within `MAX_CANVAS_PIXELS`; the editor opens the resulting PNG in a new tab synchronously from the click so popup protection does not block it. Preview is presentation-only: it changes no project setting, export asset, or persisted image.
 
 ### Editor state

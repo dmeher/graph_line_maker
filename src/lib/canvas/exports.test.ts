@@ -20,6 +20,15 @@ test("PDF and browser print include dotted vertical cut guides for tiled columns
   assert.match(exportsSource, /border-left: 0\.25mm dotted/);
 });
 
+test("PDF and browser print outside numbers omit border cells", () => {
+  assert.match(exportsSource, /createInteriorGridNumberLabels\(graphWidth\)/);
+  assert.match(exportsSource, /createInteriorGridNumberLabels\(graphHeight\)/);
+  assert.match(exportsSource, /value: label\.value/);
+  assert.match(exportsSource, /label\.cell - 0\.5/);
+  assert.match(exportsSource, /-Math\.round\(TOP_BOTTOM_OUTSIDE_Y_OFFSET \* GRAPH_MAJOR_CELL_PIXELS\)/);
+  assert.match(exportsSource, /graphHeightPx \+ TOP_BOTTOM_OUTSIDE_Y_OFFSET \* GRAPH_MAJOR_CELL_PIXELS/);
+});
+
 test("PDF rejects a canvas whose pixels no longer correspond to the current graph cells", () => {
   const settings = { graphWidth: 10, graphHeight: 10 };
   assert.equal(isGraphCanvasSizedForSettings({ width: 400, height: 400 }, settings), true);

@@ -11,6 +11,19 @@ export type GridNumberLabels = {
   right: GridNumberLabel[];
 };
 
+export type InteriorGridNumberLabel = {
+  value: number;
+  cell: number;
+};
+
+export function createInteriorGridNumberLabels(cellCount: number): InteriorGridNumberLabel[] {
+  const safeCellCount = Math.max(1, Math.round(cellCount || 1));
+  return Array.from({ length: Math.max(0, safeCellCount - 2) }, (_, index) => ({
+    value: index + 1,
+    cell: index + 2,
+  }));
+}
+
 export function createGridNumberLabels(graphWidth: number, graphHeight: number, cellWidth: number, cellHeight: number): GridNumberLabels {
   const safeGraphWidth = Math.max(1, Math.round(graphWidth || 1));
   const safeGraphHeight = Math.max(1, Math.round(graphHeight || 1));
@@ -38,4 +51,3 @@ export function createGridNumberLabels(graphWidth: number, graphHeight: number, 
 
   return { top, bottom, left, right };
 }
-

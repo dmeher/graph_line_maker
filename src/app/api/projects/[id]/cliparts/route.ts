@@ -14,7 +14,7 @@ import {
   clipartImagePath,
   thumbnailPathFor,
 } from "@/lib/projects";
-import { getObjectStore, mediaKey, mediaUrlsForBucket } from "@/lib/storage/media";
+import { getObjectStore, mediaKey, mediaUploadUrl, mediaUrlsForBucket } from "@/lib/storage/media";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
 
 const MAX_CLIPART_UPLOADS = 24;
@@ -69,7 +69,6 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       if (file.size > MAX_CLIPART_UPLOAD_BYTES) return NextResponse.json({ message: "Keep each clipart under 6 MB." }, { status: 400 });
     }
 
-    const store = getObjectStore();
     const uploads = await mapWithConcurrency(files, 4, async (file) => {
       const path = clipartImagePath(ownerUserId, projectId, file.id, getExtension({ name: file.fileName, type: file.type }));
       const thumbPath = thumbnailPathFor(path);
@@ -78,12 +77,12 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       // way to bound a presigned PUT, since R2 has no POST-policy equivalent.
       const mimeType = getAllowedImageContentType({ name: file.fileName, type: file.type }) || file.type || "image/jpeg";
       const [url, thumbUrl] = await Promise.all([
-        store.presignPut(mediaKey(ORIGINAL_IMAGES_BUCKET, path), {
+        mediaUploadUrl(ORIGINAL_IMAGES_BUCKET, path, {
           contentType: mimeType,
           contentLength: file.size,
           ttlSeconds: UPLOAD_URL_TTL_SECONDS,
         }),
-        store.presignPut(mediaKey(ORIGINAL_IMAGES_BUCKET, thumbPath), {
+        mediaUploadUrl(ORIGINAL_IMAGES_BUCKET, thumbPath, {
           contentType: THUMBNAIL_CONTENT_TYPE,
           ttlSeconds: UPLOAD_URL_TTL_SECONDS,
         }),

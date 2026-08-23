@@ -675,8 +675,8 @@ export function NewProjectForm() {
         throw new Error(prepared.message || "Unable to prepare project upload.");
       }
       pendingProject = { projectId: prepared.projectId, paths: prepared.uploads.map((upload: { path: string }) => upload.path) };
-      // Direct browser-to-R2 PUTs. Nothing transits the Next.js server, so a
-      // 150 MB create request no longer has to fit in a serverless function.
+      // Prepared PUTs keep the create request small; local direct mode routes
+      // through the app proxy while production uses presigned R2 URLs.
       const thumbUploads = await mapWithConcurrency(prepared.uploads, 2, async (upload: PresignedUpload, index) => {
         const result = await uploadWithThumbnail(upload, uploadFiles[index], SOURCE_THUMBNAIL_MAX_EDGE);
         return result.thumbUploaded;

@@ -22,7 +22,7 @@ function creationSettingsFixture(): GraphSettings {
     vectorizerSketchRemoval: 0,
     vectorizerFidelity: "exact",
     sourceImages: [],
-  } as GraphSettings;
+  } as unknown as GraphSettings;
 }
 
 test("creation settings vectorize every finalized upload by default", () => {

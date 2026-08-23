@@ -22,7 +22,7 @@ import {
   thumbnailPathFor,
 } from "@/lib/projects";
 import { buildProjectSettingsWithSources } from "@/lib/projects/creation-settings";
-import { getObjectStore, mediaKey } from "@/lib/storage/media";
+import { getObjectStore, mediaKey, mediaUploadUrl } from "@/lib/storage/media";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
 
@@ -70,7 +70,7 @@ type UploadMetadata = {
 type PreparedUpload = UploadMetadata & {
   id: string;
   path: string;
-  /** Presigned direct-to-R2 PUT URL; replaces the Supabase upload token. */
+  /** Prepared PUT URL; direct-to-R2 in gateway mode, same-origin proxy in local direct mode. */
   url: string;
   contentType: string;
   thumbPath: string;
@@ -116,7 +116,6 @@ export async function POST(request: NextRequest) {
       if (validationError) return NextResponse.json({ message: validationError }, { status: 400 });
 
       const supabase = getSupabaseAdmin();
-      const store = getObjectStore();
       const settings = settingsForImage();
       const { data: project, error } = await supabase
         .from("projects")
@@ -146,12 +145,12 @@ export async function POST(request: NextRequest) {
           // presigned PUT has — R2 offers no POST-policy equivalent.
           const contentType = getAllowedImageContentType(file) || "application/octet-stream";
           const [url, thumbUrl] = await Promise.all([
-            store.presignPut(mediaKey(ORIGINAL_IMAGES_BUCKET, path), {
+            mediaUploadUrl(ORIGINAL_IMAGES_BUCKET, path, {
               contentType,
               contentLength: file.size,
               ttlSeconds: UPLOAD_URL_TTL_SECONDS,
             }),
-            store.presignPut(mediaKey(ORIGINAL_IMAGES_BUCKET, thumbPath), {
+            mediaUploadUrl(ORIGINAL_IMAGES_BUCKET, thumbPath, {
               contentType: THUMBNAIL_CONTENT_TYPE,
               ttlSeconds: UPLOAD_URL_TTL_SECONDS,
             }),

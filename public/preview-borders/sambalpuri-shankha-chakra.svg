@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="1440" viewBox="0 0 240 1440">
+  <defs>
+    <pattern id="shankha-chakra" width="240" height="288" patternUnits="userSpaceOnUse">
+      <rect width="240" height="288" fill="#fff"/>
+      <path fill="#000" d="M8 0h16v288H8zm208 0h16v288h-16zM24 0l24 18-24 18zm192 36l-24 18 24 18zm-192 36l24 18-24 18zm192 36l-24 18 24 18zm-192 36l24 18-24 18zm192 36l-24 18 24 18zm-192 36l24 18-24 18zm192 36l-24 18 24 18z"/>
+      <circle cx="120" cy="78" r="57" fill="#000"/>
+      <circle cx="120" cy="78" r="38" fill="#fff"/>
+      <path fill="#000" d="M113 30h14v96h-14zM72 71h96v14H72zM83 41l68 68-10 10-68-68zm68 0l10 10-68 68-10-10z"/>
+      <circle cx="120" cy="78" r="13" fill="#fff"/>
+      <path fill="#000" d="M65 224c0-36 26-67 66-67 31 0 55 21 55 50 0 25-19 43-43 43-22 0-38-14-38-33 0-15 11-27 27-27 13 0 23 9 23 20 0 8-6 14-14 14-7 0-12-4-12-10 0-4 3-8 8-8-2-5-11-4-11 5 0 11 9 18 22 18 15 0 26-11 26-26 0-19-16-32-38-32-29 0-48 21-48 48 0 16 8 29 23 39l-18 21c-19-14-28-31-28-55z"/>
+      <path fill="#000" d="M60 250h120l-18 25H78z"/>
+      <path fill="#fff" d="M83 246l20-19 18 19 18-19 19 19z"/>
+    </pattern>
+  </defs>
+  <rect width="240" height="1440" fill="url(#shankha-chakra)"/>
+</svg>

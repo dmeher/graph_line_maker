@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="1440" viewBox="0 0 240 1440">
+  <defs>
+    <pattern id="temple-rudraksha" width="240" height="240" patternUnits="userSpaceOnUse">
+      <rect width="240" height="240" fill="#fff"/>
+      <path fill="#000" d="M4 0h20v240H4zm212 0h20v240h-20z"/>
+      <path fill="#000" d="M24 0h36v20H44v18H28V56H12V38H0V20h24zm192 0h-36v20h16v18h16v18h16V38h12V20h-24zM24 120h36v20H44v18H28v18H12v-18H0v-18h24zm192 0h-36v20h16v18h16v18h16v-18h12v-18h-24z"/>
+      <path fill="#000" d="M120 18l73 82-73 82-73-82z"/>
+      <path fill="#fff" d="M120 44l49 56-49 56-49-56z"/>
+      <path fill="#000" d="M120 62l33 38-33 38-33-38z"/>
+      <circle cx="120" cy="100" r="13" fill="#fff"/>
+      <path fill="#000" d="M72 198h96v13H72zm14 17h68v11H86z"/>
+      <circle cx="58" cy="212" r="13" fill="#000"/>
+      <circle cx="182" cy="212" r="13" fill="#000"/>
+      <path fill="#fff" d="M52 206h12v12H52zm124 0h12v12h-12z"/>
+    </pattern>
+  </defs>
+  <rect width="240" height="1440" fill="url(#temple-rudraksha)"/>
+</svg>

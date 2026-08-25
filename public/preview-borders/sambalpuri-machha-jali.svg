@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="1440" viewBox="0 0 240 1440">
+  <defs>
+    <pattern id="machha-jali" width="240" height="288" patternUnits="userSpaceOnUse">
+      <rect width="240" height="288" fill="#fff"/>
+      <path fill="#000" d="M6 0h18v288H6zm210 0h18v288h-18z"/>
+      <path d="M24 0l192 144L24 288M216 0L24 144l192 144" fill="none" stroke="#000" stroke-width="9"/>
+      <g transform="translate(120 72)">
+        <path fill="#000" d="M-62 0c25-31 66-38 101-6L69-30 61 0l8 30L39 6C4 38-37 31-62 0z"/>
+        <circle cx="33" cy="-7" r="7" fill="#fff"/>
+        <path d="M-35-12l24 12-24 12M-5-23L8 0-5 23" fill="none" stroke="#fff" stroke-width="7"/>
+      </g>
+      <g transform="translate(120 216) scale(-1 1)">
+        <path fill="#000" d="M-62 0c25-31 66-38 101-6L69-30 61 0l8 30L39 6C4 38-37 31-62 0z"/>
+        <circle cx="33" cy="-7" r="7" fill="#fff"/>
+        <path d="M-35-12l24 12-24 12M-5-23L8 0-5 23" fill="none" stroke="#fff" stroke-width="7"/>
+      </g>
+      <path fill="#fff" stroke="#000" stroke-width="8" d="M120 119l25 25-25 25-25-25z"/>
+      <circle cx="120" cy="144" r="7" fill="#000"/>
+    </pattern>
+  </defs>
+  <rect width="240" height="1440" fill="url(#machha-jali)"/>
+</svg>

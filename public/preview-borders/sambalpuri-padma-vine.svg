@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="1440" viewBox="0 0 240 1440">
+  <defs>
+    <pattern id="padma-vine" width="240" height="240" patternUnits="userSpaceOnUse">
+      <rect width="240" height="240" fill="#fff"/>
+      <path d="M20 0v240M220 0v240M120 0c-42 42 42 78 0 120s42 78 0 120" fill="none" stroke="#000" stroke-width="13"/>
+      <path fill="#000" d="M20 12l16 18-16 18L4 30zm0 60l16 18-16 18L4 90zm0 60l16 18-16 18-16-18zm0 60l16 18-16 18-16-18zm200-180l16 18-16 18-16-18zm0 60l16 18-16 18-16-18zm0 60l16 18-16 18-16-18zm0 60l16 18-16 18-16-18z"/>
+      <g transform="translate(120 62)">
+        <path fill="#000" d="M0-50C20-34 24-13 0 0-24-13-20-34 0-50zM50 0C34 20 13 24 0 0 13-24 34-20 50 0zM0 50C-20 34-24 13 0 0 24 13 20 34 0 50zM-50 0C-34-20-13-24 0 0-13 24-34 20-50 0z"/>
+        <path fill="#000" d="M35-35C38-11 24 3 0 0-3-24 11-38 35-35zM35 35C11 38-3 24 0 0 24-3 38 11 35 35zM-35 35C-38 11-24-3 0 0 3 24-11 38-35 35zM-35-35C-11-38 3-24 0 0-24 3-38-11-35-35z"/>
+        <circle r="13" fill="#fff"/>
+      </g>
+      <g transform="translate(120 182)">
+        <path fill="#000" d="M0-48l14 29 34-3-25 23 12 33L0 17l-35 17 12-33-25-23 34 3z"/>
+        <circle r="13" fill="#fff"/>
+        <rect x="-6" y="-6" width="12" height="12" transform="rotate(45)" fill="#000"/>
+      </g>
+    </pattern>
+  </defs>
+  <rect width="240" height="1440" fill="url(#padma-vine)"/>
+</svg>

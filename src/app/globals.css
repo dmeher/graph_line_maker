@@ -2879,6 +2879,91 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
+.editor-a4-preview-backgrounds {
+  padding: 16px 22px 22px;
+  border-top: 1px solid var(--editor-line);
+}
+
+.editor-a4-preview-backgrounds__heading {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.editor-a4-preview-backgrounds__heading span {
+  color: var(--editor-accent);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.editor-a4-preview-backgrounds h3 {
+  margin: 0;
+  color: var(--editor-text);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.editor-a4-preview-background-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.editor-a4-preview-background-grid > button {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 7px;
+  border: 1px solid var(--editor-line);
+  border-radius: 9px;
+  background: var(--editor-control-bg);
+  color: var(--editor-text-dim);
+  text-align: left;
+  transition: border-color 150ms ease, box-shadow 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.editor-a4-preview-background-grid > button:hover:not(:disabled) {
+  border-color: var(--editor-accent);
+  color: var(--editor-text);
+  transform: translateY(-1px);
+}
+
+.editor-a4-preview-background-grid > button.is-selected {
+  border-color: var(--editor-accent);
+  box-shadow: 0 0 0 2px var(--editor-accent-soft);
+  color: var(--editor-text);
+}
+
+.editor-a4-preview-background-swatch {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border: 1px solid rgb(15 23 42 / 0.2);
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.25);
+}
+
+.editor-a4-preview-background-swatch.is-transparent {
+  background-color: #fff;
+  background-image: linear-gradient(45deg, #cbd5e1 25%, transparent 25%, transparent 75%, #cbd5e1 75%), linear-gradient(45deg, #cbd5e1 25%, transparent 25%, transparent 75%, #cbd5e1 75%);
+  background-position: 0 0, 6px 6px;
+  background-size: 12px 12px;
+}
+
+.editor-a4-preview-background-grid strong {
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .editor-a4-preview-dialog > footer {
   display: flex;
   justify-content: flex-end;
@@ -2914,6 +2999,7 @@ button:disabled {
   }
 
   .editor-a4-preview-dialog > header,
+  .editor-a4-preview-backgrounds,
   .editor-a4-preview-dialog > footer {
     padding-inline: 16px;
   }
@@ -2921,6 +3007,10 @@ button:disabled {
   .editor-a4-preview-border-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     padding-inline: 16px;
+  }
+
+  .editor-a4-preview-background-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .editor-a4-preview-dialog > footer {

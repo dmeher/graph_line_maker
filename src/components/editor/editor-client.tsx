@@ -64,7 +64,12 @@ import {
 import { reconcileFillRegionOverrides } from "@/lib/canvas/fill-region-reconciliation";
 import { MAX_WORKING_SOURCE_PIXELS, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
 import { detectPreviewPolicy, workingImagePixelCap } from "@/lib/canvas/preview-policy";
-import { A4_PREVIEW_BORDER_OPTIONS, type A4PreviewBorderId } from "@/lib/canvas/a4-graph-preview";
+import {
+  A4_PREVIEW_BACKGROUND_OPTIONS,
+  A4_PREVIEW_BORDER_OPTIONS,
+  type A4PreviewBackgroundId,
+  type A4PreviewBorderId,
+} from "@/lib/canvas/a4-graph-preview";
 import { disposeCanvasProcessingWorker, pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
 import { clearCanvasProcessingCaches, findContentBounds, flattenGraphForOutput, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
 import { GraphGridOverlay } from "@/components/editor/graph-grid-overlay";
@@ -1517,6 +1522,7 @@ export function EditorClient({
   const [exportMenuStyle, setExportMenuStyle] = useState<CSSProperties | null>(null);
   const [isA4PreviewDialogOpen, setIsA4PreviewDialogOpen] = useState(false);
   const [a4PreviewBorderId, setA4PreviewBorderId] = useState<A4PreviewBorderId | null>(null);
+  const [a4PreviewBackgroundId, setA4PreviewBackgroundId] = useState<A4PreviewBackgroundId | null>(null);
   const [a4PreviewDownloadPending, setA4PreviewDownloadPending] = useState(false);
   const [isWorkspaceMenuOpen, setIsWorkspaceMenuOpen] = useState(false);
   const [workspaceMenuStyle, setWorkspaceMenuStyle] = useState<CSSProperties | null>(null);
@@ -6667,6 +6673,7 @@ export function EditorClient({
     }
 
     setA4PreviewBorderId(null);
+    setA4PreviewBackgroundId(null);
     // Let the export popover unmount before opening its separate, body-level
     // picker. This prevents the menu's outside-click/focus lifecycle from
     // competing with the new dialog.
@@ -6686,7 +6693,7 @@ export function EditorClient({
       return;
     }
     // A4 Preview takes artwork-only output, so its repeats intentionally omit
-    // the editor grid while retaining the configured paper background.
+    // the editor grid while using the separately selected paper background.
     const sourceCanvas = a4PreviewSourceCanvas();
     if (!sourceCanvas) {
       setNotice({ tone: "error", text: "The graph image is not ready for preview yet." });
@@ -6696,6 +6703,11 @@ export function EditorClient({
     const selectedBorderId = a4PreviewBorderId;
     if (!selectedBorderId) {
       setNotice({ tone: "info", text: "Choose a border before downloading the A4 preview." });
+      return;
+    }
+    const selectedBackgroundId = a4PreviewBackgroundId;
+    if (!selectedBackgroundId) {
+      setNotice({ tone: "info", text: "Choose a background before downloading the A4 preview." });
       return;
     }
 
@@ -6709,19 +6721,19 @@ export function EditorClient({
       .then(({ createA4GraphPreview, createA4PreviewPngBlob }) => createA4GraphPreview(sourceCanvas, {
         graphWidthCm: settings.graphWidth,
         borderId: selectedBorderId,
+        backgroundId: selectedBackgroundId,
         projectTitle: title,
-        backgroundColor: settings.backgroundColor,
       }).then(async (preview) => ({ ...preview, blob: await createA4PreviewPngBlob(preview.canvas) })))
-      .then(({ layout, border, blob }) => {
+      .then(({ layout, border, background, blob }) => {
         const previewUrl = URL.createObjectURL(blob);
         const link = document.createElement("a");
-        link.download = `${slug(title)}-a4-${layout.orientation}-${border.id}.png`;
+        link.download = `${slug(title)}-a4-${layout.orientation}-${border.id}-${background.id}.png`;
         link.href = previewUrl;
         link.click();
         window.setTimeout(() => URL.revokeObjectURL(previewUrl), 0);
         finishPreview({ completed: true, width: layout.width, height: layout.height, pixels: layout.width * layout.height });
         setIsA4PreviewDialogOpen(false);
-        setNotice({ tone: "ok", text: `A4 ${layout.orientation} preview downloaded with the ${border.label.toLowerCase()} border.` });
+        setNotice({ tone: "ok", text: `A4 ${layout.orientation} preview downloaded with the ${border.label.toLowerCase()} border and ${background.label.toLowerCase()} background.` });
       })
       .catch((error) => {
         finishPreview({ failed: true });
@@ -10100,10 +10112,11 @@ export function EditorClient({
                 <header>
                   <div>
                     <span>A4 preview</span>
-                    <h2 id="a4-preview-title">Choose a border</h2>
+                    <h2 id="a4-preview-title">Choose border and background</h2>
                     <p id="a4-preview-description">
                       {settings.graphWidth > 30 ? "Landscape A4" : "Portrait A4"} at 300 DPI · six mirrored graph repeats · 15 mm top margin.
                     </p>
+                    <p>Select a border, then choose a page background.</p>
                   </div>
                   <button type="button" onClick={() => setIsA4PreviewDialogOpen(false)} disabled={a4PreviewDownloadPending} aria-label="Close A4 preview options">
                     <X size={18} aria-hidden="true" />
@@ -10125,9 +10138,37 @@ export function EditorClient({
                     </button>
                   ))}
                 </div>
+                {a4PreviewBorderId ? (
+                  <section className="editor-a4-preview-backgrounds" aria-labelledby="a4-preview-background-title">
+                    <div className="editor-a4-preview-backgrounds__heading">
+                      <span>Step 2</span>
+                      <h3 id="a4-preview-background-title">Choose a page background</h3>
+                    </div>
+                    <div className="editor-a4-preview-background-grid" role="radiogroup" aria-label="Preview page background">
+                      {A4_PREVIEW_BACKGROUND_OPTIONS.map((background) => (
+                        <button
+                          key={background.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={a4PreviewBackgroundId === background.id}
+                          className={a4PreviewBackgroundId === background.id ? "is-selected" : ""}
+                          onClick={() => setA4PreviewBackgroundId(background.id)}
+                          disabled={a4PreviewDownloadPending}
+                        >
+                          <span
+                            className={`editor-a4-preview-background-swatch${background.color === null ? " is-transparent" : ""}`}
+                            style={background.color === null ? undefined : { backgroundColor: background.color }}
+                            aria-hidden="true"
+                          />
+                          <strong>{background.label}</strong>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
                 <footer>
                   <button type="button" onClick={() => setIsA4PreviewDialogOpen(false)} disabled={a4PreviewDownloadPending}>Cancel</button>
-                  <button type="button" className="editor-a4-preview-download" onClick={downloadGraphPreview} disabled={a4PreviewDownloadPending || !a4PreviewBorderId}>
+                  <button type="button" className="editor-a4-preview-download" onClick={downloadGraphPreview} disabled={a4PreviewDownloadPending || !a4PreviewBorderId || !a4PreviewBackgroundId}>
                     {a4PreviewDownloadPending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <ImageDown size={16} aria-hidden="true" />}
                     Download A4 PNG
                   </button>

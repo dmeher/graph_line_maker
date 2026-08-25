@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="1440" viewBox="0 0 240 1440">
+  <defs>
+    <pattern id="pasapali" width="240" height="240" patternUnits="userSpaceOnUse">
+      <rect width="240" height="240" fill="#fff"/>
+      <path fill="#000" d="M6 0h20v240H6zm208 0h20v240h-20zM26 0l22 20-22 20zm188 0l-22 20 22 20zM26 80l22 20-22 20zm188 0l-22 20 22 20zM26 160l22 20-22 20zm188 0l-22 20 22 20z"/>
+      <path fill="#000" d="M120 26l88 94-88 94-88-94z"/>
+      <path fill="#fff" d="M120 52l64 68-64 68-64-68z"/>
+      <path fill="#000" d="M120 72l46 48-46 48-46-48z"/>
+      <path fill="#fff" d="M96 96h24v24H96zm24 24h24v24h-24z"/>
+      <path fill="#000" d="M52 18h22v22H52zm114 0h22v22h-22zM52 200h22v22H52zm114 0h22v22h-22z"/>
+    </pattern>
+  </defs>
+  <rect width="240" height="1440" fill="url(#pasapali)"/>
+</svg>

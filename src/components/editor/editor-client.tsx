@@ -64,6 +64,7 @@ import {
 import { reconcileFillRegionOverrides } from "@/lib/canvas/fill-region-reconciliation";
 import { MAX_WORKING_SOURCE_PIXELS, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
 import { detectPreviewPolicy, workingImagePixelCap } from "@/lib/canvas/preview-policy";
+import { A4_PREVIEW_BORDER_OPTIONS, type A4PreviewBorderId } from "@/lib/canvas/a4-graph-preview";
 import { disposeCanvasProcessingWorker, pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
 import { clearCanvasProcessingCaches, findContentBounds, flattenGraphForOutput, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
 import { GraphGridOverlay } from "@/components/editor/graph-grid-overlay";
@@ -1514,6 +1515,9 @@ export function EditorClient({
   const [isPending, startTransition] = useTransition();
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [exportMenuStyle, setExportMenuStyle] = useState<CSSProperties | null>(null);
+  const [isA4PreviewDialogOpen, setIsA4PreviewDialogOpen] = useState(false);
+  const [a4PreviewBorderId, setA4PreviewBorderId] = useState<A4PreviewBorderId | null>(null);
+  const [a4PreviewDownloadPending, setA4PreviewDownloadPending] = useState(false);
   const [isWorkspaceMenuOpen, setIsWorkspaceMenuOpen] = useState(false);
   const [workspaceMenuStyle, setWorkspaceMenuStyle] = useState<CSSProperties | null>(null);
   const [clipartSearch, setClipartSearch] = useState("");
@@ -6656,41 +6660,74 @@ export function EditorClient({
       setNotice({ tone: "info", text: "Finishing the canvas update before opening the preview." });
       return;
     }
-    // The flattened canvas is the user-facing graph image: paper, grid, and
-    // artwork are already composed together before the repeating strip is made.
-    const sourceCanvas = processedCanvasRef.current;
+    const sourceCanvas = a4PreviewSourceCanvas();
     if (!sourceCanvas) {
       setNotice({ tone: "error", text: "The graph image is not ready for preview yet." });
       return;
     }
 
+    setA4PreviewBorderId(null);
+    // Let the export popover unmount before opening its separate, body-level
+    // picker. This prevents the menu's outside-click/focus lifecycle from
+    // competing with the new dialog.
+    window.requestAnimationFrame(() => setIsA4PreviewDialogOpen(true));
+  }
+
+  function a4PreviewSourceCanvas() {
+    // Unlike standard PNG/save output, A4 Preview deliberately takes the
+    // transparent artwork layer. The preview generator paints its paper
+    // backdrop but never adds the editor's graph grid lines.
+    return artworkCanvasRef.current;
+  }
+
+  function downloadGraphPreview() {
+    if (processing || dragPreviewSourceId || a4PreviewDownloadPending) {
+      setNotice({ tone: "info", text: "Finishing the canvas update before creating the preview." });
+      return;
+    }
+    // A4 Preview takes artwork-only output, so its repeats intentionally omit
+    // the editor grid while retaining the configured paper background.
+    const sourceCanvas = a4PreviewSourceCanvas();
+    if (!sourceCanvas) {
+      setNotice({ tone: "error", text: "The graph image is not ready for preview yet." });
+      return;
+    }
+
+    const selectedBorderId = a4PreviewBorderId;
+    if (!selectedBorderId) {
+      setNotice({ tone: "info", text: "Choose a border before downloading the A4 preview." });
+      return;
+    }
+
     const finishPreview = startGraphPerformanceStage("export", {
-      format: "linear-preview",
+      format: "a4-preview",
       width: sourceCanvas.width,
       height: sourceCanvas.height,
     });
-    void import("@/lib/canvas/linear-graph-preview")
-      .then(({ createLinearGraphPreview }) => {
-        const preview = createLinearGraphPreview(sourceCanvas, {
-          backgroundColor: settings.backgroundColor,
-          borderColor: settings.gridLineColor,
-        });
-        return canvasToBlob(preview.canvas).then((blob) => ({ ...preview, blob }));
-      })
-      .then(({ layout, blob }) => {
+    setA4PreviewDownloadPending(true);
+    void import("@/lib/canvas/a4-graph-preview")
+      .then(({ createA4GraphPreview, createA4PreviewPngBlob }) => createA4GraphPreview(sourceCanvas, {
+        graphWidthCm: settings.graphWidth,
+        borderId: selectedBorderId,
+        projectTitle: title,
+        backgroundColor: settings.backgroundColor,
+      }).then(async (preview) => ({ ...preview, blob: await createA4PreviewPngBlob(preview.canvas) })))
+      .then(({ layout, border, blob }) => {
         const previewUrl = URL.createObjectURL(blob);
         const link = document.createElement("a");
-        link.download = `${slug(title)}-linear-preview.png`;
+        link.download = `${slug(title)}-a4-${layout.orientation}-${border.id}.png`;
         link.href = previewUrl;
         link.click();
         window.setTimeout(() => URL.revokeObjectURL(previewUrl), 0);
         finishPreview({ completed: true, width: layout.width, height: layout.height, pixels: layout.width * layout.height });
-        setNotice({ tone: "ok", text: "200 cm repeating preview downloaded as a PNG." });
+        setIsA4PreviewDialogOpen(false);
+        setNotice({ tone: "ok", text: `A4 ${layout.orientation} preview downloaded with the ${border.label.toLowerCase()} border.` });
       })
       .catch((error) => {
         finishPreview({ failed: true });
         setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to create preview download." });
-      });
+      })
+      .finally(() => setA4PreviewDownloadPending(false));
   }
 
   function exportJSON() {
@@ -9254,7 +9291,7 @@ export function EditorClient({
     { id: "history-redo", label: "Redo", group: "History", shortcut: "Ctrl Shift Z", run: () => restoreSettingsHistory("redo") },
     { id: "project-save", label: "Save project", group: "Project", shortcut: "Ctrl S", disabled: isPending || processing || Boolean(dragPreviewSourceId) || !title.trim(), run: () => saveProject() },
     { id: "export-png", label: "Export PNG", group: "Export", keywords: ["image", "download"], disabled: processing, run: exportPNG },
-    { id: "export-preview", label: "Download repeating preview", group: "Export", keywords: ["landscape", "mirror", "border", "png", "image", "download"], disabled: processing || Boolean(dragPreviewSourceId), run: openGraphPreview },
+    { id: "export-preview", label: "Download A4 preview", group: "Export", keywords: ["a4", "portrait", "landscape", "mirror", "border", "png", "image", "download"], disabled: processing || Boolean(dragPreviewSourceId), run: openGraphPreview },
     { id: "export-pdf", label: "Export tiled PDF", group: "Export", keywords: ["print", "pages"], disabled: !pdfOutputReady, run: exportPDF },
     { id: "export-json", label: "Export project JSON", group: "Export", keywords: ["settings", "backup"], run: exportJSON },
     { id: "export-print", label: "Print graph", group: "Export", keywords: ["browser", "paper"], disabled: processing, run: printGraph },
@@ -9994,7 +10031,7 @@ export function EditorClient({
                 disabled={processing || Boolean(dragPreviewSourceId)}
               >
                 <ImageDown size={16} aria-hidden="true" />
-                Download preview PNG
+                A4 preview PNG
               </button>
               <button
                 type="button"
@@ -10045,6 +10082,57 @@ export function EditorClient({
                 <Printer size={16} aria-hidden="true" />
                 Print
               </button>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {isA4PreviewDialogOpen
+        ? createPortal(
+            <div
+              className="editor-a4-preview-backdrop"
+              role="presentation"
+              onPointerDown={(event) => {
+                if (event.target === event.currentTarget && !a4PreviewDownloadPending) setIsA4PreviewDialogOpen(false);
+              }}
+            >
+              <section className="editor-a4-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="a4-preview-title" aria-describedby="a4-preview-description">
+                <header>
+                  <div>
+                    <span>A4 preview</span>
+                    <h2 id="a4-preview-title">Choose a border</h2>
+                    <p id="a4-preview-description">
+                      {settings.graphWidth > 30 ? "Landscape A4" : "Portrait A4"} at 300 DPI · six mirrored graph repeats · 15 mm top margin.
+                    </p>
+                  </div>
+                  <button type="button" onClick={() => setIsA4PreviewDialogOpen(false)} disabled={a4PreviewDownloadPending} aria-label="Close A4 preview options">
+                    <X size={18} aria-hidden="true" />
+                  </button>
+                </header>
+                <div className="editor-a4-preview-border-grid" role="radiogroup" aria-label="Preview border">
+                  {A4_PREVIEW_BORDER_OPTIONS.map((border) => (
+                    <button
+                      key={border.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={a4PreviewBorderId === border.id}
+                      className={a4PreviewBorderId === border.id ? "is-selected" : ""}
+                      onClick={() => setA4PreviewBorderId(border.id)}
+                      disabled={a4PreviewDownloadPending}
+                    >
+                      <span className="editor-a4-preview-border-swatch"><img src={border.path} alt="" /></span>
+                      <strong>{border.label}</strong>
+                    </button>
+                  ))}
+                </div>
+                <footer>
+                  <button type="button" onClick={() => setIsA4PreviewDialogOpen(false)} disabled={a4PreviewDownloadPending}>Cancel</button>
+                  <button type="button" className="editor-a4-preview-download" onClick={downloadGraphPreview} disabled={a4PreviewDownloadPending || !a4PreviewBorderId}>
+                    {a4PreviewDownloadPending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <ImageDown size={16} aria-hidden="true" />}
+                    Download A4 PNG
+                  </button>
+                </footer>
+              </section>
             </div>,
             document.body,
           )
@@ -10317,7 +10405,7 @@ export function EditorClient({
           <button type="button" onClick={() => setMobileTab("canvas")} aria-label="Close export formats"><X size={17} aria-hidden="true" /></button>
         </header>
         <div>
-          <button type="button" onClick={() => { setMobileTab("canvas"); openGraphPreview(); }} disabled={processing || Boolean(dragPreviewSourceId)}><ImageDown size={18} aria-hidden="true" /><span><strong>Preview PNG</strong><small>200 cm wide, with mirrored repeats</small></span></button>
+          <button type="button" onClick={() => { setMobileTab("canvas"); openGraphPreview(); }} disabled={processing || Boolean(dragPreviewSourceId)}><ImageDown size={18} aria-hidden="true" /><span><strong>A4 preview PNG</strong><small>Six repeats with your selected border</small></span></button>
           <button type="button" onClick={() => { setMobileTab("canvas"); exportPNG(); }} disabled={processing}><ImageDown size={18} aria-hidden="true" /><span><strong>PNG image</strong><small>Flattened graph artwork</small></span></button>
           <button type="button" onClick={() => { setMobileTab("canvas"); exportPDF(); }} disabled={!pdfOutputReady}><FileText size={18} aria-hidden="true" /><span><strong>Tiled PDF</strong><small>Print-ready pages</small></span></button>
           <button type="button" onClick={() => { setMobileTab("canvas"); exportJSON(); }}><FileJson size={18} aria-hidden="true" /><span><strong>Project JSON</strong><small>Portable settings backup</small></span></button>

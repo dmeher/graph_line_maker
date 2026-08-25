@@ -44,3 +44,25 @@ next-env.d.ts
 # Local native tool payloads are never committed.
 /tools/autotrace/autotrace.exe
 /tools/autotrace/*.dll
+
+
+# Temporary GitIgnore for Desktop App Code
+# Superseded local Python environment retained only as an ignored cache during the .NET transition.
+/desktop-python/
+
+# Native .NET build, publish, and local Playwright control artifacts.
+/desktop-dotnet/**/bin/
+/desktop-dotnet/**/obj/
+/desktop-dotnet/publish/
+/desktop-dotnet/assets/*.ico
+/.playwright-cli/
+
+# Local desktop/archive work that is outside the Graph Pixel Maker web app.
+/design-archive/
+/desktop-dotnet/
+/output/playwright/desktop-dotnet-proposals/
+/output/playwright/desktop-python-proposals/
+/src/app/api/v1/
+/src/lib/desktop-api.ts
+/src/lib/desktop-protocol.test.ts
+/src/lib/desktop-protocol.ts

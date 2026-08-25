@@ -373,7 +373,7 @@ Validation on 2026-07-17: `npm run build` completed compilation, TypeScript chec
 ### `PERF-DATA-005` - project asset lifecycle can leave orphaned objects after storage cleanup failure
 
 - **Priority / status:** P1 / Resolved
-- **Evidence:** project creation inserts the row before concurrent uploads in `src/app/api/projects/route.ts`. Dashboard `deleteProject` normalizes saved settings, accepts cleanup candidates only below the authorized owner/project prefix, deletes the database row first, revalidates `/dashboard`, and only then derives R2 keys and performs cleanup best-effort. `duplicateProject` rewrites copied nested paths rather than retaining the original project's assets.
+- **Evidence:** project creation inserts the row before concurrent uploads in `src/app/api/projects/route.ts`. Dashboard `deleteProject` normalizes saved settings, accepts cleanup candidates only below the authorized owner/project prefix, deletes the database row first, revalidates `/dashboard`, and only then derives R2 keys and performs cleanup best-effort. `duplicateProject` rewrites copied nested paths rather than retaining the original project's assets, and bounds its ` Copy` title to the same 160-character save contract.
 - **Impact:** Missing R2 configuration, permissions, or a stale object can no longer make a dashboard project impossible to delete. A cleanup failure can still leave an orphaned object, which is preferable to an inaccessible project row but requires reconciliation.
 - **Solution:** Keep database deletion and cross-system cleanup separate; log cleanup failures and add a periodic validated-object reconciliation or a `project_assets` registry with owner, project, kind, path, size, MIME, state, and optional reference count.
 - **Risks / validation:** Prefix/path cleanup is destructive if paths are not strongly validated, while best-effort cleanup may leave orphans. Test malformed persisted paths, no-R2 local deletion, storage permission failure, partial upload failure, delete, duplicate, source replacement, shared-reference policy, and idempotent cleanup.
@@ -518,6 +518,16 @@ Validation on 2026-07-17: `npm run build` completed compilation, TypeScript chec
 - **Impact:** Parent rerenders can repeat sessionStorage writes, service-worker registration lookup, and duplicate messages.
 - **Solution:** Add stable dependencies, de-duplicate controller/active delivery, and send only when the ticket/user snapshot changes.
 - **Risks / validation:** Ensure a newly activated worker still receives the current ticket. Test initial load, rerender, controller change, logout, and expiry.
+
+## Targeted desktop-client update — 2026-08-23
+
+### `PERF-DESKTOP-001` - native profiles and rendering must retain server compatibility boundaries
+
+- **Priority / status:** P1 / Guard
+- **Evidence:** `desktop-dotnet/` targets a .NET 10 WPF client with profile-isolated SQLite drafts/assets, current-user DPAPI session protection, bounded canvas limits matching the shared 24,000-axis/16 MP/512 MiB limits, and background-native processing primitives. `src/proxy.ts` requires protocol/client headers for every protected `/api/v1` facade call, while the public desktop-health endpoint remains secret-free and runs before OTP.
+- **Impact:** A desktop release cannot silently talk to an incompatible host, mix local recovery data across environments, or obtain database/R2 credentials. Hosted authorization and direct-upload lifecycle remain authoritative.
+- **Solution:** Keep the protocol check in the proxy and repeat server authorization inside route handlers; preserve unknown JSON fields through `JsonExtensionData`; keep profile edits admin-gated in the native UI. Do not claim graph/design render parity until .NET 10 golden tests run.
+- **Risks / validation:** .NET SDK **10.0.400** and NSIS **3.12** were installed on 2026-08-23 after explicit user authorization. `dotnet test GraphPixelMaker.sln -c Release --no-restore` passed 5/5, including native PNG/PDF export and tiled-PDF page checks; `npm run test:desktop-contract` and `git diff --check` passed. A self-contained ReadyToRun `win-x64` publish and NSIS installer were created, and a silent install/uninstall smoke test passed in an isolated workspace folder. The installer is intentionally **unsigned**: no SignTool or externally supplied certificate thumbprint was available. Rendered WPF validation was not run because it was not explicitly requested.
 
 ## Recommended remediation order
 

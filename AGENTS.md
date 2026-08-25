@@ -214,7 +214,7 @@ Session verification (`getCurrentSession`) reads the cookie, verifies the HMAC s
 
 Production session resolution is request-memoized with React `cache()`; never replace it with cross-request caching. OTP creation/cooldown and verification are atomic through the service-role-only `image_to_graph.create_login_otp_attempt` and `image_to_graph.verify_login_otp` RPCs.
 
-**Authorization model.** `requireSession` gates every mutation; `requireAdmin` gates the user allowlist. Project authorization runs through `assertProjectAccess` (full row) or `assertProjectOwnerId` (owner id only, used by the save path) in `src/lib/projects.ts`: a member may act on their own projects, an **admin on any project**. Both return the project's real `user_id`, and every caller must key storage paths and follow-up `user_id` filters off that value rather than the acting session — otherwise an admin edit would scatter a member's assets under the admin's own prefix. `getProjectForCurrentUser` applies the same rule for reads. `duplicateProject` is the deliberate exception: the copy is always owned by whoever duplicated it.
+**Authorization model.** `requireSession` gates every mutation; `requireAdmin` gates the user allowlist. Project authorization runs through `assertProjectAccess` (full row) or `assertProjectOwnerId` (owner id only, used by the save path) in `src/lib/projects.ts`: a member may act on their own projects, an **admin on any project**. Both return the project's real `user_id`, and every caller must key storage paths and follow-up `user_id` filters off that value rather than the acting session — otherwise an admin edit would scatter a member's assets under the admin's own prefix. `getProjectForCurrentUser` applies the same rule for reads. `duplicateProject` is the deliberate exception: the copy is always owned by whoever duplicated it, and its ` Copy` title suffix is applied within the 160-character save limit.
 
 Local development has an explicit opt-in bypass: set `GRAPH_PIXEL_DEV_AUTH_BYPASS=true` while `NODE_ENV=development`, with optional `GRAPH_PIXEL_DEV_USER_EMAIL` (defaults to the bootstrap admin). The bypass is ignored outside development and therefore cannot disable production auth. When Supabase is configured, the email must resolve to an active `app_users` row; that real user ID/role is used so project ownership and admin checks still apply. With no Supabase configuration, a synthetic local identity supports non-persistent fixtures, but database/storage APIs still require Supabase.
 
@@ -497,6 +497,21 @@ npm run test:pdf-export
 ```
 
 > **Do not run `npm run build` or `npm start` without explicit user confirmation.** The repo workflow intentionally avoids production builds by default.
+
+### Native Windows client
+
+`desktop-dotnet/` contains the separate .NET 10 WPF client. It contains no browser UI runtime and talks only to the versioned hosted `/api/v1` facade. Use `System.Text.Json` extension data when mapping project or Design JSON so fields introduced by the web app survive a desktop save. Session cookies are stored under the current Windows user's DPAPI scope; profiles, SQLite cache/drafts, and assets are isolated by profile ID. The first profile is bootstrap-only; profile mutation in the UI requires the authenticated `manageDesktopProfiles` capability returned by `/api/v1/session`.
+
+```powershell
+cd desktop-dotnet
+dotnet test GraphPixelMaker.sln
+```
+
+The source requires the .NET 10 SDK. `scripts/build-installer.ps1` is a production self-contained `win-x64` publish plus NSIS installer path and intentionally throws unless invoked with `-ConfirmBuild`; an agent must still obtain user confirmation before running it. The release script generates its `.ico` from the existing public icon, can sign when the externally supplied `GRAPH_PIXEL_SIGNING_CERTIFICATE` thumbprint is present, and has no update service.
+
+### Desktop v1 API facade
+
+`/api/v1/desktop/health` is the public, secret-free compatibility probe. Every other `/api/v1` request must send `x-graph-pixel-desktop-protocol: 1` and a `x-graph-pixel-desktop-client: GraphPixelMakerDesktop/<version>` header; `src/proxy.ts` returns `426` before a route runs when either is absent/incompatible. The facade reuses the existing OTP, session, project/direct-upload, Design/library, vectorization, and admin authorization contracts rather than exposing database or R2 credentials.
 
 ---
 

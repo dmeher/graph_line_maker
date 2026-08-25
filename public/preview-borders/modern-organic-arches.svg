@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="1440" viewBox="0 0 240 1440">
+  <defs>
+    <pattern id="organic-arches" width="240" height="288" patternUnits="userSpaceOnUse">
+      <rect width="240" height="288" fill="#fff"/>
+      <path fill="#000" d="M6 0h14v288H6zm214 0h14v288h-14z"/>
+      <path d="M42 80c0-38 31-68 68-68s68 30 68 68-31 68-68 68-68-30-68-68z" fill="#000"/>
+      <path d="M64 80c0-26 21-46 46-46s46 20 46 46-21 46-46 46-46-20-46-46z" fill="#fff"/>
+      <path fill="#000" d="M110 54c17 0 30 12 30 27s-13 27-30 27-30-12-30-27 13-27 30-27z"/>
+      <path d="M62 170c0 55 26 100 58 100s58-45 58-100" fill="none" stroke="#000" stroke-width="21" stroke-linecap="round"/>
+      <path d="M84 170c0 35 16 64 36 64s36-29 36-64" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round"/>
+      <circle cx="48" cy="178" r="13" fill="#000"/>
+      <circle cx="192" cy="178" r="13" fill="#000"/>
+    </pattern>
+  </defs>
+  <rect width="240" height="1440" fill="url(#organic-arches)"/>
+</svg>

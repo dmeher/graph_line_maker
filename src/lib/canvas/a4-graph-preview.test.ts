@@ -9,16 +9,25 @@ import {
   setPngResolution,
 } from "./a4-graph-preview.ts";
 
-test("A4 preview offers the supplied borders plus five original Sambalpuri-inspired SVGs", () => {
-  const customBorders = A4_PREVIEW_BORDER_OPTIONS.filter((border) => border.path.endsWith(".svg"));
+test("A4 preview offers supplied, Sambalpuri-inspired, and modern border collections", () => {
+  const sambalpuriBorders = A4_PREVIEW_BORDER_OPTIONS.filter((border) => border.id.startsWith("sambalpuri-"));
+  const modernBorders = A4_PREVIEW_BORDER_OPTIONS.filter((border) => border.id.startsWith("modern-"));
 
-  assert.equal(A4_PREVIEW_BORDER_OPTIONS.length, 10);
-  assert.deepEqual(customBorders.map((border) => border.id), [
+  assert.equal(A4_PREVIEW_BORDER_OPTIONS.length, 15);
+  assert.equal(new Set(A4_PREVIEW_BORDER_OPTIONS.map((border) => border.path)).size, 15);
+  assert.deepEqual(sambalpuriBorders.map((border) => border.id), [
     "sambalpuri-pasapali",
     "sambalpuri-shankha-chakra",
     "sambalpuri-padma-vine",
     "sambalpuri-machha-jali",
     "sambalpuri-temple-rudraksha",
+  ]);
+  assert.deepEqual(modernBorders.map((border) => border.id), [
+    "modern-geo-pulse",
+    "modern-deco-fan",
+    "modern-monoline-wave",
+    "modern-pixel-circuit",
+    "modern-organic-arches",
   ]);
 });
 

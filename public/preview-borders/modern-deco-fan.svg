@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="1440" viewBox="0 0 240 1440">
+  <defs>
+    <pattern id="deco-fan" width="240" height="288" patternUnits="userSpaceOnUse">
+      <rect width="240" height="288" fill="#fff"/>
+      <path fill="#000" d="M6 0h14v288H6zm214 0h14v288h-14z"/>
+      <path d="M38 124a82 82 0 0 1 164 0M56 124a64 64 0 0 1 128 0M76 124a44 44 0 0 1 88 0M96 124a24 24 0 0 1 48 0" fill="none" stroke="#000" stroke-width="10"/>
+      <path fill="#000" d="M120 28l11 78h-22zM58 56l53 58-17 10zM182 56l-36 68-17-10zM38 124h164v16H38z"/>
+      <path d="M42 178h156l-24 24H66zm24 39h108l-21 21H87zm22 36h64l-16 16h-32z" fill="#000"/>
+      <circle cx="120" cy="124" r="13" fill="#fff" stroke="#000" stroke-width="8"/>
+    </pattern>
+  </defs>
+  <rect width="240" height="1440" fill="url(#deco-fan)"/>
+</svg>

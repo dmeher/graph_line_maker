@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="1440" viewBox="0 0 240 1440">
+  <defs>
+    <pattern id="pixel-circuit" width="240" height="240" patternUnits="userSpaceOnUse">
+      <rect width="240" height="240" fill="#fff"/>
+      <path fill="#000" d="M8 0h12v240H8zm212 0h12v240h-12z"/>
+      <path d="M20 34h54v42h46v44h54v42h46M220 34h-54v42h-46M20 206h54v-42h46v-44" fill="none" stroke="#000" stroke-width="12" stroke-linejoin="round"/>
+      <path fill="#000" d="M56 18h36v32H56zm100 0h36v32h-36zM102 102h36v36h-36zM56 190h36v32H56zm100 0h36v32h-36z"/>
+      <path fill="#fff" d="M66 27h16v14H66zm100 0h16v14h-16zM112 112h16v16h-16zM66 199h16v14H66zm100 0h16v14h-16z"/>
+    </pattern>
+  </defs>
+  <rect width="240" height="1440" fill="url(#pixel-circuit)"/>
+</svg>

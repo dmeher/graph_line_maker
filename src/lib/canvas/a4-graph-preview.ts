@@ -18,6 +18,11 @@ export const A4_PREVIEW_BORDER_OPTIONS = [
   { id: "sambalpuri-padma-vine", label: "Padma vine", path: "/preview-borders/sambalpuri-padma-vine.svg" },
   { id: "sambalpuri-machha-jali", label: "Machha jali", path: "/preview-borders/sambalpuri-machha-jali.svg" },
   { id: "sambalpuri-temple-rudraksha", label: "Temple rudraksha", path: "/preview-borders/sambalpuri-temple-rudraksha.svg" },
+  { id: "modern-geo-pulse", label: "Geo pulse", path: "/preview-borders/modern-geo-pulse.svg" },
+  { id: "modern-deco-fan", label: "Deco fan", path: "/preview-borders/modern-deco-fan.svg" },
+  { id: "modern-monoline-wave", label: "Monoline wave", path: "/preview-borders/modern-monoline-wave.svg" },
+  { id: "modern-pixel-circuit", label: "Pixel circuit", path: "/preview-borders/modern-pixel-circuit.svg" },
+  { id: "modern-organic-arches", label: "Organic arches", path: "/preview-borders/modern-organic-arches.svg" },
 ] as const;
 
 export type A4PreviewBorderId = (typeof A4_PREVIEW_BORDER_OPTIONS)[number]["id"];
@@ -305,5 +310,8 @@ export async function createA4PreviewPngBlob(canvas: HTMLCanvasElement) {
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((next) => (next ? resolve(next) : reject(new Error("Unable to encode the A4 preview PNG."))), "image/png");
   });
-  return new Blob([setPngResolution(new Uint8Array(await blob.arrayBuffer()))], { type: "image/png" });
+  const resolvedBytes = setPngResolution(new Uint8Array(await blob.arrayBuffer()));
+  const resolvedBuffer = new ArrayBuffer(resolvedBytes.byteLength);
+  new Uint8Array(resolvedBuffer).set(resolvedBytes);
+  return new Blob([resolvedBuffer], { type: "image/png" });
 }

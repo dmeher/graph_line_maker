@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="1440" viewBox="0 0 240 1440">
+  <defs>
+    <pattern id="geo-pulse" width="240" height="240" patternUnits="userSpaceOnUse">
+      <rect width="240" height="240" fill="#fff"/>
+      <path fill="#000" d="M8 0h10v240H8zm214 0h10v240h-10z"/>
+      <path d="M38 0l70 60-70 60 70 60-70 60M202 0l-70 60 70 60-70 60 70 60" fill="none" stroke="#000" stroke-width="15" stroke-linejoin="miter"/>
+      <path fill="#000" d="M108 42h24v36h-24zm0 84h24v36h-24zm0 84h24v30h-24z"/>
+      <path fill="#fff" d="M54 48h18v24H54zm114 0h18v24h-18zM54 168h18v24H54zm114 0h18v24h-18z"/>
+    </pattern>
+  </defs>
+  <rect width="240" height="1440" fill="url(#geo-pulse)"/>
+</svg>

@@ -25,7 +25,33 @@ export const A4_PREVIEW_BORDER_OPTIONS = [
   { id: "modern-organic-arches", label: "Organic arches", path: "/preview-borders/modern-organic-arches.svg" },
 ] as const;
 
+/**
+ * Presentation-only paper choices for the A4 preview. These intentionally do
+ * not use the editor's persisted artwork palette: the selection applies only
+ * to the downloaded preview and transparent leaves its page backdrop unpainted.
+ */
+export const A4_PREVIEW_BACKGROUND_OPTIONS = [
+  { id: "white", label: "White", color: "#ffffff" },
+  { id: "ivory", label: "Ivory", color: "#f5e6b8" },
+  { id: "cream", label: "Cream", color: "#f6dda6" },
+  { id: "butter", label: "Butter", color: "#f9e36f" },
+  { id: "blush", label: "Blush", color: "#f7c6d0" },
+  { id: "peach", label: "Peach", color: "#f8c9b7" },
+  { id: "apricot", label: "Apricot", color: "#f6c58d" },
+  { id: "rose", label: "Rose", color: "#edbdd1" },
+  { id: "lavender", label: "Lavender", color: "#dcccf3" },
+  { id: "lilac", label: "Lilac", color: "#e7c9f3" },
+  { id: "periwinkle", label: "Periwinkle", color: "#c9d5f5" },
+  { id: "sky", label: "Sky", color: "#bdddf7" },
+  { id: "ice", label: "Ice", color: "#bdeaf1" },
+  { id: "mint", label: "Mint", color: "#bde7cf" },
+  { id: "sage", label: "Sage", color: "#c9ddbf" },
+  { id: "mist", label: "Mist", color: "#d1dbe8" },
+  { id: "transparent", label: "Transparent", color: null },
+] as const;
+
 export type A4PreviewBorderId = (typeof A4_PREVIEW_BORDER_OPTIONS)[number]["id"];
+export type A4PreviewBackgroundId = (typeof A4_PREVIEW_BACKGROUND_OPTIONS)[number]["id"];
 export type A4PreviewOrientation = "portrait" | "landscape";
 
 export type A4GraphPreviewLayout = {
@@ -40,6 +66,13 @@ export type A4GraphPreviewLayout = {
   graph: { x: number; y: number; width: number; height: number };
   topBorder: { x: number; y: number; width: number; height: number };
   bottomBorder: { x: number; y: number; width: number; height: number };
+};
+
+export type A4GraphPreviewSourceCrop = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 };
 
 function positiveInteger(value: number | undefined, fallback: number) {
@@ -98,12 +131,44 @@ export function createA4GraphPreviewLayout({
   };
 }
 
+/**
+ * The first and last graph cells are intentionally blank page gutters in the
+ * editor. They are not artwork, so exclude one cell from either side before
+ * repeating the design on the A4 preview.
+ */
+export function createA4GraphPreviewSourceCrop({
+  sourceWidth,
+  sourceHeight,
+  graphWidthCm,
+}: {
+  sourceWidth: number;
+  sourceHeight: number;
+  graphWidthCm: number;
+}): A4GraphPreviewSourceCrop {
+  const width = Math.max(1, Math.round(sourceWidth));
+  const height = Math.max(1, Math.round(sourceHeight));
+  const graphCells = Number(graphWidthCm);
+  if (!Number.isFinite(graphCells) || graphCells <= 2) return { x: 0, y: 0, width, height };
+
+  const oneCell = width / graphCells;
+  const inset = Math.min(oneCell, (width - 1) / 2);
+  return { x: inset, y: 0, width: Math.max(1, width - inset * 2), height };
+}
+
 function isA4PreviewBorderId(value: string): value is A4PreviewBorderId {
   return A4_PREVIEW_BORDER_OPTIONS.some((border) => border.id === value);
 }
 
 function borderForId(id: A4PreviewBorderId) {
   return A4_PREVIEW_BORDER_OPTIONS.find((border) => border.id === id) ?? A4_PREVIEW_BORDER_OPTIONS[0];
+}
+
+function isA4PreviewBackgroundId(value: string): value is A4PreviewBackgroundId {
+  return A4_PREVIEW_BACKGROUND_OPTIONS.some((background) => background.id === value);
+}
+
+function backgroundForId(id: A4PreviewBackgroundId) {
+  return A4_PREVIEW_BACKGROUND_OPTIONS.find((background) => background.id === id) ?? A4_PREVIEW_BACKGROUND_OPTIONS[0];
 }
 
 const borderImageCache = new Map<string, Promise<HTMLImageElement>>();
@@ -183,19 +248,24 @@ export async function createA4GraphPreview(
   {
     graphWidthCm,
     borderId,
+    backgroundId,
     projectTitle,
-    backgroundColor = "#ffffff",
   }: {
     graphWidthCm: number;
     borderId: A4PreviewBorderId | string;
+    backgroundId?: A4PreviewBackgroundId | string;
     projectTitle: string;
-    backgroundColor?: string;
   },
 ) {
   if (sourceCanvas.width <= 0 || sourceCanvas.height <= 0) {
     throw new Error("The graph image is empty. Wait for the canvas to finish rendering.");
   }
   const selectedBorder = borderForId(isA4PreviewBorderId(borderId) ? borderId : A4_PREVIEW_BORDER_OPTIONS[0].id);
+  const selectedBackground = backgroundForId(
+    typeof backgroundId === "string" && isA4PreviewBackgroundId(backgroundId)
+      ? backgroundId
+      : A4_PREVIEW_BACKGROUND_OPTIONS[0].id,
+  );
   const [borderImage, layout] = await Promise.all([
     loadBorderImage(selectedBorder.path),
     Promise.resolve(createA4GraphPreviewLayout({ graphWidthCm })),
@@ -206,14 +276,28 @@ export async function createA4GraphPreview(
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas is not available.");
 
-  context.fillStyle = backgroundColor;
+  // The selected shade belongs only to the artwork field framed by the two
+  // horizontal borders. Keep the title strip and the 5 mm outer padding plain
+  // white so the paper does not look tinted outside the frame.
+  context.fillStyle = "#ffffff";
   context.fillRect(0, 0, canvas.width, canvas.height);
+  if (selectedBackground.color) {
+    context.fillStyle = selectedBackground.color;
+    context.fillRect(layout.graph.x, layout.graph.y, layout.graph.width, layout.graph.height);
+  } else {
+    context.clearRect(layout.graph.x, layout.graph.y, layout.graph.width, layout.graph.height);
+  }
   context.imageSmoothingEnabled = true;
   drawProjectTitle(context, projectTitle, layout.title);
   drawHorizontalBorder(context, borderImage, layout.topBorder, false);
   drawHorizontalBorder(context, borderImage, layout.bottomBorder, true);
 
   const tileWidth = layout.graph.width / layout.repeatCount;
+  const sourceCrop = createA4GraphPreviewSourceCrop({
+    sourceWidth: sourceCanvas.width,
+    sourceHeight: sourceCanvas.height,
+    graphWidthCm,
+  });
   context.save();
   context.beginPath();
   context.rect(layout.graph.x, layout.graph.y, layout.graph.width, layout.graph.height);
@@ -224,15 +308,15 @@ export async function createA4GraphPreview(
     if (index % 2 === 1) {
       context.translate(x + tileWidth, layout.graph.y);
       context.scale(-1, 1);
-      context.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, 0, 0, tileWidth, layout.graph.height);
+      context.drawImage(sourceCanvas, sourceCrop.x, sourceCrop.y, sourceCrop.width, sourceCrop.height, 0, 0, tileWidth, layout.graph.height);
     } else {
-      context.drawImage(sourceCanvas, 0, 0, sourceCanvas.width, sourceCanvas.height, x, layout.graph.y, tileWidth, layout.graph.height);
+      context.drawImage(sourceCanvas, sourceCrop.x, sourceCrop.y, sourceCrop.width, sourceCrop.height, x, layout.graph.y, tileWidth, layout.graph.height);
     }
     context.restore();
   }
   context.restore();
 
-  return { canvas, layout, border: selectedBorder };
+  return { canvas, layout, border: selectedBorder, background: selectedBackground };
 }
 
 function crc32(bytes: Uint8Array) {

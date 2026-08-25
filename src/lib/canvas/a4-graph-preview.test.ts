@@ -1,13 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  A4_PREVIEW_BACKGROUND_OPTIONS,
   A4_PREVIEW_BORDER_OPTIONS,
   A4_PREVIEW_DPI,
   A4_PREVIEW_LANDSCAPE_THRESHOLD_CM,
   A4_PREVIEW_REPEAT_COUNT,
   createA4GraphPreviewLayout,
+  createA4GraphPreviewSourceCrop,
   setPngResolution,
 } from "./a4-graph-preview.ts";
+
+test("A4 preview offers sixteen light paper backgrounds plus transparent", () => {
+  const transparent = A4_PREVIEW_BACKGROUND_OPTIONS.find((background) => background.id === "transparent");
+  const white = A4_PREVIEW_BACKGROUND_OPTIONS.find((background) => background.id === "white");
+  const paintedBackgrounds = A4_PREVIEW_BACKGROUND_OPTIONS.filter((background) => background.color !== null);
+
+  assert.equal(A4_PREVIEW_BACKGROUND_OPTIONS.length, 17);
+  assert.equal(paintedBackgrounds.length, 16);
+  assert.equal(white?.color, "#ffffff");
+  assert.equal(transparent?.color, null);
+  assert.equal(new Set(A4_PREVIEW_BACKGROUND_OPTIONS.map((background) => background.id)).size, 17);
+  assert.equal(new Set(paintedBackgrounds.map((background) => background.color)).size, 16);
+});
 
 test("A4 preview offers supplied, Sambalpuri-inspired, and modern border collections", () => {
   const sambalpuriBorders = A4_PREVIEW_BORDER_OPTIONS.filter((border) => border.id.startsWith("sambalpuri-"));
@@ -89,6 +104,17 @@ test("A4 preview reserves the top 10 mm after 5 mm padding for the project name 
   assert.equal(layout.graph.x, layout.padding);
   assert.equal(layout.graph.width, layout.width - layout.padding * 2);
   assert.equal(layout.graph.width / layout.repeatCount > 0, true);
+});
+
+test("A4 preview excludes the one-cell blank gutter on both sides of the artwork", () => {
+  assert.deepEqual(
+    createA4GraphPreviewSourceCrop({ sourceWidth: 400, sourceHeight: 2_000, graphWidthCm: 10 }),
+    { x: 40, y: 0, width: 320, height: 2_000 },
+  );
+  assert.deepEqual(
+    createA4GraphPreviewSourceCrop({ sourceWidth: 80, sourceHeight: 400, graphWidthCm: 2 }),
+    { x: 0, y: 0, width: 80, height: 400 },
+  );
 });
 
 test("A4 preview PNGs include 300-DPI pHYs metadata", () => {

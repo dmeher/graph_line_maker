@@ -51,6 +51,7 @@ import {
   thumbnailPathFor,
 } from "@/lib/projects";
 import { getObjectStore, mediaKey, tryGetObjectStore } from "@/lib/storage/media";
+import { duplicateProjectTitle, normalizeDuplicateProjectTitle } from "@/lib/projects/duplicate-title";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 import { mapWithConcurrency } from "@/lib/utils/concurrency";
@@ -336,8 +337,24 @@ type SaveProjectStateInput = {
   palettes: PaletteColor[];
 };
 
-export async function saveProjectState(input: SaveProjectStateInput) {
-  const payload = saveProjectSchema.parse(input);
+type SaveProjectStateResult = { ok: boolean; message: string };
+
+export async function saveProjectState(input: SaveProjectStateInput): Promise<SaveProjectStateResult> {
+  // Copies created before duplicate titles were bounded could be five
+  // characters too long. Repair that specific legacy shape before validation
+  // so opening and saving the copy does not trap the user in a session draft.
+  const parsed = saveProjectSchema.safeParse({
+    ...input,
+    title: normalizeDuplicateProjectTitle(input.title),
+  });
+  if (!parsed.success) {
+    const titleIssue = parsed.error.issues.find((issue) => issue.path[0] === "title");
+    return {
+      ok: false,
+      message: titleIssue ? "Project name must be between 1 and 160 characters." : "Project changes are invalid. Refresh the project and try again.",
+    };
+  }
+  const payload = parsed.data;
   // Authorization happens here; the RPC then scopes its update to the project's
   // real owner so an admin save cannot reassign a member's project.
   const ownerUserId = await assertProjectOwnerId(payload.projectId);
@@ -480,7 +497,7 @@ export async function duplicateProject(formData: FormData) {
     .from("projects")
     .insert({
       user_id: session.userId,
-      title: `${project.title} Copy`,
+      title: duplicateProjectTitle(project.title),
       description: project.description,
       settings: project.settings,
       width: project.width,

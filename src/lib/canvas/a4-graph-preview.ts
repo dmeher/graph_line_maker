@@ -1,8 +1,8 @@
 export const A4_PREVIEW_DPI = 300;
-export const A4_PREVIEW_REPEAT_COUNT = 6;
+export const A4_PREVIEW_TARGET_WIDTH_CM = 80;
 export const A4_PREVIEW_PADDING_MM = 5;
 export const A4_PREVIEW_TOP_MARGIN_MM = 15;
-export const A4_PREVIEW_BORDER_HEIGHT_MM = 17;
+export const A4_PREVIEW_BORDER_HEIGHT_MM = 10;
 export const A4_PREVIEW_LANDSCAPE_THRESHOLD_CM = 30;
 
 const MILLIMETRES_PER_INCH = 25.4;
@@ -85,9 +85,29 @@ function millimetresToPixels(value: number, dpi: number) {
 }
 
 /**
- * The preview is a full A4 presentation image. Its graph strip is six project
- * widths wide, with each repeat stretched only into its own equal-width column
- * so the output always fills the requested printable area.
+ * The stored graph includes one blank 1 cm gutter cell at either side. They
+ * are page framing, not design, so they must not affect preview repetition.
+ */
+export function createA4PreviewArtworkWidthCm(graphWidthCm: number) {
+  const width = Number(graphWidthCm);
+  if (!Number.isFinite(width) || width <= 0) return 1;
+  return width > 2 ? width - 2 : width;
+}
+
+/**
+ * Uses whole artwork repeats to cover the requested logical preview width.
+ * The final A4 canvas still scales those repeats into its printable width.
+ */
+export function createA4PreviewRepeatCount(artworkWidthCm: number) {
+  const width = Number(artworkWidthCm);
+  if (!Number.isFinite(width) || width <= 0) return 1;
+  return Math.max(1, Math.ceil(A4_PREVIEW_TARGET_WIDTH_CM / width));
+}
+
+/**
+ * The preview is a full A4 presentation image. Its graph strip represents an
+ * 80 cm-wide run of the project, with whole repeats distributed evenly across
+ * the printable page width.
  */
 export function createA4GraphPreviewLayout({
   graphWidthCm,
@@ -108,13 +128,14 @@ export function createA4GraphPreviewLayout({
   const graphY = topMargin + borderHeight;
   const graphHeight = Math.max(1, height - graphY - padding - borderHeight);
   const graphWidth = Math.max(1, width - padding * 2);
+  const repeatCount = createA4PreviewRepeatCount(createA4PreviewArtworkWidthCm(graphWidthCm));
 
   return {
     orientation,
     dpi: safeDpi,
     width,
     height,
-    repeatCount: A4_PREVIEW_REPEAT_COUNT,
+    repeatCount,
     padding,
     topMargin,
     // Keep the 5 mm outer padding, then use the remaining 10 mm of the
@@ -150,8 +171,9 @@ export function createA4GraphPreviewSourceCrop({
   const graphCells = Number(graphWidthCm);
   if (!Number.isFinite(graphCells) || graphCells <= 2) return { x: 0, y: 0, width, height };
 
-  const oneCell = width / graphCells;
-  const inset = Math.min(oneCell, (width - 1) / 2);
+  const artworkWidthCm = createA4PreviewArtworkWidthCm(graphCells);
+  const blankGutterWidthCm = graphCells - artworkWidthCm;
+  const inset = Math.min((width * blankGutterWidthCm) / (graphCells * 2), (width - 1) / 2);
   return { x: inset, y: 0, width: Math.max(1, width - inset * 2), height };
 }
 

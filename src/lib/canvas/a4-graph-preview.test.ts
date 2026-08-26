@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   A4_PREVIEW_BACKGROUND_OPTIONS,
+  A4_PREVIEW_BORDER_HEIGHT_MM,
   A4_PREVIEW_BORDER_OPTIONS,
   A4_PREVIEW_DPI,
   A4_PREVIEW_LANDSCAPE_THRESHOLD_CM,
-  A4_PREVIEW_REPEAT_COUNT,
+  A4_PREVIEW_TARGET_WIDTH_CM,
   createA4GraphPreviewLayout,
+  createA4PreviewArtworkWidthCm,
+  createA4PreviewRepeatCount,
   createA4GraphPreviewSourceCrop,
   setPngResolution,
 } from "./a4-graph-preview.ts";
@@ -71,12 +74,26 @@ function concatenate(chunks: Uint8Array[]) {
   return output;
 }
 
+test("A4 preview repeats cover an 80 cm logical artwork width", () => {
+  assert.equal(A4_PREVIEW_TARGET_WIDTH_CM, 80);
+  assert.equal(createA4PreviewRepeatCount(10), 8);
+  assert.equal(createA4PreviewRepeatCount(20), 4);
+  assert.equal(createA4PreviewRepeatCount(13), 7);
+  assert.equal(createA4PreviewRepeatCount(80), 1);
+});
+
+test("A4 preview ignores the two blank graph gutters when calculating repeats", () => {
+  assert.equal(createA4PreviewArtworkWidthCm(8), 6);
+  assert.equal(createA4PreviewArtworkWidthCm(2), 2);
+  assert.equal(createA4GraphPreviewLayout({ graphWidthCm: 8 }).repeatCount, 14);
+});
+
 test("A4 previews are portrait through a 30 cm graph width", () => {
   const layout = createA4GraphPreviewLayout({ graphWidthCm: A4_PREVIEW_LANDSCAPE_THRESHOLD_CM });
 
   assert.equal(layout.orientation, "portrait");
   assert.equal(layout.dpi, A4_PREVIEW_DPI);
-  assert.equal(layout.repeatCount, A4_PREVIEW_REPEAT_COUNT);
+  assert.equal(layout.repeatCount, 3);
   assert.equal(layout.width, 2480);
   assert.equal(layout.height, 3508);
 });
@@ -89,9 +106,10 @@ test("A4 previews switch to landscape above a 30 cm graph width", () => {
   assert.equal(layout.height, 2480);
 });
 
-test("A4 preview reserves the top 10 mm after 5 mm padding for the project name and horizontal borders", () => {
+test("A4 preview reserves the top 10 mm after 5 mm padding for the project name and 1 cm horizontal borders", () => {
   const layout = createA4GraphPreviewLayout({ graphWidthCm: 20 });
 
+  assert.equal(A4_PREVIEW_BORDER_HEIGHT_MM, 10);
   assert.equal(layout.title.x, layout.padding);
   assert.equal(layout.title.y, layout.padding);
   assert.equal(layout.title.height, layout.topMargin - layout.padding);

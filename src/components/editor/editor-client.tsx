@@ -67,6 +67,8 @@ import { detectPreviewPolicy, workingImagePixelCap } from "@/lib/canvas/preview-
 import {
   A4_PREVIEW_BACKGROUND_OPTIONS,
   A4_PREVIEW_BORDER_OPTIONS,
+  createA4PreviewArtworkWidthCm,
+  createA4PreviewRepeatCount,
   type A4PreviewBackgroundId,
   type A4PreviewBorderId,
 } from "@/lib/canvas/a4-graph-preview";
@@ -10114,7 +10116,7 @@ export function EditorClient({
                     <span>A4 preview</span>
                     <h2 id="a4-preview-title">Choose border and background</h2>
                     <p id="a4-preview-description">
-                      {settings.graphWidth > 30 ? "Landscape A4" : "Portrait A4"} at 300 DPI · six mirrored graph repeats · 15 mm top margin.
+                      {settings.graphWidth > 30 ? "Landscape A4" : "Portrait A4"} at 300 DPI · {createA4PreviewRepeatCount(createA4PreviewArtworkWidthCm(settings.graphWidth))} alternating graph repeats across an 80 cm artwork run · 15 mm top margin · 10 mm borders.
                     </p>
                     <p>Select a border, then choose a page background.</p>
                   </div>

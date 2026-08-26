@@ -4,10 +4,12 @@ export const A4_PREVIEW_PADDING_MM = 5;
 export const A4_PREVIEW_TOP_MARGIN_MM = 15;
 export const A4_PREVIEW_BORDER_HEIGHT_MM = 10;
 export const A4_PREVIEW_LANDSCAPE_THRESHOLD_CM = 30;
+export const A4_PREVIEW_DEFAULT_SPATA_COUNT = 20;
 
 const MILLIMETRES_PER_INCH = 25.4;
 
 export const A4_PREVIEW_BORDER_OPTIONS = [
+  { id: "sambalpuri-spata-default", label: "Default spata (20)", path: "/preview-borders/sambalpuri-spata-default.svg" },
   { id: "geometric-pattern", label: "Geometric pattern", path: "/preview-borders/geometric-pattern.png" },
   { id: "tribal", label: "Tribal figures", path: "/preview-borders/tribal-border.png" },
   { id: "elephant-floral", label: "Elephant floral", path: "/preview-borders/elephant-floral-border.png" },
@@ -24,6 +26,9 @@ export const A4_PREVIEW_BORDER_OPTIONS = [
   { id: "modern-pixel-circuit", label: "Pixel circuit", path: "/preview-borders/modern-pixel-circuit.svg" },
   { id: "modern-organic-arches", label: "Organic arches", path: "/preview-borders/modern-organic-arches.svg" },
 ] as const;
+
+/** The supplied 20-spata Sambalpuri strip is the preselected A4 border. */
+export const DEFAULT_A4_PREVIEW_BORDER_ID = A4_PREVIEW_BORDER_OPTIONS[0].id;
 
 /**
  * Presentation-only paper choices for the A4 preview. These intentionally do
@@ -282,7 +287,7 @@ export async function createA4GraphPreview(
   if (sourceCanvas.width <= 0 || sourceCanvas.height <= 0) {
     throw new Error("The graph image is empty. Wait for the canvas to finish rendering.");
   }
-  const selectedBorder = borderForId(isA4PreviewBorderId(borderId) ? borderId : A4_PREVIEW_BORDER_OPTIONS[0].id);
+  const selectedBorder = borderForId(isA4PreviewBorderId(borderId) ? borderId : DEFAULT_A4_PREVIEW_BORDER_ID);
   const selectedBackground = backgroundForId(
     typeof backgroundId === "string" && isA4PreviewBackgroundId(backgroundId)
       ? backgroundId
@@ -420,4 +425,92 @@ export async function createA4PreviewPngBlob(canvas: HTMLCanvasElement) {
   const resolvedBuffer = new ArrayBuffer(resolvedBytes.byteLength);
   new Uint8Array(resolvedBuffer).set(resolvedBytes);
   return new Blob([resolvedBuffer], { type: "image/png" });
+}
+
+function escapePreviewPrintHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => {
+    if (character === "&") return "&amp;";
+    if (character === "<") return "&lt;";
+    if (character === ">") return "&gt;";
+    if (character === '"') return "&quot;";
+    return "&#39;";
+  });
+}
+
+/** Opens one exact-size A4 print page for the already generated preview PNG. */
+export function printA4PreviewBlob(
+  blob: Blob,
+  {
+    title = "A4 preview",
+    orientation,
+  }: {
+    title?: string;
+    orientation: A4PreviewOrientation;
+  },
+) {
+  const printWindow = window.open("", "_blank");
+  if (!printWindow) throw new Error("Unable to open the A4 print window.");
+  printWindow.opener = null;
+
+  const imageUrl = URL.createObjectURL(blob);
+  let released = false;
+  const releaseImageUrl = () => {
+    if (released) return;
+    released = true;
+    URL.revokeObjectURL(imageUrl);
+  };
+  const pageSize = orientation === "landscape" ? "297mm 210mm" : "210mm 297mm";
+  printWindow.addEventListener("afterprint", releaseImageUrl, { once: true });
+  printWindow.addEventListener("beforeunload", releaseImageUrl, { once: true });
+
+  try {
+    printWindow.document.open();
+    printWindow.document.write(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapePreviewPrintHtml(title)}</title>
+  <style>
+    @page { size: ${pageSize}; margin: 0; }
+    html, body {
+      width: ${orientation === "landscape" ? "297mm" : "210mm"};
+      height: ${orientation === "landscape" ? "210mm" : "297mm"};
+      margin: 0;
+      background: white;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: fill;
+    }
+  </style>
+</head>
+<body>
+  <img id="a4-preview-image" src="${escapePreviewPrintHtml(imageUrl)}" alt="${escapePreviewPrintHtml(title)}" />
+  <script>
+    (() => {
+      const image = document.getElementById("a4-preview-image");
+      const openPrintDialog = () => window.setTimeout(() => {
+        window.focus();
+        window.print();
+      }, 100);
+      if (image && !image.complete) {
+        image.addEventListener("load", openPrintDialog, { once: true });
+        image.addEventListener("error", openPrintDialog, { once: true });
+      } else {
+        openPrintDialog();
+      }
+    })();
+  </script>
+</body>
+</html>`);
+    printWindow.document.close();
+  } catch (error) {
+    releaseImageUrl();
+    printWindow.close();
+    throw error;
+  }
 }

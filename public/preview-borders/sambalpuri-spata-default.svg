@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="4800" viewBox="0 0 240 4800" role="img" aria-labelledby="title">
+  <title id="title">Sambalpuri spata border with twenty alternating red and black motifs</title>
+  <defs>
+    <rect id="white-square" width="40" height="40" fill="#fff"/>
+    <g id="red-spata" shape-rendering="crispEdges">
+      <rect width="240" height="228" fill="#ec1119"/>
+      <use href="#white-square" x="100" y="14"/>
+      <use href="#white-square" x="60" y="54"/>
+      <use href="#white-square" x="140" y="54"/>
+      <use href="#white-square" x="20" y="94"/>
+      <use href="#white-square" x="100" y="94"/>
+      <use href="#white-square" x="180" y="94"/>
+      <use href="#white-square" x="60" y="134"/>
+      <use href="#white-square" x="140" y="134"/>
+      <use href="#white-square" x="100" y="174"/>
+    </g>
+    <g id="dark-spata" shape-rendering="crispEdges">
+      <rect width="240" height="228" fill="#1b0909"/>
+      <use href="#white-square" x="60" y="54"/>
+      <use href="#white-square" x="140" y="54"/>
+      <use href="#white-square" x="100" y="94"/>
+      <use href="#white-square" x="60" y="134"/>
+      <use href="#white-square" x="140" y="134"/>
+    </g>
+    <g id="five-spata-red-first">
+      <use href="#red-spata" y="6"/>
+      <use href="#dark-spata" y="246"/>
+      <use href="#red-spata" y="486"/>
+      <use href="#dark-spata" y="726"/>
+      <use href="#red-spata" y="966"/>
+    </g>
+    <g id="five-spata-dark-first">
+      <use href="#dark-spata" y="6"/>
+      <use href="#red-spata" y="246"/>
+      <use href="#dark-spata" y="486"/>
+      <use href="#red-spata" y="726"/>
+      <use href="#dark-spata" y="966"/>
+    </g>
+  </defs>
+  <g id="spata-run" data-spata-per-tile="5" data-tile-repeats="4" data-spata-count="20" data-box-slot-mm="10" data-divider-mm="0.5">
+    <use href="#five-spata-red-first" y="0"/>
+    <use href="#five-spata-dark-first" y="1200"/>
+    <use href="#five-spata-red-first" y="2400"/>
+    <use href="#five-spata-dark-first" y="3600"/>
+  </g>
+</svg>

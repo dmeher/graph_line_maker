@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  A4_PREVIEW_DEFAULT_SPATA_COUNT,
   A4_PREVIEW_BACKGROUND_OPTIONS,
   A4_PREVIEW_BORDER_HEIGHT_MM,
   A4_PREVIEW_BORDER_OPTIONS,
   A4_PREVIEW_DPI,
   A4_PREVIEW_LANDSCAPE_THRESHOLD_CM,
   A4_PREVIEW_TARGET_WIDTH_CM,
+  DEFAULT_A4_PREVIEW_BORDER_ID,
   createA4GraphPreviewLayout,
   createA4PreviewArtworkWidthCm,
   createA4PreviewRepeatCount,
   createA4GraphPreviewSourceCrop,
+  printA4PreviewBlob,
   setPngResolution,
 } from "./a4-graph-preview.ts";
 
@@ -27,13 +31,16 @@ test("A4 preview offers sixteen light paper backgrounds plus transparent", () =>
   assert.equal(new Set(paintedBackgrounds.map((background) => background.color)).size, 16);
 });
 
-test("A4 preview offers supplied, Sambalpuri-inspired, and modern border collections", () => {
+test("A4 preview offers the default spata strip plus supplied, Sambalpuri-inspired, and modern border collections", () => {
   const sambalpuriBorders = A4_PREVIEW_BORDER_OPTIONS.filter((border) => border.id.startsWith("sambalpuri-"));
   const modernBorders = A4_PREVIEW_BORDER_OPTIONS.filter((border) => border.id.startsWith("modern-"));
 
-  assert.equal(A4_PREVIEW_BORDER_OPTIONS.length, 15);
-  assert.equal(new Set(A4_PREVIEW_BORDER_OPTIONS.map((border) => border.path)).size, 15);
+  assert.equal(DEFAULT_A4_PREVIEW_BORDER_ID, "sambalpuri-spata-default");
+  assert.equal(A4_PREVIEW_BORDER_OPTIONS[0]?.id, DEFAULT_A4_PREVIEW_BORDER_ID);
+  assert.equal(A4_PREVIEW_BORDER_OPTIONS.length, 16);
+  assert.equal(new Set(A4_PREVIEW_BORDER_OPTIONS.map((border) => border.path)).size, 16);
   assert.deepEqual(sambalpuriBorders.map((border) => border.id), [
+    "sambalpuri-spata-default",
     "sambalpuri-pasapali",
     "sambalpuri-shankha-chakra",
     "sambalpuri-padma-vine",
@@ -47,6 +54,23 @@ test("A4 preview offers supplied, Sambalpuri-inspired, and modern border collect
     "modern-pixel-circuit",
     "modern-organic-arches",
   ]);
+});
+
+test("the default spata border renders 20 alternating 1 cm slots with a fixed divider", () => {
+  const svg = readFileSync(new URL("../../../public/preview-borders/sambalpuri-spata-default.svg", import.meta.url), "utf8");
+
+  assert.equal(A4_PREVIEW_DEFAULT_SPATA_COUNT, 20);
+  assert.match(svg, /viewBox="0 0 240 4800"/);
+  assert.match(svg, /data-spata-per-tile="5"/);
+  assert.match(svg, /data-tile-repeats="4"/);
+  assert.match(svg, /data-spata-count="20"/);
+  assert.match(svg, /data-box-slot-mm="10"/);
+  assert.match(svg, /data-divider-mm="0.5"/);
+  assert.match(svg, /<rect id="white-square" width="40" height="40" fill="#fff"\/>/);
+  assert.equal((svg.match(/<use href="#white-square"/g) ?? []).length, 14);
+  assert.equal((svg.match(/<use href="#five-spata-(?:red|dark)-first"/g) ?? []).length, 4);
+  assert.equal((svg.match(/<use href="#five-spata-red-first"/g) ?? []).length, 2);
+  assert.equal((svg.match(/<use href="#five-spata-dark-first"/g) ?? []).length, 2);
 });
 
 function writeUint32(bytes: Uint8Array, offset: number, value: number) {
@@ -151,4 +175,46 @@ test("A4 preview PNGs include 300-DPI pHYs metadata", () => {
     + (output[physicalChunkStart + 11] ?? 0);
   assert.equal(pixelsPerMetre, 11811);
   assert.equal(output[physicalChunkStart + 16], 1);
+});
+
+test("A4 preview print opens one exact A4 page from the generated PNG", () => {
+  const priorWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  let printedHtml = "";
+  const printListeners = new Map<string, () => void>();
+  const printWindow = {
+    opener: null,
+    document: {
+      open() {},
+      write(html: string) {
+        printedHtml = html;
+      },
+      close() {},
+    },
+    addEventListener(event: string, listener: () => void) {
+      printListeners.set(event, listener);
+    },
+    close() {},
+  };
+
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: { open: () => printWindow },
+  });
+
+  try {
+    printA4PreviewBlob(new Blob(["preview"], { type: "image/png" }), {
+      title: "A4 <preview>",
+      orientation: "landscape",
+    });
+
+    assert.match(printedHtml, /@page \{ size: 297mm 210mm; margin: 0; \}/);
+    assert.match(printedHtml, /width: 297mm;/);
+    assert.match(printedHtml, /height: 210mm;/);
+    assert.match(printedHtml, /A4 &lt;preview&gt;/);
+    assert.match(printedHtml, /<img id="a4-preview-image"/);
+  } finally {
+    printListeners.get("beforeunload")?.();
+    if (priorWindow) Object.defineProperty(globalThis, "window", priorWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
 });

@@ -2879,18 +2879,21 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
-.editor-a4-preview-backgrounds {
+.editor-a4-preview-backgrounds,
+.editor-a4-preview-repeat-modes {
   padding: 16px 22px 22px;
   border-top: 1px solid var(--editor-line);
 }
 
-.editor-a4-preview-backgrounds__heading {
+.editor-a4-preview-backgrounds__heading,
+.editor-a4-preview-repeat-modes__heading {
   display: flex;
   align-items: baseline;
   gap: 9px;
 }
 
-.editor-a4-preview-backgrounds__heading span {
+.editor-a4-preview-backgrounds__heading span,
+.editor-a4-preview-repeat-modes__heading span {
   color: var(--editor-accent);
   font-family: var(--font-geist-mono), ui-monospace, monospace;
   font-size: 10px;
@@ -2899,7 +2902,8 @@ button:disabled {
   text-transform: uppercase;
 }
 
-.editor-a4-preview-backgrounds h3 {
+.editor-a4-preview-backgrounds h3,
+.editor-a4-preview-repeat-modes h3 {
   margin: 0;
   color: var(--editor-text);
   font-size: 13px;
@@ -2962,6 +2966,55 @@ button:disabled {
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.editor-a4-preview-repeat-modes > p {
+  margin: 8px 0 0;
+  color: var(--editor-text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.editor-a4-preview-repeat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.editor-a4-preview-repeat-grid > button {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--editor-line);
+  border-radius: 9px;
+  background: var(--editor-control-bg);
+  color: var(--editor-text-dim);
+  text-align: left;
+  transition: border-color 150ms ease, box-shadow 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.editor-a4-preview-repeat-grid > button:hover:not(:disabled) {
+  border-color: var(--editor-accent);
+  color: var(--editor-text);
+  transform: translateY(-1px);
+}
+
+.editor-a4-preview-repeat-grid > button.is-selected {
+  border-color: var(--editor-accent);
+  box-shadow: 0 0 0 2px var(--editor-accent-soft);
+  color: var(--editor-text);
+}
+
+.editor-a4-preview-repeat-grid strong {
+  font-size: 12px;
+}
+
+.editor-a4-preview-repeat-grid small {
+  color: var(--editor-text-dim);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .editor-a4-preview-output {
@@ -3072,6 +3125,7 @@ button:disabled {
 
   .editor-a4-preview-dialog > header,
   .editor-a4-preview-backgrounds,
+  .editor-a4-preview-repeat-modes,
   .editor-a4-preview-output,
   .editor-a4-preview-dialog > footer {
     padding-inline: 16px;

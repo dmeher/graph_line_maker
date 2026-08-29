@@ -67,6 +67,7 @@ import { detectPreviewPolicy, workingImagePixelCap } from "@/lib/canvas/preview-
 import {
   A4_PREVIEW_BACKGROUND_OPTIONS,
   A4_PREVIEW_BORDER_OPTIONS,
+  A4_PREVIEW_REPEAT_OPTIONS,
   DEFAULT_A4_PREVIEW_BORDER_ID,
   createA4PreviewArtworkWidthCm,
   createA4PreviewRepeatCount,
@@ -74,6 +75,7 @@ import {
   type A4PreviewBackgroundId,
   type A4PreviewBorderId,
   type A4GraphPreviewLayout,
+  type A4PreviewRepeatMode,
 } from "@/lib/canvas/a4-graph-preview";
 import { disposeCanvasProcessingWorker, pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
 import { clearCanvasProcessingCaches, findContentBounds, flattenGraphForOutput, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
@@ -327,6 +329,7 @@ type A4PreviewAsset = {
   layout: A4GraphPreviewLayout;
   border: { id: A4PreviewBorderId; label: string };
   background: { id: A4PreviewBackgroundId; label: string };
+  repeatMode: A4PreviewRepeatMode;
 };
 
 type LayerChoice = {
@@ -1535,6 +1538,7 @@ export function EditorClient({
   const [isA4PreviewDialogOpen, setIsA4PreviewDialogOpen] = useState(false);
   const [a4PreviewBorderId, setA4PreviewBorderId] = useState<A4PreviewBorderId | null>(null);
   const [a4PreviewBackgroundId, setA4PreviewBackgroundId] = useState<A4PreviewBackgroundId | null>(null);
+  const [a4PreviewRepeatMode, setA4PreviewRepeatMode] = useState<A4PreviewRepeatMode>("flip");
   const [a4PreviewAsset, setA4PreviewAsset] = useState<A4PreviewAsset | null>(null);
   const [a4PreviewRenderPending, setA4PreviewRenderPending] = useState(false);
   const [a4PreviewRenderError, setA4PreviewRenderError] = useState<string | null>(null);
@@ -1616,18 +1620,23 @@ export function EditorClient({
 
   useEffect(() => {
     let cancelled = false;
-    const previousUrl = a4PreviewObjectUrlRef.current;
-    if (previousUrl) URL.revokeObjectURL(previousUrl);
-    a4PreviewObjectUrlRef.current = null;
-    setA4PreviewAsset(null);
-    setA4PreviewRenderError(null);
 
     if (!isA4PreviewDialogOpen || !a4PreviewBorderId || !a4PreviewBackgroundId || processing || dragPreviewSourceId) {
+      const previousUrl = a4PreviewObjectUrlRef.current;
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      a4PreviewObjectUrlRef.current = null;
+      setA4PreviewAsset(null);
+      setA4PreviewRenderError(null);
       setA4PreviewRenderPending(false);
       return () => {
         cancelled = true;
       };
     }
+
+    // Keep the previous full-size preview in place while a new option is
+    // rendering. Replacing it with the small loading state collapses the
+    // dialog and makes its scroll position jump when Flip/No flip changes.
+    setA4PreviewRenderError(null);
 
     const sourceCanvas = artworkCanvasRef.current;
     if (!sourceCanvas) {
@@ -1655,17 +1664,20 @@ export function EditorClient({
         graphWidthCm: settings.graphWidth,
         borderId: a4PreviewBorderId,
         backgroundId: a4PreviewBackgroundId,
+        repeatMode: a4PreviewRepeatMode,
         projectTitle: title,
       }).then(async (preview) => ({ ...preview, blob: await createA4PreviewPngBlob(preview.canvas) })))
-      .then(({ layout, border, background, blob }) => {
+      .then(({ layout, border, background, repeatMode, blob }) => {
         const url = URL.createObjectURL(blob);
         if (cancelled) {
           URL.revokeObjectURL(url);
           finishPreviewOnce({ cancelled: true });
           return;
         }
+        const previousUrl = a4PreviewObjectUrlRef.current;
         a4PreviewObjectUrlRef.current = url;
-        setA4PreviewAsset({ url, blob, layout, border, background });
+        setA4PreviewAsset({ url, blob, layout, border, background, repeatMode });
+        if (previousUrl) window.requestAnimationFrame(() => URL.revokeObjectURL(previousUrl));
         finishPreviewOnce({ completed: true, width: layout.width, height: layout.height, pixels: layout.width * layout.height });
       })
       .catch((error) => {
@@ -1686,7 +1698,7 @@ export function EditorClient({
       cancelled = true;
       finishPreviewOnce({ cancelled: true });
     };
-  }, [a4PreviewBackgroundId, a4PreviewBorderId, dragPreviewSourceId, isA4PreviewDialogOpen, processing, settings.graphWidth, title]);
+  }, [a4PreviewBackgroundId, a4PreviewBorderId, a4PreviewRepeatMode, dragPreviewSourceId, isA4PreviewDialogOpen, processing, settings.graphWidth, title]);
 
   const beginGraphInteraction = useCallback(() => {
     const now = performance.now();
@@ -6768,6 +6780,7 @@ export function EditorClient({
 
     setA4PreviewBorderId(DEFAULT_A4_PREVIEW_BORDER_ID);
     setA4PreviewBackgroundId(null);
+    setA4PreviewRepeatMode("flip");
     // Let the export popover unmount before opening its separate, body-level
     // picker. This prevents the menu's outside-click/focus lifecycle from
     // competing with the new dialog.
@@ -6798,6 +6811,10 @@ export function EditorClient({
       setNotice({ tone: "info", text: "Generating the A4 preview before download." });
       return;
     }
+    if (a4PreviewRenderError) {
+      setNotice({ tone: "error", text: a4PreviewRenderError });
+      return;
+    }
     if (!a4PreviewAsset) {
       setNotice({ tone: "error", text: a4PreviewRenderError ?? "Unable to prepare the A4 preview." });
       return;
@@ -6808,12 +6825,12 @@ export function EditorClient({
     // request independent from that preview lifecycle.
     const downloadUrl = URL.createObjectURL(a4PreviewAsset.blob);
     const link = document.createElement("a");
-    link.download = `${slug(title)}-a4-${a4PreviewAsset.layout.orientation}-${a4PreviewAsset.border.id}-${a4PreviewAsset.background.id}.png`;
+    link.download = `${slug(title)}-a4-${a4PreviewAsset.layout.orientation}-${a4PreviewAsset.repeatMode}-${a4PreviewAsset.border.id}-${a4PreviewAsset.background.id}.png`;
     link.href = downloadUrl;
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
     setIsA4PreviewDialogOpen(false);
-    setNotice({ tone: "ok", text: `A4 ${a4PreviewAsset.layout.orientation} preview downloaded with the ${a4PreviewAsset.border.label.toLowerCase()} border and ${a4PreviewAsset.background.label.toLowerCase()} background.` });
+    setNotice({ tone: "ok", text: `A4 ${a4PreviewAsset.layout.orientation} preview downloaded with ${a4PreviewAsset.repeatMode === "flip" ? "alternating mirrored" : "unflipped"} graph repeats.` });
   }
 
   function printGraphPreview() {
@@ -6823,6 +6840,10 @@ export function EditorClient({
     }
     if (a4PreviewRenderPending) {
       setNotice({ tone: "info", text: "Generating the A4 preview before printing." });
+      return;
+    }
+    if (a4PreviewRenderError) {
+      setNotice({ tone: "error", text: a4PreviewRenderError });
       return;
     }
     if (!a4PreviewAsset) {
@@ -10211,11 +10232,11 @@ export function EditorClient({
                 <header>
                   <div>
                     <span>A4 preview</span>
-                    <h2 id="a4-preview-title">Choose border and background</h2>
+                    <h2 id="a4-preview-title">Choose your A4 preview</h2>
                     <p id="a4-preview-description">
-                      {settings.graphWidth > 30 ? "Landscape A4" : "Portrait A4"} at 300 DPI · {createA4PreviewRepeatCount(createA4PreviewArtworkWidthCm(settings.graphWidth))} alternating graph repeats across an 80 cm artwork run · 15 mm top margin · 10 mm borders.
+                      {settings.graphWidth > 30 ? "Landscape A4" : "Portrait A4"} at 300 DPI · {createA4PreviewRepeatCount(createA4PreviewArtworkWidthCm(settings.graphWidth))} graph repeats across an 80 cm artwork run · 15 mm top margin · 10 mm borders.
                     </p>
-                    <p>The default 20-spata border is selected. Choose a page background, or select another border, then review the exact A4 output before downloading or printing.</p>
+                    <p>The default 20-spata border and Flip repeat style are selected. Choose a page background and repeat style, then review the exact A4 output before downloading or printing.</p>
                   </div>
                   <button type="button" onClick={() => setIsA4PreviewDialogOpen(false)} aria-label="Close A4 preview options">
                     <X size={18} aria-hidden="true" />
@@ -10264,24 +10285,48 @@ export function EditorClient({
                   </section>
                 ) : null}
                 {a4PreviewBorderId && a4PreviewBackgroundId ? (
-                  <section className="editor-a4-preview-output" aria-labelledby="a4-preview-output-title">
-                    <div className="editor-a4-preview-output__heading">
+                  <section className="editor-a4-preview-repeat-modes" aria-labelledby="a4-preview-repeat-title">
+                    <div className="editor-a4-preview-repeat-modes__heading">
                       <span>Step 3</span>
+                      <h3 id="a4-preview-repeat-title">Choose graph repeat direction</h3>
+                    </div>
+                    <p>Flip mirrors every second graph. No flip repeats the original graph orientation from left to right.</p>
+                    <div className="editor-a4-preview-repeat-grid" role="radiogroup" aria-label="Graph repeat direction">
+                      {A4_PREVIEW_REPEAT_OPTIONS.map((option) => (
+                        <button
+                          key={option.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={a4PreviewRepeatMode === option.id}
+                          className={a4PreviewRepeatMode === option.id ? "is-selected" : ""}
+                          onClick={() => setA4PreviewRepeatMode(option.id)}
+                        >
+                          <strong>{option.label}</strong>
+                          <small>{option.description}</small>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
+                {a4PreviewBorderId && a4PreviewBackgroundId && a4PreviewRepeatMode ? (
+                  <section className="editor-a4-preview-output" aria-labelledby="a4-preview-output-title" aria-busy={a4PreviewRenderPending}>
+                    <div className="editor-a4-preview-output__heading">
+                      <span>Step 4</span>
                       <h3 id="a4-preview-output-title">A4 output preview</h3>
                     </div>
-                    {a4PreviewRenderPending ? (
-                      <div className="editor-a4-preview-output__status" role="status">
-                        <Loader2 size={18} className="animate-spin" aria-hidden="true" />
-                        Generating the original A4 preview…
-                      </div>
-                    ) : a4PreviewAsset ? (
+                    {a4PreviewAsset ? (
                       <figure className={`editor-a4-preview-output__frame editor-a4-preview-output__frame--${a4PreviewAsset.layout.orientation}`}>
                         <img
                           src={a4PreviewAsset.url}
-                          alt={`A4 ${a4PreviewAsset.layout.orientation} preview with ${a4PreviewAsset.border.label.toLowerCase()} border and ${a4PreviewAsset.background.label.toLowerCase()} background`}
+                          alt={`A4 ${a4PreviewAsset.layout.orientation} preview with ${a4PreviewAsset.repeatMode === "flip" ? "alternating mirrored" : "unflipped"} graph repeats, ${a4PreviewAsset.border.label.toLowerCase()} border, and ${a4PreviewAsset.background.label.toLowerCase()} background`}
                           decoding="async"
                         />
                       </figure>
+                    ) : a4PreviewRenderPending ? (
+                      <div className="editor-a4-preview-output__status" role="status">
+                        <Loader2 size={18} className="animate-spin" aria-hidden="true" />
+                        Generating the {a4PreviewRepeatMode === "flip" ? "flipped" : "unflipped"} A4 preview…
+                      </div>
                     ) : (
                       <p className="editor-a4-preview-output__error" role="alert">{a4PreviewRenderError ?? "Choose the options above to generate the A4 preview."}</p>
                     )}
@@ -10289,11 +10334,11 @@ export function EditorClient({
                 ) : null}
                 <footer>
                   <button type="button" onClick={() => setIsA4PreviewDialogOpen(false)}>Cancel</button>
-                  <button type="button" className="editor-a4-preview-print" onClick={printGraphPreview} disabled={a4PreviewRenderPending || !a4PreviewAsset}>
+                  <button type="button" className="editor-a4-preview-print" onClick={printGraphPreview} disabled={a4PreviewRenderPending || Boolean(a4PreviewRenderError) || !a4PreviewAsset}>
                     {a4PreviewRenderPending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <Printer size={16} aria-hidden="true" />}
                     Print A4
                   </button>
-                  <button type="button" className="editor-a4-preview-download" onClick={downloadGraphPreview} disabled={a4PreviewRenderPending || !a4PreviewAsset}>
+                  <button type="button" className="editor-a4-preview-download" onClick={downloadGraphPreview} disabled={a4PreviewRenderPending || Boolean(a4PreviewRenderError) || !a4PreviewAsset}>
                     {a4PreviewRenderPending ? <Loader2 size={16} className="animate-spin" aria-hidden="true" /> : <ImageDown size={16} aria-hidden="true" />}
                     Download A4 PNG
                   </button>

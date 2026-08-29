@@ -8,12 +8,14 @@ import {
   A4_PREVIEW_BORDER_OPTIONS,
   A4_PREVIEW_DPI,
   A4_PREVIEW_LANDSCAPE_THRESHOLD_CM,
+  A4_PREVIEW_REPEAT_OPTIONS,
   A4_PREVIEW_TARGET_WIDTH_CM,
   DEFAULT_A4_PREVIEW_BORDER_ID,
   createA4GraphPreviewLayout,
   createA4PreviewArtworkWidthCm,
   createA4PreviewRepeatCount,
   createA4GraphPreviewSourceCrop,
+  isA4PreviewTileMirrored,
   printA4PreviewBlob,
   setPngResolution,
 } from "./a4-graph-preview.ts";
@@ -110,6 +112,16 @@ test("A4 preview ignores the two blank graph gutters when calculating repeats", 
   assert.equal(createA4PreviewArtworkWidthCm(8), 6);
   assert.equal(createA4PreviewArtworkWidthCm(2), 2);
   assert.equal(createA4GraphPreviewLayout({ graphWidthCm: 8 }).repeatCount, 14);
+});
+
+test("A4 preview can repeat with or without left-right flipping", () => {
+  assert.deepEqual(A4_PREVIEW_REPEAT_OPTIONS.map((option) => option.id), ["flip", "no-flip"]);
+  assert.equal(isA4PreviewTileMirrored(0), false);
+  assert.equal(isA4PreviewTileMirrored(1), true);
+  assert.equal(isA4PreviewTileMirrored(2), false);
+  assert.equal(isA4PreviewTileMirrored(0, "no-flip"), false);
+  assert.equal(isA4PreviewTileMirrored(1, "no-flip"), false);
+  assert.equal(isA4PreviewTileMirrored(2, "no-flip"), false);
 });
 
 test("A4 previews are portrait through a 30 cm graph width", () => {

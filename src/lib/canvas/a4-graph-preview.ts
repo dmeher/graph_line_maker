@@ -55,8 +55,15 @@ export const A4_PREVIEW_BACKGROUND_OPTIONS = [
   { id: "transparent", label: "Transparent", color: null },
 ] as const;
 
+/** Presentation-only direction for the horizontal graph repeat run. */
+export const A4_PREVIEW_REPEAT_OPTIONS = [
+  { id: "flip", label: "Flip", description: "Alternate the original graph with a left-right mirror." },
+  { id: "no-flip", label: "No flip", description: "Repeat the original graph orientation every time." },
+] as const;
+
 export type A4PreviewBorderId = (typeof A4_PREVIEW_BORDER_OPTIONS)[number]["id"];
 export type A4PreviewBackgroundId = (typeof A4_PREVIEW_BACKGROUND_OPTIONS)[number]["id"];
+export type A4PreviewRepeatMode = (typeof A4_PREVIEW_REPEAT_OPTIONS)[number]["id"];
 export type A4PreviewOrientation = "portrait" | "landscape";
 
 export type A4GraphPreviewLayout = {
@@ -182,6 +189,11 @@ export function createA4GraphPreviewSourceCrop({
   return { x: inset, y: 0, width: Math.max(1, width - inset * 2), height };
 }
 
+/** Flip mode preserves the existing alternating original/mirrored repeat. */
+export function isA4PreviewTileMirrored(index: number, repeatMode: A4PreviewRepeatMode = "flip") {
+  return repeatMode === "flip" && index % 2 === 1;
+}
+
 function isA4PreviewBorderId(value: string): value is A4PreviewBorderId {
   return A4_PREVIEW_BORDER_OPTIONS.some((border) => border.id === value);
 }
@@ -276,11 +288,13 @@ export async function createA4GraphPreview(
     graphWidthCm,
     borderId,
     backgroundId,
+    repeatMode,
     projectTitle,
   }: {
     graphWidthCm: number;
     borderId: A4PreviewBorderId | string;
     backgroundId?: A4PreviewBackgroundId | string;
+    repeatMode?: A4PreviewRepeatMode | string;
     projectTitle: string;
   },
 ) {
@@ -293,6 +307,7 @@ export async function createA4GraphPreview(
       ? backgroundId
       : A4_PREVIEW_BACKGROUND_OPTIONS[0].id,
   );
+  const selectedRepeatMode: A4PreviewRepeatMode = repeatMode === "no-flip" ? "no-flip" : "flip";
   const [borderImage, layout] = await Promise.all([
     loadBorderImage(selectedBorder.path),
     Promise.resolve(createA4GraphPreviewLayout({ graphWidthCm })),
@@ -332,7 +347,7 @@ export async function createA4GraphPreview(
   for (let index = 0; index < layout.repeatCount; index += 1) {
     const x = layout.graph.x + index * tileWidth;
     context.save();
-    if (index % 2 === 1) {
+    if (isA4PreviewTileMirrored(index, selectedRepeatMode)) {
       context.translate(x + tileWidth, layout.graph.y);
       context.scale(-1, 1);
       context.drawImage(sourceCanvas, sourceCrop.x, sourceCrop.y, sourceCrop.width, sourceCrop.height, 0, 0, tileWidth, layout.graph.height);
@@ -343,7 +358,7 @@ export async function createA4GraphPreview(
   }
   context.restore();
 
-  return { canvas, layout, border: selectedBorder, background: selectedBackground };
+  return { canvas, layout, border: selectedBorder, background: selectedBackground, repeatMode: selectedRepeatMode };
 }
 
 function crc32(bytes: Uint8Array) {

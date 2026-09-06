@@ -4,6 +4,13 @@ import { PDF_FIRST_COLUMN_HALLMARK_MARGIN_MM, PDF_VERTICAL_LABEL_MARGIN_MM, crea
 
 const A4_PAPER = { widthCm: 21, heightCm: 29.7 };
 
+test("PDF and print keep each configured one-centimetre cell at one centimetre", () => {
+  assert.deepEqual(
+    getGraphPrintSizeMm({ graphWidth: 12, graphHeight: 20, cellSizeCm: 1 }),
+    { widthMm: 120, heightMm: 200 },
+  );
+});
+
 test("test2 PDF export layout keeps centimeter print size", () => {
   const settings = {
     graphWidth: 5,
@@ -277,7 +284,7 @@ test("a multi-row wide graph reserves the hallmark lane for every row in its fir
   assert.equal(plan.pagesY, 5);
   for (const tile of plan.tiles.filter((tile) => tile.tileX === 0)) {
     assert.equal(tile.destinationXMm, PDF_FIRST_COLUMN_HALLMARK_MARGIN_MM);
-    assert.equal(tile.destinationWidthMm, 160);
+    assert.equal(tile.destinationWidthMm, 130);
     assert.equal(tile.destinationXMm + tile.destinationWidthMm, plan.pageWidthMm - 10);
     assert.equal((tile.destinationWidthMm / tile.sourceWidth) * 40, 10);
   }

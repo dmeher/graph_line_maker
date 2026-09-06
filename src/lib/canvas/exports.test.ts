@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { GRAPH_EXPORT_LOGO_OPTIONS, graphExportLogoPath } from "./export-logo.ts";
 import { isGraphCanvasSizedForSettings } from "./pdf-export-guard.ts";
 
 const exportsSource = readFileSync(new URL("./exports.ts", import.meta.url), "utf8");
+const editorSource = readFileSync(new URL("../../components/editor/editor-client.tsx", import.meta.url), "utf8");
+const editorStyles = readFileSync(new URL("../../app/globals.css", import.meta.url), "utf8");
 
 test("browser-print grid keeps the PDF's opaque vector-stroke treatment", () => {
   assert.match(exportsSource, /pdf\.setGState\(pdf\.GState\(\{ opacity: group\.opacity \}\)\);/);
@@ -34,6 +37,21 @@ test("PDF and browser print redraw full major lines at vertical split edges", ()
   assert.match(exportsSource, /drawVerticalSplitBoundariesToPdfPage\(pdf, tile, settings, canvas\.width\);/);
   assert.match(exportsSource, /GRID_BUCKET_WIDTH_UNITS\.major \* base \* gridUnitMm/);
   assert.match(exportsSource, /print-vertical-split-boundaries/);
+});
+
+test("PDF and print require an explicit choice from the two bundled logos", () => {
+  assert.deepEqual(GRAPH_EXPORT_LOGO_OPTIONS.map((option) => option.id), ["current", "prafulka-design"]);
+  for (const option of GRAPH_EXPORT_LOGO_OPTIONS) {
+    assert.equal(graphExportLogoPath(option.id), option.path);
+    assert.equal(existsSync(new URL(`../../../public${option.path}`, import.meta.url)), true);
+  }
+  assert.match(editorSource, /useState<GraphExportLogoId \| null>\(null\)/);
+  assert.match(editorSource, /disabled=\{!selectedGraphOutputLogoId\}/);
+  assert.match(editorSource, /exportCanvasAsPDF\(canvas, `\$\{filename\}\.pdf`, settings, logoId\)/);
+  assert.match(editorSource, /printCanvas\(canvas, settings, title \|\| "Graph pixel chart", logoId\)/);
+  assert.doesNotMatch(exportsSource, /scaleGraphPrintSettings/);
+  assert.match(editorStyles, /\.editor-output-logo-dialog\s*\{[^}]*max-height: calc\(100dvh - 48px\)/s);
+  assert.match(editorStyles, /\.editor-output-logo-grid\s*\{[^}]*overflow-y: auto/s);
 });
 
 test("PDF rejects a canvas whose pixels no longer correspond to the current graph cells", () => {

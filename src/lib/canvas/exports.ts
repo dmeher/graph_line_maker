@@ -2,6 +2,7 @@ import { DEFAULT_PRINT_PAPER_SIZE, GRAPH_MAJOR_CELL_PIXELS, PRINT_PAPER_SIZES } 
 import { createPdfExportPlan, MAX_PAGES_PER_PDF_FILE } from "@/lib/canvas/pdf-layout";
 import { isGraphCanvasSizedForSettings } from "@/lib/canvas/pdf-export-guard";
 import { companyHallmarkPlacement } from "@/lib/canvas/company-hallmark-layout";
+import { graphExportLogoPath, type GraphExportLogoId } from "@/lib/canvas/export-logo";
 import {
   GRID_BUCKET_ORDER,
   GRID_BUCKET_OPACITY,
@@ -42,13 +43,12 @@ const CUT_GUIDE_GAP_MM = 0.5;
 const TOP_BOTTOM_OUTSIDE_Y_OFFSET = 0.45;
 const LEFT_RIGHT_OUTSIDE_Y_OFFSET = 0.45;
 const OUTSIDE_GRID_NUMBER_COLOR = "#000000";
-const COMPANY_HALLMARK_PATH = "/brand/company-hallmark.jpeg";
 const COMPANY_HALLMARK_ROTATION_DEGREES = -90;
 export { companyHallmarkPlacement, type CompanyHallmarkPlacement } from "@/lib/canvas/company-hallmark-layout";
 
-async function loadCompanyHallmarkPdfBytes() {
+async function loadGraphExportLogoPdfBytes(logoId: GraphExportLogoId) {
   try {
-    const response = await fetch(new URL(COMPANY_HALLMARK_PATH, window.location.origin));
+    const response = await fetch(new URL(graphExportLogoPath(logoId), window.location.origin));
     if (!response.ok) return null;
     const bitmap = await createImageBitmap(await response.blob());
     const canvas = document.createElement("canvas");
@@ -532,7 +532,12 @@ function drawPdfCutGuides(pdf: import("jspdf").jsPDF, tile: PdfExportTile, pageW
   pdf.setLineDashPattern([], 0);
 }
 
-export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: string, settingsOrMargin: GraphSettings | number = 0) {
+export async function exportCanvasAsPDF(
+  canvas: HTMLCanvasElement,
+  filename: string,
+  settingsOrMargin: GraphSettings | number,
+  logoId: GraphExportLogoId,
+) {
   if (!isDrawableCanvas(canvas)) throw new Error("The processed image is empty. Reprocess the project before exporting.");
   const { jsPDF } = await import("jspdf");
   const settings = typeof settingsOrMargin === "number" ? null : settingsOrMargin;
@@ -555,7 +560,7 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
       settings.showNumbers && settings.gridNumberPlacement === "outside" ? getOutsideGridNumberLines(settings) : null;
     const graphWidthPx = Math.max(1, Math.round(canvas.width));
     const graphHeightPx = Math.max(1, Math.round(canvas.height));
-    const companyHallmarkBytes = plan.totalPages > 1 ? await loadCompanyHallmarkPdfBytes() : null;
+    const companyHallmarkBytes = plan.totalPages > 1 ? await loadGraphExportLogoPdfBytes(logoId) : null;
     function createPdf() {
       const nextPdf = new jsPDF({ orientation: plan.orientation, unit: "mm", format: [plan.pageWidthMm, plan.pageHeightMm] });
       nextPdf.viewerPreferences({ PrintScaling: "None" });
@@ -624,7 +629,12 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
   pdf.save(pdfFilename(filename));
 }
 
-export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSettings, title = "Graph") {
+export async function printCanvas(
+  canvas: HTMLCanvasElement,
+  settings: GraphSettings,
+  title: string,
+  logoId: GraphExportLogoId,
+) {
   if (!isDrawableCanvas(canvas)) throw new Error("The processed image is empty. Reprocess the project before printing.");
   const paper = PRINT_PAPER_SIZES[settings.printPaperSize] ?? PRINT_PAPER_SIZES[DEFAULT_PRINT_PAPER_SIZE];
   const plan = createPdfExportPlan({ settings, paper, canvasWidth: canvas.width, canvasHeight: canvas.height });
@@ -638,7 +648,7 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
   printWindow.opener = null;
   const graphWidthPx = Math.max(1, Math.round(canvas.width));
   const graphHeightPx = Math.max(1, Math.round(canvas.height));
-  const companyHallmarkUrl = new URL(COMPANY_HALLMARK_PATH, window.location.origin).href;
+  const companyHallmarkUrl = new URL(graphExportLogoPath(logoId), window.location.origin).href;
   const backgroundColor = escapeHtml(settings.backgroundColor || "#ffffff");
   const gridZIndex = settings.gridLineLayer === "back" ? 1 : 3;
 

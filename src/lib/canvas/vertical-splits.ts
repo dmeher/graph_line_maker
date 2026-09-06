@@ -1,7 +1,5 @@
 import type { GraphVerticalSplit } from "../types.ts";
 
-type PixelColumnMask = Uint8Array | Uint16Array;
-
 function positiveInteger(value: unknown, fallback: number) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return fallback;
@@ -51,6 +49,19 @@ export function isCellInVerticalSplit(cell: number, splits: readonly GraphVertic
   return splits.some((split) => cell >= split.startCell && cell <= split.endCell);
 }
 
+/** Graph-space hit testing; split number 1 occupies graph x coordinates [1, 2). */
+export function isGraphXInVerticalSplit(graphX: number, splits: readonly GraphVerticalSplit[]) {
+  if (!Number.isFinite(graphX)) return false;
+  return splits.some((split) => graphX >= split.startCell && graphX < split.endCell + 1);
+}
+
+/** Cheap identity for presentation caches; ranges are normalized before serialization. */
+export function verticalSplitSignature(splits: readonly GraphVerticalSplit[], graphWidth: number) {
+  return `${positiveInteger(graphWidth, 1)}:${normalizeVerticalSplits(splits, graphWidth)
+    .map((split) => `${split.startCell}-${split.endCell}`)
+    .join(",")}`;
+}
+
 export type VerticalSplitPixelRange = {
   startX: number;
   endX: number;
@@ -81,26 +92,4 @@ export function verticalSplitBoundaryPixelPositions(
     range.endX,
   ]);
   return Array.from(new Set(positions)).sort((left, right) => left - right);
-}
-
-/** Clears split columns from a row-major pixel mask used for hit testing/rendering. */
-export function clearVerticalSplitMaskColumns(
-  mask: PixelColumnMask,
-  pixelWidth: number,
-  pixelHeight: number,
-  splits: readonly GraphVerticalSplit[],
-  graphWidth: number,
-) {
-  const width = positiveInteger(pixelWidth, 1);
-  const height = positiveInteger(pixelHeight, 1);
-  const ranges = verticalSplitPixelRanges(splits, graphWidth, width);
-  if (!ranges.length) return mask;
-
-  for (let y = 0; y < height; y += 1) {
-    const rowStart = y * width;
-    for (const range of ranges) {
-      mask.fill(0, rowStart + range.startX, rowStart + range.endX);
-    }
-  }
-  return mask;
 }

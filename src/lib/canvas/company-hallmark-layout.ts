@@ -18,6 +18,7 @@ export type CompanyHallmarkPlacement = {
 const COMPANY_HALLMARK_PAGE_PADDING_MM = 4;
 const COMPANY_HALLMARK_GRID_NUMBER_GAP_MM = 3;
 const COMPANY_HALLMARK_ASPECT_RATIO = 9 / 16;
+const COMPANY_HALLMARK_MAX_WIDTH_MM = 55;
 const OUTSIDE_GRID_NUMBER_OFFSET_PX = 26;
 
 /**
@@ -34,7 +35,11 @@ export function companyHallmarkPlacement(
   const millimetresPerSourcePixel = tile.sourceWidth > 0 ? tile.destinationWidthMm / tile.sourceWidth : 0;
   const gridNumberXMm = tile.destinationXMm - OUTSIDE_GRID_NUMBER_OFFSET_PX * millimetresPerSourcePixel;
   const availableWidthMm = Math.max(1, gridNumberXMm - COMPANY_HALLMARK_PAGE_PADDING_MM - COMPANY_HALLMARK_GRID_NUMBER_GAP_MM);
-  const widthMm = Math.min(availableWidthMm, Math.max(1, pageWidthMm - COMPANY_HALLMARK_PAGE_PADDING_MM * 2));
+  const widthMm = Math.min(
+    COMPANY_HALLMARK_MAX_WIDTH_MM,
+    availableWidthMm,
+    Math.max(1, pageWidthMm - COMPANY_HALLMARK_PAGE_PADDING_MM * 2),
+  );
   const heightMm = Math.min(widthMm / COMPANY_HALLMARK_ASPECT_RATIO, Math.max(1, pageHeightMm - COMPANY_HALLMARK_PAGE_PADDING_MM * 2));
   const centeredTileYMm = tile.destinationYMm + (tile.destinationHeightMm - heightMm) / 2;
 

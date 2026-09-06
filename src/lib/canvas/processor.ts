@@ -23,7 +23,6 @@ import {
 } from "@/lib/graph-paper";
 import { assertCanvasBudget } from "@/lib/canvas/performance-limits";
 import {
-  clearVerticalSplitMaskColumns,
   verticalSplitBoundaryPixelPositions,
   verticalSplitPixelRanges,
 } from "@/lib/canvas/vertical-splits";
@@ -1265,29 +1264,6 @@ function drawDirectRasterLayers(context: ProcessingContext2D, layers: readonly P
   }
 }
 
-function maskVerticalSplitProcessingData(
-  width: number,
-  height: number,
-  settings: GraphSettings,
-  masks: Array<Uint8Array | Uint16Array | undefined>,
-) {
-  const splits = settings.verticalSplits ?? [];
-  if (!splits.length) return;
-  for (const mask of masks) {
-    if (mask) clearVerticalSplitMaskColumns(mask, width, height, splits, settings.graphWidth);
-  }
-}
-
-function clearVerticalSplitArtwork(canvas: CanvasLike, settings: GraphSettings) {
-  const splits = settings.verticalSplits ?? [];
-  if (!splits.length) return;
-  const context = getProcessingContext(canvas);
-  if (!context) throw new Error("Canvas is not available.");
-  for (const range of verticalSplitPixelRanges(splits, settings.graphWidth, canvas.width)) {
-    context.clearRect(range.startX, 0, range.endX - range.startX, canvas.height);
-  }
-}
-
 function drawVerticalSplitBlankSpace(canvas: CanvasLike, settings: GraphSettings) {
   const splits = settings.verticalSplits ?? [];
   if (!splits.length) return;
@@ -1871,11 +1847,6 @@ function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, optio
     settings,
     nextRegionId: regions.reduce((maximum, region) => Math.max(maximum, region.mapId), 0),
   });
-  maskVerticalSplitProcessingData(output.width, output.height, settings, [
-    fillRegionMap,
-    outlineMask,
-    generatedTopology?.fillRegionMap,
-  ]);
   const sourceVisibleCounts = countVisibleFillRegions(fillRegionMap);
   const sourceDisplayRegions = displayFillRegions(regions, sourceVisibleCounts, settings);
   // Transparent artwork only; the grid + paper backdrop are composited by the SVG
@@ -1912,7 +1883,6 @@ function pixelateCanvas(sourceCanvas: CanvasLike, settings: GraphSettings, optio
     });
   }
   drawGridNumbers(output, settings);
-  clearVerticalSplitArtwork(output, settings);
 
   const outlineHex = rgbToHex(hexToRgb(outlineColor));
   const outlineCount = outlineMask.reduce((sum, value) => sum + value, 0);
@@ -2074,12 +2044,6 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     settings,
     nextRegionId,
   });
-  maskVerticalSplitProcessingData(output.width, output.height, settings, [
-    fillRegionMap,
-    outlineMask,
-    outlineColorMap,
-    generatedTopology?.fillRegionMap,
-  ]);
   // Transparent artwork only; grid + paper backdrop handled by the SVG overlay
   // (preview) or flattenGraphForOutput (export/save).
   const sourceVisibleCounts = countVisibleFillRegions(fillRegionMap);
@@ -2118,7 +2082,6 @@ export function pixelateLayeredCanvases(layers: AnyFittedImageLayer[], settings:
     });
   }
   drawGridNumbers(output, settings);
-  clearVerticalSplitArtwork(output, settings);
 
   const outlineCountsByColor = new Map<string, number>();
   for (let pixel = 0; pixel < outlineMask.length; pixel += 1) {
@@ -2322,13 +2285,6 @@ export async function pixelateLayeredCanvasesAsync(
     settings,
     nextRegionId,
   });
-  maskVerticalSplitProcessingData(output.width, output.height, settings, [
-    fillRegionMap,
-    outlineMask,
-    outlineCoverage,
-    outlineColorMap,
-    generatedTopology?.fillRegionMap,
-  ]);
   // Transparent artwork only; grid + paper backdrop handled by the SVG overlay
   // (preview) or flattenGraphForOutput (export/save).
   const sourceVisibleCounts = countVisibleFillRegions(fillRegionMap);
@@ -2407,7 +2363,6 @@ export async function pixelateLayeredCanvasesAsync(
     });
   }
   drawGridNumbers(output, settings);
-  clearVerticalSplitArtwork(output, settings);
 
   const outlineCountsByColor = new Map<string, number>();
   for (let pixel = 0; pixel < outlineMask.length; pixel += 1) {

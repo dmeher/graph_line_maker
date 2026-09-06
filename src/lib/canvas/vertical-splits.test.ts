@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  clearVerticalSplitMaskColumns,
   isCellInVerticalSplit,
+  isGraphXInVerticalSplit,
   normalizeVerticalSplits,
   verticalSplitBoundaryPixelPositions,
   verticalSplitPixelRanges,
+  verticalSplitSignature,
 } from "./vertical-splits.ts";
 
 const splitOverlaySource = readFileSync(
@@ -14,6 +15,10 @@ const splitOverlaySource = readFileSync(
   "utf8",
 );
 const processorSource = readFileSync(new URL("./processor.ts", import.meta.url), "utf8");
+const editorSource = readFileSync(
+  new URL("../../components/editor/editor-client.tsx", import.meta.url),
+  "utf8",
+);
 
 test("vertical splits normalize, clamp, and merge blank cell ranges", () => {
   assert.deepEqual(
@@ -45,11 +50,14 @@ test("vertical split ranges use grid numbers after the left gutter and retain th
   assert.equal(isCellInVerticalSplit(8, splits), false);
 });
 
-test("vertical split masking clears only the selected columns", () => {
-  const mask = new Uint8Array(20).fill(1);
-  clearVerticalSplitMaskColumns(mask, 10, 2, [{ startCell: 2, endCell: 3 }], 5);
-
-  assert.deepEqual(Array.from(mask), [1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1]);
+test("vertical split hit testing follows the numbered graph-space range", () => {
+  const splits = [{ startCell: 2, endCell: 3 }];
+  assert.equal(isGraphXInVerticalSplit(0.999, splits), false);
+  assert.equal(isGraphXInVerticalSplit(1, splits), false);
+  assert.equal(isGraphXInVerticalSplit(2, splits), true);
+  assert.equal(isGraphXInVerticalSplit(3.999, splits), true);
+  assert.equal(isGraphXInVerticalSplit(4, splits), false);
+  assert.equal(verticalSplitSignature([{ startCell: 3, endCell: 2 }], 5), "5:2-3");
 });
 
 test("split blanks redraw unclipped bold boundary strokes after masking", () => {
@@ -60,4 +68,18 @@ test("split blanks redraw unclipped bold boundary strokes after masking", () => 
     processorSource.indexOf("drawVerticalSplitBlankSpace(output, settings);") <
       processorSource.indexOf("drawVerticalSplitBoundaryLines(output, settings);"),
   );
+});
+
+test("split edits bypass full canvas processing and refresh flattened output lazily", () => {
+  const signatureStart = editorSource.indexOf("function buildProcessingSignature");
+  const signatureEnd = editorSource.indexOf("function hasSameProcessingSettings", signatureStart);
+  assert.ok(signatureStart >= 0 && signatureEnd > signatureStart);
+  assert.doesNotMatch(editorSource.slice(signatureStart, signatureEnd), /verticalSplits/);
+  assert.doesNotMatch(editorSource, /renderKey,\s*settings,\s*sourceLoadSettled/);
+  assert.match(editorSource, /function hasSameProcessingSettings/);
+  assert.match(editorSource, /if \(key === "verticalSplits"\)/);
+  assert.match(editorSource, /const splitOnlyCommand = command\.patches\.every/);
+  assert.match(editorSource, /function ensureProcessedCanvasForSettings/);
+  assert.match(editorSource, /isGraphXInVerticalSplit\(graphX, current\.verticalSplits\)/);
+  assert.doesNotMatch(processorSource, /maskVerticalSplitProcessingData|clearVerticalSplitArtwork/);
 });

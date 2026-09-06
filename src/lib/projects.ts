@@ -66,6 +66,7 @@ import {
   normalizeGraphImageTraceEngine,
 } from "@/lib/graph-paper";
 import { MAX_CANVAS_DIMENSION, clampGraphCellDimensions } from "@/lib/canvas/performance-limits";
+import { normalizeVerticalSplits } from "@/lib/canvas/vertical-splits";
 import { normalizeRotationDegrees } from "@/lib/editor/source-layout";
 import {
   normalizeBackgroundRemoval,
@@ -98,6 +99,7 @@ type SignedImageUrlMode = "all" | "original" | "none";
 export const defaultGraphSettings: GraphSettings = {
   graphWidth: DEFAULT_GRAPH_WIDTH_CELLS,
   graphHeight: DEFAULT_GRAPH_HEIGHT_CELLS,
+  verticalSplits: [],
   cellWidth: GRAPH_MAJOR_CELL_PIXELS,
   cellHeight: GRAPH_MAJOR_CELL_PIXELS,
   cellSizeCm: DEFAULT_CELL_SIZE_CM,
@@ -662,6 +664,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
   const hasBrokenLegacyArtworkWidth = Number(cleanMerged.imageWidth) > 0 && Number(cleanMerged.imageWidth) <= 0.05;
   const graphWidth = hasBrokenLegacyArtworkWidth ? defaultGraphSettings.graphWidth : rawGraphWidth;
   const graphHeight = hasBrokenLegacyArtworkWidth ? defaultGraphSettings.graphHeight : rawGraphHeight;
+  const verticalSplits = normalizeVerticalSplits(cleanMerged.verticalSplits, graphWidth);
   const imageAreaWidth = graphWidth * cellWidth;
   const imageAreaHeight = graphHeight * cellHeight;
   const legacyPixelSizedImageWidth =
@@ -761,6 +764,7 @@ export function normalizeGraphSettings(settings?: StoredGraphSettings | null): G
     ...cleanMerged,
     graphWidth,
     graphHeight,
+    verticalSplits,
     cellWidth,
     cellHeight,
     cellSizeCm,

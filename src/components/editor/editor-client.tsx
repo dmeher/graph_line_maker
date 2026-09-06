@@ -53,6 +53,10 @@ import { saveProjectState } from "@/app/(app)/projects/actions";
 import { fullCrop, quickCropWithin, transformedImageSize, type CropPixels, type QuickCropSegment } from "@/lib/canvas/crop";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
 import { createInteriorGridNumberLabels } from "@/lib/canvas/grid-numbering";
+import {
+  isCellInVerticalSplit,
+  normalizeVerticalSplits,
+} from "@/lib/canvas/vertical-splits";
 import { QuickCropControls } from "@/components/projects/quick-crop-controls";
 import {
   copyFillRegionOverrides,
@@ -80,6 +84,7 @@ import {
 import { disposeCanvasProcessingWorker, pixelateLayeredImagesWithWorker } from "@/lib/canvas/processor-worker-client";
 import { clearCanvasProcessingCaches, findContentBounds, flattenGraphForOutput, loadImageToCanvas, resizeImage, type FillRegion } from "@/lib/canvas/processor";
 import { GraphGridOverlay } from "@/components/editor/graph-grid-overlay";
+import { GraphVerticalSplitOverlay } from "@/components/editor/graph-vertical-split-overlay";
 import { removeBackgroundImageData } from "@/lib/canvas/background-removal";
 import {
   clipGraphPolygonToPlacedContent,
@@ -567,6 +572,7 @@ function buildProcessingSignature(settings: GraphSettings) {
   return [
     settings.graphWidth,
     settings.graphHeight,
+    settings.verticalSplits.map((split) => `${split.startCell}-${split.endCell}`).join(","),
     settings.imageWidth,
     settings.imageHeight,
     settings.imageOffsetX ?? 0,
@@ -1096,6 +1102,7 @@ function deriveGraphSettings(inputSettings: GraphSettings): GraphSettings {
   const safeGraphDimensions = clampGraphCellDimensions(settings.graphWidth, settings.graphHeight, GRAPH_MAJOR_CELL_PIXELS);
   const graphWidth = safeGraphDimensions.width;
   const graphHeight = safeGraphDimensions.height;
+  const verticalSplits = normalizeVerticalSplits(settings.verticalSplits, graphWidth);
   const backgroundColor = normalizeCanvasColor(settings.backgroundColor, DEFAULT_BACKGROUND_COLOR);
   const outlineColor = normalizeCanvasColor(
     isHexColor(settings.outlineColor) ? settings.outlineColor : settings.lineColor,
@@ -1173,6 +1180,7 @@ function deriveGraphSettings(inputSettings: GraphSettings): GraphSettings {
     ...settings,
     graphWidth,
     graphHeight,
+    verticalSplits,
     cellWidth: GRAPH_MAJOR_CELL_PIXELS,
     cellHeight: GRAPH_MAJOR_CELL_PIXELS,
     cellSizeCm,
@@ -1238,6 +1246,7 @@ function editorDefaultGraphSettings(current: GraphSettings): GraphSettings {
     ...current,
     graphWidth: DEFAULT_GRAPH_WIDTH_CELLS,
     graphHeight: DEFAULT_GRAPH_HEIGHT_CELLS,
+    verticalSplits: [],
     cellSizeCm: DEFAULT_CELL_SIZE_CM,
     measurementUnit: "in",
     printPaperSize: DEFAULT_PRINT_PAPER_SIZE,
@@ -8178,7 +8187,11 @@ export function EditorClient({
   const previewImageRendering: "auto" | "pixelated" = "auto";
   const outsideNumberMargin = settings.showNumbers && settings.gridNumberPlacement === "outside" ? 34 : 0;
   const outsideColumnNumberInset = 0.45 * GRAPH_MAJOR_CELL_PIXELS * zoom;
-  const outsideHorizontalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? createInteriorGridNumberLabels(settings.graphWidth) : [];
+  const outsideHorizontalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside"
+    ? createInteriorGridNumberLabels(settings.graphWidth).filter(
+        (label) => !isCellInVerticalSplit(label.value, settings.verticalSplits),
+      )
+    : [];
   const outsideVerticalLabels = settings.showNumbers && settings.gridNumberPlacement === "outside" ? createInteriorGridNumberLabels(settings.graphHeight) : [];
   const { pageBreakGuideX, pageBreakGuideY } = useMemo(() => {
     if (!settings.showPageBreaks) return { pageBreakGuideX: [], pageBreakGuideY: [] };
@@ -9673,9 +9686,8 @@ export function EditorClient({
               }}
             >
               {/* Paper backdrop, then (for "back" grid) the crisp SVG grid below the
-                  transparent artwork canvas. DOM order = paint order for these
-                  z-auto layers, so later overlays (labels, guides, drag, selection)
-                  keep stacking above without z-index juggling. */}
+                  transparent artwork canvas. The split mask uses z-15 to keep drag
+                  previews out of blank ranges; interaction guides at z-20+ stay above it. */}
               <div
                 className="pointer-events-none absolute rounded bg-[var(--artboard-bg)] shadow-sm"
                 aria-hidden="true"
@@ -9736,6 +9748,18 @@ export function EditorClient({
                   style={{ left: `${outsideNumberMargin}px`, top: `${outsideNumberMargin}px` }}
                 />
               ) : null}
+              <GraphVerticalSplitOverlay
+                verticalSplits={settings.verticalSplits}
+                graphWidth={settings.graphWidth}
+                graphPixelWidth={previewCanvasSize.width}
+                graphPixelHeight={previewCanvasSize.height}
+                displayWidth={graphPreviewWidth}
+                displayHeight={graphPreviewHeight}
+                gridLineColor={settings.gridLineColor}
+                gridLineThickness={settings.gridLineThickness}
+                gridLineStyle={settings.gridLineStyle}
+                style={{ left: `${outsideNumberMargin}px`, top: `${outsideNumberMargin}px` }}
+              />
               {dragPreviewStyle ? (
                 <canvas
                   ref={dragPreviewCanvasRef}

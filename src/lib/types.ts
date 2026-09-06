@@ -235,9 +235,16 @@ export type GraphClipartImage = {
   backgroundRemoval?: GraphBackgroundRemoval;
 };
 
+/** Inclusive outside-grid numbers replaced by a blank vertical gap. */
+export type GraphVerticalSplit = {
+  startCell: number;
+  endCell: number;
+};
+
 export type GraphSettings = {
   graphWidth: number;
   graphHeight: number;
+  verticalSplits: GraphVerticalSplit[];
   cellWidth: number;
   cellHeight: number;
   cellSizeCm: number;

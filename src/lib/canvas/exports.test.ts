@@ -29,6 +29,13 @@ test("PDF and browser print outside numbers omit border cells", () => {
   assert.match(exportsSource, /graphHeightPx \+ TOP_BOTTOM_OUTSIDE_Y_OFFSET \* GRAPH_MAJOR_CELL_PIXELS/);
 });
 
+test("PDF and browser print redraw full major lines at vertical split edges", () => {
+  assert.match(exportsSource, /drawVerticalSplitBlanksToPdfPage\(pdf, tile, settings, canvas\.width\);/);
+  assert.match(exportsSource, /drawVerticalSplitBoundariesToPdfPage\(pdf, tile, settings, canvas\.width\);/);
+  assert.match(exportsSource, /GRID_BUCKET_WIDTH_UNITS\.major \* base \* gridUnitMm/);
+  assert.match(exportsSource, /print-vertical-split-boundaries/);
+});
+
 test("PDF rejects a canvas whose pixels no longer correspond to the current graph cells", () => {
   const settings = { graphWidth: 10, graphHeight: 10 };
   assert.equal(isGraphCanvasSizedForSettings({ width: 400, height: 400 }, settings), true);

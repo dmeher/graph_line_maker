@@ -3,8 +3,8 @@ export const MAX_PAGES_PER_PDF_FILE = 80;
 export const PDF_HORIZONTAL_PAGE_MARGIN_MM = 10;
 /** Vertical printer-safe gutter used when outside grid numbers are printed above/below the graph. */
 export const PDF_VERTICAL_LABEL_MARGIN_MM = 7;
-/** Extra left lane for the first column when it contains the hallmark row. */
-export const PDF_FIRST_COLUMN_HALLMARK_MARGIN_MM = 40;
+/** Extra left lane for the first column when it contains the larger hallmark. */
+export const PDF_FIRST_COLUMN_HALLMARK_MARGIN_MM = 70;
 
 export type PdfExportPaper = {
   widthCm: number;

@@ -52,10 +52,14 @@ import {
 import { saveProjectState } from "@/app/(app)/projects/actions";
 import { fullCrop, quickCropWithin, transformedImageSize, type CropPixels, type QuickCropSegment } from "@/lib/canvas/crop";
 import { createPdfExportPlan } from "@/lib/canvas/pdf-layout";
+import { GRAPH_EXPORT_LOGO_OPTIONS, type GraphExportLogoId } from "@/lib/canvas/export-logo";
 import { createInteriorGridNumberLabels } from "@/lib/canvas/grid-numbering";
 import {
   isCellInVerticalSplit,
+  isGraphXInVerticalSplit,
   normalizeVerticalSplits,
+  verticalSplitPixelRanges,
+  verticalSplitSignature,
 } from "@/lib/canvas/vertical-splits";
 import { QuickCropControls } from "@/components/projects/quick-crop-controls";
 import {
@@ -310,6 +314,7 @@ import {
 } from "./inspector/inspector-constants";
 
 type MobileTab = "source" | "tools" | "canvas" | "view" | "controls" | "export";
+type GraphOutputAction = "pdf" | "print";
 type EditorLeftPanelTab = "layers" | "library";
 type InspectorTab = "graph" | "source" | "draw" | "palette";
 type DrawTab = "shape" | "clipart";
@@ -572,7 +577,6 @@ function buildProcessingSignature(settings: GraphSettings) {
   return [
     settings.graphWidth,
     settings.graphHeight,
-    settings.verticalSplits.map((split) => `${split.startCell}-${split.endCell}`).join(","),
     settings.imageWidth,
     settings.imageHeight,
     settings.imageOffsetX ?? 0,
@@ -621,6 +625,14 @@ function buildProcessingSignature(settings: GraphSettings) {
     settings.clipartAssets.map((asset) => `${asset.id}:${asset.path ?? ""}:${asset.url ?? ""}:${asset.dataUrl ?? ""}`).join("|"),
     settings.clipartImages.map((clipart) => `${clipart.id}:${clipart.assetId}:${clipart.x}:${clipart.y}:${clipart.width}:${clipart.height}:${clipart.strokeColor}:${clipart.fillColor}:${clipart.imageLineThickness}:${clipart.sourceFillThreshold}:${clipart.sourceFillMinStrokePixels}:${clipart.strokeGapClosePixels}:${clipart.imageAutoEnhance}:${clipart.imageDenoiseLevel}:${clipart.imageEdgeDetection}:${clipart.imageColorQuantization}:${clipart.vectorizerLineAdjust}:${clipart.vectorizerInkThreshold}:${clipart.vectorizerSketchRemoval}:${clipart.vectorizerFidelity}:${clipart.rotationDegrees}:${clipart.flipX}:${clipart.flipY}:${clipart.visible}:${eraseStrokesSignature(clipart.eraseStrokes)}:${backgroundRemovalSignature(clipart.backgroundRemoval)}`).join("|"),
   ].join("|");
+}
+
+function hasSameProcessingSettings(left: GraphSettings, right: GraphSettings) {
+  for (const key of Object.keys(left) as Array<keyof GraphSettings>) {
+    if (key === "verticalSplits") continue;
+    if (!Object.is(left[key], right[key])) return false;
+  }
+  return true;
 }
 
 function isUploadedSourceImage(value: unknown): value is UploadedSourceImage {
@@ -1545,6 +1557,8 @@ export function EditorClient({
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const [exportMenuStyle, setExportMenuStyle] = useState<CSSProperties | null>(null);
   const [isA4PreviewDialogOpen, setIsA4PreviewDialogOpen] = useState(false);
+  const [graphOutputLogoAction, setGraphOutputLogoAction] = useState<GraphOutputAction | null>(null);
+  const [selectedGraphOutputLogoId, setSelectedGraphOutputLogoId] = useState<GraphExportLogoId | null>(null);
   const [a4PreviewBorderId, setA4PreviewBorderId] = useState<A4PreviewBorderId | null>(null);
   const [a4PreviewBackgroundId, setA4PreviewBackgroundId] = useState<A4PreviewBackgroundId | null>(null);
   const [a4PreviewRepeatMode, setA4PreviewRepeatMode] = useState<A4PreviewRepeatMode>("flip");
@@ -1556,6 +1570,7 @@ export function EditorClient({
   const [clipartSearch, setClipartSearch] = useState("");
   const [deletingClipartAssetId, setDeletingClipartAssetId] = useState<string | null>(null);
   const settingsRef = useRef(settings);
+  const processingSignatureCacheRef = useRef<{ settings: GraphSettings; signature: string } | null>(null);
   const commandCanvasLayoutRef = useRef(commandCanvasLayout);
   commandCanvasLayoutRef.current = commandCanvasLayout;
   const commandCanvasPodDragRef = useRef<CommandCanvasPodDrag | null>(null);
@@ -1573,10 +1588,16 @@ export function EditorClient({
   const sourceTraceSigRef = useRef<Map<string, string>>(new Map());
   const clipartCanvasesRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const processedCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const processedVerticalSplitSignatureRef = useRef<string | null>(null);
   // Transparent artwork-only canvas (no grid/backdrop) used as the preview base;
   // the grid is a crisp SVG overlay. processedCanvasRef stays the flattened image
   // (backdrop + grid + artwork) that export/save/PNG paths consume unchanged.
   const artworkCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const splitMaskedArtworkCacheRef = useRef<{
+    source: HTMLCanvasElement;
+    signature: string;
+    canvas: HTMLCanvasElement;
+  } | null>(null);
   const a4PreviewObjectUrlRef = useRef<string | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1621,6 +1642,7 @@ export function EditorClient({
   const spacePressedRef = useRef(false);
   const canvasPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const canvasPinchRef = useRef<CanvasPinchState | null>(null);
+  const currentVerticalSplitSignature = verticalSplitSignature(settings.verticalSplits, settings.graphWidth);
 
   useEffect(() => () => {
     const previewUrl = a4PreviewObjectUrlRef.current;
@@ -1647,7 +1669,7 @@ export function EditorClient({
     // dialog and makes its scroll position jump when Flip/No flip changes.
     setA4PreviewRenderError(null);
 
-    const sourceCanvas = artworkCanvasRef.current;
+    const sourceCanvas = a4PreviewSourceCanvas();
     if (!sourceCanvas) {
       setA4PreviewRenderPending(false);
       setA4PreviewRenderError("The graph image is not ready for preview yet.");
@@ -1707,7 +1729,7 @@ export function EditorClient({
       cancelled = true;
       finishPreviewOnce({ cancelled: true });
     };
-  }, [a4PreviewBackgroundId, a4PreviewBorderId, a4PreviewRepeatMode, dragPreviewSourceId, isA4PreviewDialogOpen, processing, settings.graphWidth, title]);
+  }, [a4PreviewBackgroundId, a4PreviewBorderId, a4PreviewRepeatMode, currentVerticalSplitSignature, dragPreviewSourceId, isA4PreviewDialogOpen, processing, settings.graphWidth, title]);
 
   const beginGraphInteraction = useCallback(() => {
     const now = performance.now();
@@ -2033,15 +2055,31 @@ export function EditorClient({
     [fillRegions, pushUndoSettings],
   );
   const updateSetting = useCallback(<K extends keyof GraphSettings>(key: K, value: GraphSettings[K]) => {
+    if (key === "verticalSplits") {
+      const current = settingsRef.current;
+      const verticalSplits = normalizeVerticalSplits(value, current.graphWidth);
+      const next = { ...current, verticalSplits };
+      if (!pushUndoSettings(current, next)) return;
+      settingsRef.current = next;
+      setSettings(next);
+      return;
+    }
     setSettingsWithHistory((current) => ({ ...current, [key]: value }));
-  }, [setSettingsWithHistory]);
+  }, [pushUndoSettings, setSettingsWithHistory]);
   const restoreSettingsHistory = useCallback((direction: "undo" | "redo") => {
     const current = settingsRef.current;
     const history = settingsHistoryRef.current;
     const source = direction === "undo" ? history.undo : history.redo;
     const command = source.at(-1);
     if (!command) return;
-    const restored = deriveGraphSettings(applySettingsHistoryCommand(current, command, direction));
+    const applied = applySettingsHistoryCommand(current, command, direction);
+    const splitOnlyCommand = command.patches.every((patch) => patch.key === "verticalSplits");
+    const restored = splitOnlyCommand
+      ? {
+          ...current,
+          verticalSplits: normalizeVerticalSplits(applied.verticalSplits, current.graphWidth),
+        }
+      : deriveGraphSettings(applied);
 
     if (direction === "undo") {
       settingsHistoryRef.current = {
@@ -3219,6 +3257,7 @@ export function EditorClient({
 
   function layerHitsAtPoint(graphX: number, graphY: number): LayerHit[] {
     const current = settingsRef.current;
+    if (isGraphXInVerticalSplit(graphX, current.verticalSplits)) return [];
     const point = { x: graphX, y: graphY };
     const hits: LayerHit[] = [];
 
@@ -4112,6 +4151,9 @@ export function EditorClient({
     const x = Math.floor(((event.clientX - rect.left) * canvas.width) / rect.width);
     const y = Math.floor(((event.clientY - rect.top) * canvas.height) / rect.height);
     if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return null;
+    const current = settingsRef.current;
+    const graphX = (x / canvas.width) * current.graphWidth;
+    if (isGraphXInVerticalSplit(graphX, current.verticalSplits)) return null;
 
     const regionNumber = regionMap[y * canvas.width + x];
     return regionNumber ? fillRegionIdByMapIdRef.current.get(regionNumber) ?? null : null;
@@ -5067,7 +5109,9 @@ export function EditorClient({
     sourceTraceCanvasesRef.current = new Map();
     sourceTraceSigRef.current = new Map();
     processedCanvasRef.current = null;
+    processedVerticalSplitSignatureRef.current = null;
     artworkCanvasRef.current = null;
+    splitMaskedArtworkCacheRef.current = null;
     setProcessing(false);
     setFailedProcessingSignature(null);
     revokeObjectUrls(sourcePreviewObjectUrlsRef.current.values());
@@ -5297,10 +5341,12 @@ export function EditorClient({
     return traceCanvas;
   }
 
-  const currentProcessingSignature = useMemo(
-    () => buildProcessingSignature(settings),
-    [settings],
-  );
+  const cachedProcessingSignature = processingSignatureCacheRef.current;
+  const currentProcessingSignature = cachedProcessingSignature
+    && hasSameProcessingSettings(cachedProcessingSignature.settings, settings)
+    ? cachedProcessingSignature.signature
+    : buildProcessingSignature(settings);
+  processingSignatureCacheRef.current = { settings, signature: currentProcessingSignature };
 
   useEffect(() => {
     if (!draftChecked) return;
@@ -5384,8 +5430,9 @@ export function EditorClient({
 
   useEffect(() => {
     if (!draftChecked) return;
-    if (settings.sourceImages.length && (!sourceLoadSettled || !sourceReady)) return;
-    if (settings.clipartImages.length && (!clipartLoadSettled || !clipartReady)) return;
+    const processingSettings = settingsRef.current;
+    if (processingSettings.sourceImages.length && (!sourceLoadSettled || !sourceReady)) return;
+    if (processingSettings.clipartImages.length && (!clipartLoadSettled || !clipartReady)) return;
     let cancelled = false;
     const controller = new AbortController();
     activeProcessingAbortRef.current = controller;
@@ -5447,7 +5494,7 @@ export function EditorClient({
       }
       setProcessing(true);
       const startAt = performance.now();
-      const layouts = sourceLayouts(settings.sourceImages);
+      const layouts = sourceLayouts(processingSettings.sourceImages);
       const sourceLayers = layouts
         .filter((layout) => layout.source.visible !== false && sourceCanvasesRef.current.has(layout.source.id))
         .map((layout) => {
@@ -5458,7 +5505,7 @@ export function EditorClient({
           return {
             id: fillRegionLayerScope("source", layout.source.id),
             canvas: sourceCanvas,
-            settings: sourceSettings(settings, layout.source),
+            settings: sourceSettings(processingSettings, layout.source),
             vectorize: layout.source.vectorize !== false,
             eraseStrokes: layout.source.eraseStrokes,
             vectorizerSource: {
@@ -5476,26 +5523,26 @@ export function EditorClient({
                 rotationDegrees: layout.source.rotationDegrees,
                 flipX: layout.source.flipX,
                 flipY: layout.source.flipY,
-                offsetX: settings.imageOffsetX,
-                offsetY: settings.imageOffsetY,
+                offsetX: processingSettings.imageOffsetX,
+                offsetY: processingSettings.imageOffsetY,
               },
             },
             vectorizerCacheKey: sourceVectorizerCacheKey(layout.source),
             processingCacheKey: [
               sourceProcessingCacheKey(layout.source, layout),
-              settings.imageOffsetX,
-              settings.imageOffsetY,
-              settings.graphWidth,
-              settings.graphHeight,
+              processingSettings.imageOffsetX,
+              processingSettings.imageOffsetY,
+              processingSettings.graphWidth,
+              processingSettings.graphHeight,
             ].join("|"),
           };
         });
-      const clipartLayers = settings.clipartImages
+      const clipartLayers = processingSettings.clipartImages
         .filter((clipart) => clipart.visible !== false && clipartCanvasesRef.current.has(clipart.assetId))
         .map((clipart) => {
           const sourceCanvas = clipartCanvasesRef.current.get(clipart.assetId);
           if (!sourceCanvas) throw new Error(`${clipart.name} is not available.`);
-          const asset = settings.clipartAssets.find((candidate) => candidate.id === clipart.assetId);
+          const asset = processingSettings.clipartAssets.find((candidate) => candidate.id === clipart.assetId);
           return {
             id: fillRegionLayerScope("clipart", clipart.id),
             canvas: sourceCanvas,
@@ -5525,9 +5572,9 @@ export function EditorClient({
         tier: EDITOR_PREVIEW_POLICY.tier,
       });
       const renderSettings = deriveGraphSettings({
-        ...settings,
-        imageWidth: settings.graphWidth,
-        imageHeight: settings.graphHeight,
+        ...processingSettings,
+        imageWidth: processingSettings.graphWidth,
+        imageHeight: processingSettings.graphHeight,
       });
       const documentRevision = ++renderRequestRevisionRef.current;
       void pixelateLayeredImagesWithWorker(layers, renderSettings, {
@@ -5626,12 +5673,21 @@ export function EditorClient({
           }
 
           artworkCanvasRef.current = result.canvas;
+          splitMaskedArtworkCacheRef.current = null;
           // Rebuild the flattened image (backdrop + grid + artwork) so export/save
           // and the processed-PNG upload keep the exact output they had before the
           // grid became a live SVG overlay. Skip during drag drafts; export/save
           // wait for the settled full render, which flattens.
           if (!dragActive) {
-            processedCanvasRef.current = flattenGraphForOutput(result.canvas, renderSettings);
+            const outputSettings = {
+              ...renderSettings,
+              verticalSplits: currentSettings.verticalSplits,
+            };
+            processedCanvasRef.current = flattenGraphForOutput(result.canvas, outputSettings);
+            processedVerticalSplitSignatureRef.current = verticalSplitSignature(
+              outputSettings.verticalSplits,
+              outputSettings.graphWidth,
+            );
             lastProcessedSignatureRef.current = processingSignature;
             processedRevisionRef.current += 1;
             setInitialCanvasReadyProjectId(project.id);
@@ -5691,7 +5747,7 @@ export function EditorClient({
     isDraggingGraph,
     project.id,
     renderKey,
-    settings,
+    settingsRef,
     sourceLoadSettled,
     sourceReady,
   ]);
@@ -6509,6 +6565,21 @@ export function EditorClient({
     }
   }
 
+  function ensureProcessedCanvasForSettings(nextSettings: GraphSettings) {
+    const artwork = artworkCanvasRef.current;
+    if (!artwork) return processedCanvasRef.current;
+    const splitSignature = verticalSplitSignature(nextSettings.verticalSplits, nextSettings.graphWidth);
+    if (processedCanvasRef.current && processedVerticalSplitSignatureRef.current === splitSignature) {
+      return processedCanvasRef.current;
+    }
+
+    const flattened = flattenGraphForOutput(artwork, nextSettings);
+    processedCanvasRef.current = flattened;
+    processedVerticalSplitSignatureRef.current = splitSignature;
+    processedRevisionRef.current += 1;
+    return flattened;
+  }
+
   function saveSessionDraft(message: string, tone: Notice["tone"] = "ok") {
     try {
       const canvas = processedCanvasRef.current;
@@ -6572,7 +6643,7 @@ export function EditorClient({
     nextSettings: GraphSettings,
     options: { uploadProcessedImage?: boolean; fallbackMessage?: string } = {},
   ) {
-    const canvas = processedCanvasRef.current;
+    const canvas = ensureProcessedCanvasForSettings(nextSettings);
     const result = await saveProjectState({
       projectId: project.id,
       title: title.trim(),
@@ -6730,7 +6801,7 @@ export function EditorClient({
       setNotice({ tone: "info", text: "Finishing the canvas update before exporting." });
       return;
     }
-    const canvas = processedCanvasRef.current;
+    const canvas = ensureProcessedCanvasForSettings(settingsRef.current);
     if (!canvas) return;
     const finishExport = startGraphPerformanceStage("export", { format: "png", width: canvas.width, height: canvas.height });
     void import("@/lib/canvas/exports")
@@ -6742,7 +6813,23 @@ export function EditorClient({
       });
   }
 
+  function openGraphOutputLogoPicker(action: GraphOutputAction) {
+    if (action === "pdf") {
+      if (!ensurePdfOutputReady()) return;
+    } else if (processing || dragPreviewSourceId) {
+      setNotice({ tone: "info", text: "Finishing the canvas update before printing." });
+      return;
+    }
+
+    setSelectedGraphOutputLogoId(null);
+    window.requestAnimationFrame(() => setGraphOutputLogoAction(action));
+  }
+
   function exportPDF() {
+    openGraphOutputLogoPicker("pdf");
+  }
+
+  function generatePDF(logoId: GraphExportLogoId) {
     if (!ensurePdfOutputReady()) return;
     // PDF/print draw the grid as crisp vectors over the transparent artwork,
     // so they take the artwork-only canvas (not the flattened, grid-baked one).
@@ -6750,7 +6837,7 @@ export function EditorClient({
     if (!canvas) return;
     const finishExport = startGraphPerformanceStage("export", { format: "pdf", width: canvas.width, height: canvas.height });
     void import("@/lib/canvas/exports")
-      .then(({ exportCanvasAsPDF }) => exportCanvasAsPDF(canvas, `${filename}.pdf`, settings))
+      .then(({ exportCanvasAsPDF }) => exportCanvasAsPDF(canvas, `${filename}.pdf`, settings, logoId))
       .then(() => finishExport({ completed: true }))
       .catch((error) => {
         finishExport({ failed: true });
@@ -6759,6 +6846,10 @@ export function EditorClient({
   }
 
   function printGraph() {
+    openGraphOutputLogoPicker("print");
+  }
+
+  function generatePrint(logoId: GraphExportLogoId) {
     if (processing || dragPreviewSourceId) {
       setNotice({ tone: "info", text: "Finishing the canvas update before printing." });
       return;
@@ -6768,12 +6859,26 @@ export function EditorClient({
     if (!canvas) return;
     const finishExport = startGraphPerformanceStage("export", { format: "print", width: canvas.width, height: canvas.height });
     void import("@/lib/canvas/exports")
-      .then(({ printCanvas }) => printCanvas(canvas, settings, title || "Graph pixel chart"))
+      .then(({ printCanvas }) => printCanvas(canvas, settings, title || "Graph pixel chart", logoId))
       .then(() => finishExport({ completed: true }))
       .catch((error) => {
         finishExport({ failed: true });
         setNotice({ tone: "error", text: error instanceof Error ? error.message : "Unable to open print view." });
       });
+  }
+
+  function closeGraphOutputLogoPicker() {
+    setGraphOutputLogoAction(null);
+    setSelectedGraphOutputLogoId(null);
+  }
+
+  function confirmGraphOutputLogo() {
+    const action = graphOutputLogoAction;
+    const logoId = selectedGraphOutputLogoId;
+    if (!action || !logoId) return;
+    closeGraphOutputLogoPicker();
+    if (action === "pdf") generatePDF(logoId);
+    else generatePrint(logoId);
   }
 
   function openGraphPreview() {
@@ -6800,7 +6905,27 @@ export function EditorClient({
     // Unlike standard PNG/save output, A4 Preview deliberately takes the
     // transparent artwork layer. The preview generator paints its paper
     // backdrop but never adds the editor's graph grid lines.
-    return artworkCanvasRef.current;
+    const source = artworkCanvasRef.current;
+    if (!source) return null;
+    const current = settingsRef.current;
+    const ranges = verticalSplitPixelRanges(current.verticalSplits, current.graphWidth, source.width);
+    if (!ranges.length) return source;
+
+    const signature = verticalSplitSignature(current.verticalSplits, current.graphWidth);
+    const cached = splitMaskedArtworkCacheRef.current;
+    if (cached?.source === source && cached.signature === signature) return cached.canvas;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = source.width;
+    canvas.height = source.height;
+    const context = canvas.getContext("2d");
+    if (!context) return source;
+    context.drawImage(source, 0, 0);
+    for (const range of ranges) {
+      context.clearRect(range.startX, 0, range.endX - range.startX, canvas.height);
+    }
+    splitMaskedArtworkCacheRef.current = { source, signature, canvas };
+    return canvas;
   }
 
   function downloadGraphPreview() {
@@ -10238,6 +10363,72 @@ export function EditorClient({
                 <Printer size={16} aria-hidden="true" />
                 Print
               </button>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {graphOutputLogoAction
+        ? createPortal(
+            <div
+              className="editor-output-logo-backdrop"
+              role="presentation"
+              onPointerDown={(event) => {
+                if (event.target === event.currentTarget) closeGraphOutputLogoPicker();
+              }}
+            >
+              <section
+                className="editor-output-logo-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="output-logo-title"
+                aria-describedby="output-logo-description"
+              >
+                <header>
+                  <div>
+                    <span>{graphOutputLogoAction === "pdf" ? "PDF export" : "Print preview"}</span>
+                    <h2 id="output-logo-title">Choose a logo</h2>
+                    <p id="output-logo-description">
+                      Select one logo before continuing. Every graph cell keeps its configured real-world size (1 cm by default).
+                    </p>
+                  </div>
+                  <button type="button" onClick={closeGraphOutputLogoPicker} aria-label="Close logo options">
+                    <X size={18} aria-hidden="true" />
+                  </button>
+                </header>
+                <div className="editor-output-logo-grid" role="radiogroup" aria-label="Graph logo">
+                  {GRAPH_EXPORT_LOGO_OPTIONS.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={selectedGraphOutputLogoId === option.id}
+                      className={`editor-output-logo-option${selectedGraphOutputLogoId === option.id ? " is-selected" : ""}`}
+                      onClick={() => setSelectedGraphOutputLogoId(option.id)}
+                    >
+                      <span className="editor-output-logo-option__preview">
+                        <img src={option.path} alt="" />
+                      </span>
+                      <span>
+                        <strong>{option.label}</strong>
+                        <small>{option.description}</small>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <footer>
+                  <button type="button" onClick={closeGraphOutputLogoPicker}>Cancel</button>
+                  <button
+                    type="button"
+                    className="editor-output-logo-continue"
+                    onClick={confirmGraphOutputLogo}
+                    disabled={!selectedGraphOutputLogoId}
+                  >
+                    {graphOutputLogoAction === "pdf" ? <FileText size={16} aria-hidden="true" /> : <Printer size={16} aria-hidden="true" />}
+                    {graphOutputLogoAction === "pdf" ? "Generate PDF" : "Open print preview"}
+                  </button>
+                </footer>
+              </section>
             </div>,
             document.body,
           )

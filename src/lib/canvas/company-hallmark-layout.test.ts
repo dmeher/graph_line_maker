@@ -17,12 +17,12 @@ test("the first-column second-row page reserves a dedicated hallmark lane withou
 
   assert.deepEqual([firstColumnSecondRow.tileX, firstColumnSecondRow.tileY], [0, 1]);
   assert.ok(hallmark);
-  assert.equal(firstColumnSecondRow.destinationXMm, 40);
-  assert.equal(firstColumnSecondRow.destinationWidthMm, 160);
+  assert.equal(firstColumnSecondRow.destinationXMm, 70);
+  assert.equal(firstColumnSecondRow.destinationWidthMm, 130);
   assert.equal(firstColumnSecondRow.destinationXMm + firstColumnSecondRow.destinationWidthMm, 200);
   assert.equal(hallmark.xMm, 4);
-  assert.equal(hallmark.widthMm, 26.5);
-  assert.ok(hallmark.xMm + hallmark.widthMm + 3 <= firstColumnSecondRow.destinationXMm - 26 * (160 / 640));
+  assert.equal(hallmark.widthMm, 55);
+  assert.ok(hallmark.xMm + hallmark.widthMm + 3 <= firstColumnSecondRow.destinationXMm - 26 * (130 / 520));
   assert.ok(hallmark.yMm >= firstColumnSecondRow.destinationYMm);
   assert.ok(hallmark.yMm + hallmark.heightMm <= firstColumnSecondRow.destinationYMm + firstColumnSecondRow.destinationHeightMm);
 });

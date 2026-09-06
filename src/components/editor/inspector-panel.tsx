@@ -24,11 +24,14 @@ import {
   MousePointer2,
   Palette,
   Printer,
+  Plus,
   RefreshCw,
   Ruler,
+  Scissors,
   Search,
   Settings2,
   Shapes,
+  Trash2,
   Unlock,
   Upload,
 } from "lucide-react";
@@ -57,10 +60,12 @@ import type {
   GraphShapeDrawing,
   GraphShapeKind,
   GraphSourceImage,
+  GraphVerticalSplit,
   MeasurementUnit,
   PaletteColor,
 } from "@/lib/types";
 import type { FillRegion } from "@/lib/canvas/processor";
+import { normalizeVerticalSplits } from "@/lib/canvas/vertical-splits";
 import {
   DEFAULT_CELL_SIZE_CM,
   DEFAULT_PRINT_PAPER_SIZE,
@@ -301,6 +306,98 @@ function FocusConsoleShelfPanel({
     >
       {children}
     </section>
+  );
+}
+
+function VerticalSplitControls({
+  graphWidth,
+  splits,
+  onChange,
+}: {
+  graphWidth: number;
+  splits: GraphVerticalSplit[];
+  onChange: (splits: GraphVerticalSplit[]) => void;
+}) {
+  const [draftStartCell, setDraftStartCell] = useState(1);
+  const [draftEndCell, setDraftEndCell] = useState(1);
+  const canAddSplit = graphWidth >= 3;
+
+  function addSplit() {
+    if (!canAddSplit) return;
+    onChange(normalizeVerticalSplits([
+      ...splits,
+      { startCell: draftStartCell, endCell: draftEndCell },
+    ], graphWidth));
+  }
+
+  function removeSplit(index: number) {
+    onChange(splits.filter((_, splitIndex) => splitIndex !== index));
+  }
+
+  return (
+    <div className="grid gap-3">
+      <p className="text-xs leading-5 text-[var(--editor-text-dim)]">
+        Enter inclusive grid numbers to replace with blank space. Grid number 1 starts after the left 1 cm gutter; reversed ranges work automatically.
+      </p>
+      <InspectorFieldGrid>
+        <NumberField
+          label="Start column"
+          unit="no."
+          value={draftStartCell}
+          min={1}
+          max={Number.MAX_SAFE_INTEGER}
+          wholeStep
+          inputClassName={inspectorControlClass}
+          onChange={setDraftStartCell}
+        />
+        <NumberField
+          label="End column"
+          unit="no."
+          value={draftEndCell}
+          min={1}
+          max={Number.MAX_SAFE_INTEGER}
+          wholeStep
+          inputClassName={inspectorControlClass}
+          onChange={setDraftEndCell}
+        />
+      </InspectorFieldGrid>
+      <button
+        type="button"
+        onClick={addSplit}
+        disabled={!canAddSplit}
+        className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-[var(--editor-control-border)] bg-[var(--editor-control-bg)] px-3 text-xs font-semibold text-[var(--editor-text)] transition hover:bg-[var(--editor-control-hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <Plus size={14} aria-hidden="true" />
+        Add blank range
+      </button>
+      {splits.length ? (
+        <ul className="grid gap-1.5" aria-label="Vertical split ranges">
+          {splits.map((split, index) => (
+            <li
+              key={`${split.startCell}-${split.endCell}`}
+              className="flex min-h-9 items-center justify-between gap-3 rounded-md border border-[var(--editor-line-soft)] bg-[var(--editor-panel-2)] px-2.5 text-xs text-[var(--editor-text)]"
+            >
+              <span>
+                Blank {split.startCell === split.endCell ? `grid no. ${split.startCell}` : `grid nos. ${split.startCell}-${split.endCell}`}
+              </span>
+              <button
+                type="button"
+                onClick={() => removeSplit(index)}
+                className="grid h-7 w-7 shrink-0 place-items-center rounded text-[var(--editor-text-dim)] transition hover:bg-[var(--editor-control-hover-bg)] hover:text-[var(--editor-danger)]"
+                title={`Remove blank grid numbers ${split.startCell} to ${split.endCell}`}
+                aria-label={`Remove blank grid numbers ${split.startCell} to ${split.endCell}`}
+              >
+                <Trash2 size={14} aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-[11px] text-[var(--editor-muted)]">
+          {canAddSplit ? "No blank ranges." : "This graph has no numbered interior cells to split."}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -1258,6 +1355,19 @@ export function InspectorPanel(props: InspectorPanelProps) {
                   onChange={updateImageHeightPhysical}
                 />
               </InspectorFieldGrid>
+            </InspectorGroup>
+
+            <InspectorGroup
+              title="Vertical splits"
+              tabLabel="Splits"
+              icon={<Scissors size={15} aria-hidden="true" />}
+              priority="quiet"
+            >
+              <VerticalSplitControls
+                graphWidth={settings.graphWidth}
+                splits={settings.verticalSplits}
+                onChange={(verticalSplits) => updateSetting("verticalSplits", verticalSplits)}
+              />
             </InspectorGroup>
 
             <InspectorGroup title="Grid" icon={<Grid3X3 size={15} aria-hidden="true" />}>

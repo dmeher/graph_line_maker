@@ -84,6 +84,10 @@ const vectorizerLineAdjustSchema = z
     "Line adjustment must use 0.5 pixel steps.",
   );
 const groupIdSchema = z.string().min(1).max(80).nullable().optional();
+const verticalSplitSchema = z.object({
+  startCell: z.number().int().min(1).max(MAX_GRAPH_WIDTH_CELLS - 2),
+  endCell: z.number().int().min(1).max(MAX_GRAPH_WIDTH_CELLS - 2),
+});
 
 function isProjectScopedAssetPath(path: string | null | undefined, userId: string, projectId: string): path is string {
   if (!path || !path.startsWith(`${userId}/${projectId}/`)) return false;
@@ -233,6 +237,7 @@ const clipartImageSchema = z.object({
 const graphSettingsSchema = z.object({
   graphWidth: z.number().int().min(1).max(MAX_GRAPH_WIDTH_CELLS),
   graphHeight: z.number().int().min(1).max(MAX_GRAPH_HEIGHT_CELLS),
+  verticalSplits: z.array(verticalSplitSchema).max(MAX_GRAPH_WIDTH_CELLS - 2),
   cellWidth: z.number().int().min(1).max(240),
   cellHeight: z.number().int().min(1).max(240),
   cellSizeCm: z.number().min(0.05).max(100),
@@ -294,6 +299,15 @@ const graphSettingsSchema = z.object({
   limitedColorMode: z.boolean(),
   maxColors: z.union([z.literal(2), z.literal(4), z.literal(8), z.literal(16)]),
 }).superRefine((settings, context) => {
+  for (const [index, split] of settings.verticalSplits.entries()) {
+    if (split.startCell > settings.graphWidth - 2 || split.endCell > settings.graphWidth - 2) {
+      context.addIssue({
+        code: "custom",
+        path: ["verticalSplits", index],
+        message: "Vertical split ranges must stay inside the numbered graph cells.",
+      });
+    }
+  }
   const visibleLayers =
     settings.sourceImages.filter((source) => source.visible).length +
     settings.clipartImages.filter((clipart) => clipart.visible).length;

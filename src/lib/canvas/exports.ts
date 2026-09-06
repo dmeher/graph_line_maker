@@ -14,6 +14,11 @@ import {
   type GridBucket,
 } from "@/lib/canvas/grid-style";
 import { createInteriorGridNumberLabels } from "@/lib/canvas/grid-numbering";
+import {
+  isCellInVerticalSplit,
+  verticalSplitBoundaryPixelPositions,
+  verticalSplitPixelRanges,
+} from "@/lib/canvas/vertical-splits";
 import type { GraphSettings, PaletteColor } from "@/lib/types";
 import type { PdfExportTile } from "@/lib/canvas/pdf-layout";
 
@@ -81,10 +86,12 @@ function getOutsideGridNumberLines(settings: GraphSettings): OutsideGridNumberLi
   const graphWidthPx = graphWidth * GRAPH_MAJOR_CELL_PIXELS;
   const graphHeightPx = graphHeight * GRAPH_MAJOR_CELL_PIXELS;
 
-  const topBottomLabels = createInteriorGridNumberLabels(graphWidth).map((label) => ({
-    value: label.value,
-    x: Math.round((label.cell - 0.5) * GRAPH_MAJOR_CELL_PIXELS),
-  }));
+  const topBottomLabels = createInteriorGridNumberLabels(graphWidth)
+    .filter((label) => !isCellInVerticalSplit(label.value, settings.verticalSplits ?? []))
+    .map((label) => ({
+      value: label.value,
+      x: Math.round((label.cell - 0.5) * GRAPH_MAJOR_CELL_PIXELS),
+    }));
   const leftRightLabels = createInteriorGridNumberLabels(graphHeight).map((label) => ({
     value: label.value,
     y: Math.round((label.cell - 1 + LEFT_RIGHT_OUTSIDE_Y_OFFSET) * GRAPH_MAJOR_CELL_PIXELS),
@@ -330,6 +337,101 @@ function createPrintGridSvg(tile: PdfExportTile, settings: GraphSettings, canvas
   return `<svg class="print-grid" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${widthMm}mm;height:${heightMm}mm;z-index:${zIndex}" viewBox="0 0 ${widthMm} ${heightMm}" preserveAspectRatio="none">${paths}</svg>`;
 }
 
+type TileVerticalSplitRect = {
+  xMm: number;
+  yMm: number;
+  widthMm: number;
+  heightMm: number;
+};
+
+function tileVerticalSplitRects(
+  tile: PdfExportTile,
+  settings: GraphSettings,
+  canvasWidth: number,
+): TileVerticalSplitRect[] {
+  const xScale = tile.sourceWidth > 0 ? tile.destinationWidthMm / tile.sourceWidth : 0;
+  if (xScale === 0) return [];
+
+  return verticalSplitPixelRanges(settings.verticalSplits ?? [], settings.graphWidth, canvasWidth).flatMap((range) => {
+    const startX = Math.max(range.startX, tile.sourceX);
+    const endX = Math.min(range.endX, tile.sourceX + tile.sourceWidth);
+    if (endX <= startX) return [];
+    return [{
+      xMm: tile.destinationXMm + (startX - tile.sourceX) * xScale,
+      yMm: tile.destinationYMm,
+      widthMm: (endX - startX) * xScale,
+      heightMm: tile.destinationHeightMm,
+    }];
+  });
+}
+
+function drawVerticalSplitBlanksToPdfPage(
+  pdf: import("jspdf").jsPDF,
+  tile: PdfExportTile,
+  settings: GraphSettings,
+  canvasWidth: number,
+) {
+  const rects = tileVerticalSplitRects(tile, settings, canvasWidth);
+  if (!rects.length) return;
+  pdf.setGState(pdf.GState({ opacity: 1 }));
+  pdf.setFillColor(255, 255, 255);
+  for (const rect of rects) pdf.rect(rect.xMm, rect.yMm, rect.widthMm, rect.heightMm, "F");
+}
+
+function tileVerticalSplitBoundaryPositions(
+  tile: PdfExportTile,
+  settings: GraphSettings,
+  canvasWidth: number,
+) {
+  const xScale = tile.sourceWidth > 0 ? tile.destinationWidthMm / tile.sourceWidth : 0;
+  if (xScale === 0) return [];
+  return verticalSplitBoundaryPixelPositions(settings.verticalSplits ?? [], settings.graphWidth, canvasWidth)
+    .filter((position) => position >= tile.sourceX - 0.5 && position <= tile.sourceX + tile.sourceWidth + 0.5)
+    .map((position) => tile.destinationXMm + (position - tile.sourceX) * xScale);
+}
+
+function drawVerticalSplitBoundariesToPdfPage(
+  pdf: import("jspdf").jsPDF,
+  tile: PdfExportTile,
+  settings: GraphSettings,
+  canvasWidth: number,
+) {
+  const positions = tileVerticalSplitBoundaryPositions(tile, settings, canvasWidth);
+  if (!positions.length) return;
+  const base = Math.max(1, Math.min(10, Math.round(settings.gridLineThickness || 1)));
+  const widthMm = GRID_BUCKET_WIDTH_UNITS.major * base * gridUnitMm(settings.cellSizeCm ?? 1);
+  const [red, green, blue] = hexToRgbTuple(settings.gridLineColor || "#dc2626");
+  pdf.setGState(pdf.GState({ opacity: GRID_BUCKET_OPACITY.major }));
+  pdf.setDrawColor(red, green, blue);
+  pdf.setLineCap("butt");
+  pdf.setLineWidth(widthMm);
+  for (const x of positions) {
+    pdf.line(x, tile.destinationYMm, x, tile.destinationYMm + tile.destinationHeightMm);
+  }
+  pdf.setGState(pdf.GState({ opacity: 1 }));
+}
+
+function createPrintVerticalSplitBlanks(tile: PdfExportTile, settings: GraphSettings, canvasWidth: number) {
+  return tileVerticalSplitRects(tile, settings, canvasWidth)
+    .map(
+      (rect) =>
+        `<span class="print-vertical-split" style="left:${rect.xMm}mm;top:${rect.yMm}mm;width:${rect.widthMm}mm;height:${rect.heightMm}mm"></span>`,
+    )
+    .join("");
+}
+
+function createPrintVerticalSplitBoundaries(tile: PdfExportTile, settings: GraphSettings, canvasWidth: number) {
+  const positions = tileVerticalSplitBoundaryPositions(tile, settings, canvasWidth);
+  if (!positions.length) return "";
+  const base = Math.max(1, Math.min(10, Math.round(settings.gridLineThickness || 1)));
+  const widthMm = GRID_BUCKET_WIDTH_UNITS.major * base * gridUnitMm(settings.cellSizeCm ?? 1);
+  const color = escapeHtml(settings.gridLineColor || "#dc2626");
+  const path = positions
+    .map((position) => `M${position - tile.destinationXMm} 0V${tile.destinationHeightMm}`)
+    .join("");
+  return `<svg class="print-vertical-split-boundaries" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" viewBox="0 0 ${tile.destinationWidthMm} ${tile.destinationHeightMm}" preserveAspectRatio="none"><path d="${path}" stroke="${color}" stroke-width="${widthMm}" stroke-opacity="1" fill="none" /></svg>`;
+}
+
 function canvasToObjectUrl(canvas: HTMLCanvasElement, type = "image/png") {
   return new Promise<string>((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -495,6 +597,8 @@ export async function exportCanvasAsPDF(canvas: HTMLCanvasElement, filename: str
         tile.destinationHeightMm,
       );
       if (settings.gridLineLayer !== "back") drawGridLinesToPdfPage(pdf, tile, settings, canvas.width, canvas.height);
+      drawVerticalSplitBlanksToPdfPage(pdf, tile, settings, canvas.width);
+      drawVerticalSplitBoundariesToPdfPage(pdf, tile, settings, canvas.width);
       if (outsideGridNumberLines) {
         addOutsideGridNumbersToPdfPage(pdf, tile, outsideGridNumberLines, graphWidthPx, graphHeightPx);
       }
@@ -576,7 +680,9 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
       // artwork image, so grid lines print sharp at any scale instead of blurring.
       const backdrop = `<span class="print-bg" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm;background:${backgroundColor}"></span>`;
       const gridSvg = createPrintGridSvg(tile, settings, canvas.width, canvas.height, gridZIndex);
-      pages.push(`<section class="page">${backdrop}${gridSvg}<img class="print-art" src="${imageUrl}" alt="" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" />${hallmarkImage}${gridNumberSpans}${cutGuides}</section>`);
+      const verticalSplitBlanks = createPrintVerticalSplitBlanks(tile, settings, canvas.width);
+      const verticalSplitBoundaries = createPrintVerticalSplitBoundaries(tile, settings, canvas.width);
+      pages.push(`<section class="page">${backdrop}${gridSvg}<img class="print-art" src="${imageUrl}" alt="" style="left:${tile.destinationXMm}mm;top:${tile.destinationYMm}mm;width:${tile.destinationWidthMm}mm;height:${tile.destinationHeightMm}mm" />${verticalSplitBlanks}${verticalSplitBoundaries}${hallmarkImage}${gridNumberSpans}${cutGuides}</section>`);
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
   }
 
@@ -616,6 +722,8 @@ export async function printCanvas(canvas: HTMLCanvasElement, settings: GraphSett
       print-color-adjust: exact;
     }
     .print-art { z-index: 2; }
+    .print-vertical-split { position: absolute; z-index: 4; background: white; }
+    .print-vertical-split-boundaries { position: absolute; z-index: 5; overflow: visible; }
     .company-hallmark { position: absolute; z-index: 4; overflow: visible; }
     .company-hallmark img { transform: rotate(-90deg); transform-origin: center; object-fit: contain; }
     .cut-guide {
